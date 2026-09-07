@@ -1,5 +1,6 @@
 using BKE.Dna.Logger.Host.Capture;
 using BKE.Dna.Logger.Host.NativeMessaging;
+using BKE.Dna.Logger.Host.Reconciliation;
 using BKE.Dna.Logger.Host.Witness;
 
 namespace BKE.Dna.Logger.Host;
@@ -30,7 +31,12 @@ internal static class Program
         {
             using var captureStore = new CaptureStore(captureRoot);
             var witnessStore = new WitnessStore(captureRoot);
-            NativeMessageLoop.Run(Console.OpenStandardInput(), captureStore, witnessStore);
+            var reconciliation = new ReconciliationEngine(captureRoot);
+            NativeMessageLoop.Run(
+                Console.OpenStandardInput(),
+                captureStore,
+                witnessStore,
+                reconciliation);
             return 0;
         }
         catch (Exception error)
