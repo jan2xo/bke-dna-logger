@@ -6,6 +6,7 @@ namespace BKE.Dna.Logger.Host.Normalization;
 internal sealed class GraphNormalizationEngine
 {
     private const long MaxBodyBytes = 16L * 1024 * 1024;
+    private const string CoverageBasis = "structural_graph_closure_only";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -107,20 +108,118 @@ internal sealed class GraphNormalizationEngine
             .OrderBy(static parent => parent, StringComparer.Ordinal)
             .ToArray();
 
+        var unresolvedChildren = nodes
+            .SelectMany(static node => node.ChildNativeIds)
+            .Where(child => !knownNodeIds.Contains(child))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static child => child, StringComparer.Ordinal)
+            .ToArray();
+
         var conversationNativeId = TryGetScalarString(document.RootElement, "conversation_id");
         var currentNodeNativeId = TryGetScalarString(document.RootElement, "current_node");
+        var nodeById = nodes.ToDictionary(static node => node.NodeNativeId, StringComparer.Ordinal);
+
+        var rootFound = nodes.Any(static node => string.IsNullOrWhiteSpace(node.ParentNativeId));
+        var currentNodeFound = !string.IsNullOrWhiteSpace(currentNodeNativeId) &&
+                               nodeById.ContainsKey(currentNodeNativeId);
+        var currentLeafFound = currentNodeFound &&
+                               nodeById[currentNodeNativeId!].ChildNativeIds.Count == 0;
+        var (parentChainComplete, cycleDetected) = EvaluateParentChain(currentNodeNativeId, nodeById);
+
+        var coverageStatus = DetermineCoverageStatus(
+            nodes.Count,
+            currentNodeNativeId,
+            rootFound,
+            currentNodeFound,
+            currentLeafFound,
+            parentChainComplete,
+            cycleDetected,
+            unresolvedParents.Length,
+            unresolvedChildren.Length);
 
         var normalized = new NormalizedConversationGraph(
             sha256,
             "generic-mapping-graph-v0",
             conversationNativeId,
             currentNodeNativeId,
-            "unknown",
+            coverageStatus,
+            CoverageBasis,
+            rootFound,
+            currentNodeFound,
+            currentLeafFound,
+            parentChainComplete,
+            cycleDetected,
             unresolvedParents,
+            unresolvedChildren,
             nodes,
             DateTimeOffset.UtcNow.ToString("O"));
 
         File.WriteAllText(outputPath, JsonSerializer.Serialize(normalized, JsonOptions));
+    }
+
+    private static string DetermineCoverageStatus(
+        int nodeCount,
+        string? currentNodeNativeId,
+        bool rootFound,
+        bool currentNodeFound,
+        bool currentLeafFound,
+        bool parentChainComplete,
+        bool cycleDetected,
+        int unresolvedParentCount,
+        int unresolvedChildCount)
+    {
+        if (nodeCount == 0 || string.IsNullOrWhiteSpace(currentNodeNativeId))
+        {
+            return "indeterminate";
+        }
+
+        if (unresolvedParentCount > 0 || unresolvedChildCount > 0 ||
+            !currentNodeFound || !parentChainComplete || cycleDetected)
+        {
+            return "partial";
+        }
+
+        if (rootFound && currentLeafFound)
+        {
+            return "complete";
+        }
+
+        return "indeterminate";
+    }
+
+    private static (bool Complete, bool CycleDetected) EvaluateParentChain(
+        string? currentNodeNativeId,
+        IReadOnlyDictionary<string, NormalizedNode> nodeById)
+    {
+        if (string.IsNullOrWhiteSpace(currentNodeNativeId))
+        {
+            return (false, false);
+        }
+
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var cursor = currentNodeNativeId;
+
+        while (!string.IsNullOrWhiteSpace(cursor))
+        {
+            if (!visited.Add(cursor))
+            {
+                return (false, true);
+            }
+
+            if (!nodeById.TryGetValue(cursor, out var node))
+            {
+                return (false, false);
+            }
+
+            if (string.IsNullOrWhiteSpace(node.ParentNativeId))
+            {
+                return (true, false);
+            }
+
+            cursor = node.ParentNativeId;
+        }
+
+        return (false, false);
     }
 
     private static NormalizedNode ParseNode(string mappingNodeId, JsonElement node)
@@ -244,7 +343,14 @@ internal sealed class GraphNormalizationEngine
         string? ConversationNativeId,
         string? CurrentNodeNativeId,
         string CoverageStatus,
+        string CoverageBasis,
+        bool RootFound,
+        bool CurrentNodeFound,
+        bool CurrentLeafFound,
+        bool ParentChainComplete,
+        bool CycleDetected,
         IReadOnlyList<string> UnresolvedParentNativeIds,
+        IReadOnlyList<string> UnresolvedChildNativeIds,
         IReadOnlyList<NormalizedNode> Nodes,
         string NormalizedAt);
 
