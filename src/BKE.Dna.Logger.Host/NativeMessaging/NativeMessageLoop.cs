@@ -1,9 +1,9 @@
 using System.Buffers.Binary;
 using System.Text.Json;
+using BKE.Dna.Logger.Core.Protocol;
 using BKE.Dna.Logger.Host.Aggregation;
 using BKE.Dna.Logger.Host.Capture;
 using BKE.Dna.Logger.Host.Normalization;
-using BKE.Dna.Logger.Host.Protocol;
 using BKE.Dna.Logger.Host.Reconciliation;
 using BKE.Dna.Logger.Host.Storage;
 using BKE.Dna.Logger.Host.Witness;
@@ -13,7 +13,6 @@ namespace BKE.Dna.Logger.Host.NativeMessaging;
 internal static class NativeMessageLoop
 {
     private const int PrefixBytes = sizeof(uint);
-    private const int MaxMessageBytes = 2 * 1024 * 1024;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -35,7 +34,7 @@ internal static class NativeMessageLoop
         while (TryReadExactly(input, prefix))
         {
             var payloadLength = BinaryPrimitives.ReadUInt32LittleEndian(prefix);
-            if (payloadLength is 0 or > MaxMessageBytes)
+            if (payloadLength is 0 or > DnaWireProtocol.MaxMessageBytes)
             {
                 throw new InvalidDataException($"Native message length {payloadLength} is outside the allowed range.");
             }
@@ -64,22 +63,16 @@ internal static class NativeMessageLoop
         SqliteProjectionEngine? projection,
         ConversationSqliteProjectionEngine? conversationProjection)
     {
-        using var document = JsonDocument.Parse(payload);
-        if (!document.RootElement.TryGetProperty("type", out var typeElement))
-        {
-            throw new InvalidDataException("Native message has no type.");
-        }
-
-        var type = typeElement.GetString();
+        var type = DnaWireProtocol.ReadAndValidateType(payload.Span);
         switch (type)
         {
-            case "capture_start":
+            case DnaWireProtocol.CaptureStartType:
                 captureStore.Start(Deserialize<CaptureStart>(payload.Span));
                 break;
-            case "capture_chunk":
+            case DnaWireProtocol.CaptureChunkType:
                 captureStore.Append(Deserialize<CaptureChunk>(payload.Span));
                 break;
-            case "capture_end":
+            case DnaWireProtocol.CaptureEndType:
                 captureStore.End(Deserialize<CaptureEnd>(payload.Span));
                 TryNormalize(normalization);
                 aggregation.TryAggregateAll();
@@ -87,13 +80,11 @@ internal static class NativeMessageLoop
                 projection?.TryProjectAll();
                 conversationProjection?.TryProjectAll();
                 break;
-            case "dom_witness":
+            case DnaWireProtocol.DomWitnessType:
                 witnessStore.Record(Deserialize<DomWitness>(payload.Span));
                 TryReconcile(reconciliation);
                 projection?.TryProjectAll();
                 break;
-            default:
-                throw new InvalidDataException($"Unknown native message type '{type}'.");
         }
     }
 
