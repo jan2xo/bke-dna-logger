@@ -50,10 +50,19 @@ internal static class Program
             var aggregation = new ConversationAggregationEngine(captureRoot);
             aggregation.TryAggregateAll();
 
-            var projection = liveIndex is null
-                ? null
-                : new SqliteProjectionEngine(captureRoot, liveIndex.DatabasePath);
-            projection?.TryProjectAll();
+            SqliteProjectionEngine? projection = null;
+            ConversationSqliteProjectionEngine? conversationProjection = null;
+            if (liveIndex is not null)
+            {
+                projection = new SqliteProjectionEngine(captureRoot, liveIndex.DatabasePath);
+                projection.TryProjectAll();
+
+                if (ConversationSqliteSchema.TryUpgrade(liveIndex.DatabasePath))
+                {
+                    conversationProjection = new ConversationSqliteProjectionEngine(captureRoot, liveIndex.DatabasePath);
+                    conversationProjection.TryProjectAll();
+                }
+            }
 
             if (args.Length == 2 && string.Equals(args[0], "--archive", StringComparison.Ordinal))
             {
@@ -85,7 +94,8 @@ internal static class Program
                 reconciliation,
                 normalization,
                 aggregation,
-                projection);
+                projection,
+                conversationProjection);
             return 0;
         }
         catch (Exception error)
