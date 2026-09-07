@@ -49,6 +49,8 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Install .NET Android workload
         run: dotnet workload install android --skip-manifest-update
+      - name: Build stable GeckoView binding
+        run: dotnet build src/BKE.Dna.Logger.GeckoView.Bindings/BKE.Dna.Logger.GeckoView.Bindings.csproj --configuration Release -r android-arm64
       - name: Build Android APK foundation
         run: dotnet build src/BKE.Dna.Logger.Platform.Android/BKE.Dna.Logger.Platform.Android.csproj --configuration Release -r android-arm64
       - name: Android extension and shared protocol contract smoke
