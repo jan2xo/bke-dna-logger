@@ -1,3 +1,6 @@
+using BKE.Dna.Logger.Host.Capture;
+using BKE.Dna.Logger.Host.NativeMessaging;
+
 namespace BKE.Dna.Logger.Host;
 
 internal static class Program
@@ -12,7 +15,26 @@ internal static class Program
             return 0;
         }
 
-        Console.Error.WriteLine("BKE DNA Logger native host scaffold. Capture ingestion is provided by the next stacked change.");
-        return 0;
+        var captureRoot = Environment.GetEnvironmentVariable("BKE_DNA_CAPTURE_ROOT");
+        if (string.IsNullOrWhiteSpace(captureRoot))
+        {
+            captureRoot = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "BKE",
+                "DNA Logger",
+                "captures");
+        }
+
+        try
+        {
+            using var store = new CaptureStore(captureRoot);
+            NativeMessageLoop.Run(Console.OpenStandardInput(), store);
+            return 0;
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine($"BKE DNA native host failed: {error}");
+            return 1;
+        }
     }
 }

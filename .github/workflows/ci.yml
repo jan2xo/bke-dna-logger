@@ -19,3 +19,5 @@ jobs:
         run: dotnet build src/BKE.Dna.Logger.Host/BKE.Dna.Logger.Host.csproj --configuration Release
       - name: Smoke version
         run: dotnet run --project src/BKE.Dna.Logger.Host/BKE.Dna.Logger.Host.csproj --configuration Release --no-build -- --version
+      - name: Native Messaging evidence-store smoke
+        run: python3 tests/native-host-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
