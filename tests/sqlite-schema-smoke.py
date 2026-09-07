@@ -46,6 +46,11 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-sqlite-") as temp:
 
     connection = sqlite3.connect(database_path)
     try:
+        # SQLite foreign-key enforcement is connection-local. The .NET live index
+        # enables it when opening its connection; this separate verifier connection
+        # must enable it independently before testing enforcement.
+        connection.execute("PRAGMA foreign_keys = ON")
+
         tables = {
             row[0]
             for row in connection.execute(
@@ -72,7 +77,19 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-sqlite-") as temp:
 
         foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
         if foreign_keys != 1:
-            raise SystemExit("SQLite foreign_keys must be enabled")
+            raise SystemExit("verifier SQLite connection could not enable foreign keys")
+
+        observation_fks = connection.execute(
+            "PRAGMA foreign_key_list(capture_observation)"
+        ).fetchall()
+        if not any(row[2] == "raw_capture" for row in observation_fks):
+            raise SystemExit("capture_observation does not declare raw_capture foreign key")
+
+        durability_fks = connection.execute(
+            "PRAGMA foreign_key_list(durability_state)"
+        ).fetchall()
+        if not any(row[2] == "raw_capture" for row in durability_fks):
+            raise SystemExit("durability_state does not declare raw_capture foreign key")
 
         connection.execute(
             """
