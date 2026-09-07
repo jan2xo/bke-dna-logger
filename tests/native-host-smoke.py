@@ -58,10 +58,23 @@ def capture_messages(capture_id, body):
 
 conversation_capture_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
 config_capture_id = str(uuid.uuid4())
+witness_id = str(uuid.uuid4())
 messages = []
 for capture_id in conversation_capture_ids:
     messages.extend(capture_messages(capture_id, conversation_body))
 messages.extend(capture_messages(config_capture_id, config_body))
+messages.append(
+    {
+        "type": "dom_witness",
+        "witnessId": witness_id,
+        "pageUrl": "https://chatgpt.com/c/example",
+        "observedAt": "2026-09-07T00:00:01.000Z",
+        "snippets": [
+            "GO ATTACK BRO",
+            "This visible text sample exists only as corroborating DOM evidence.",
+        ],
+    }
+)
 wire = b"".join(frame(message) for message in messages)
 
 with tempfile.TemporaryDirectory(prefix="bke-dna-") as temp:
@@ -128,5 +141,14 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-") as temp:
     classification_files = list((root / "classifications").glob("*.json"))
     if len(classification_files) != 2:
         raise SystemExit(f"classification should deduplicate by body hash, found {len(classification_files)} files")
+
+    witness_path = root / "witnesses" / f"{witness_id}.json"
+    witness = json.loads(witness_path.read_text(encoding="utf-8"))
+    if witness["pageUrl"] != "https://chatgpt.com/c/example":
+        raise SystemExit("DOM witness page URL mismatch")
+    if "GO ATTACK BRO" not in witness["snippets"]:
+        raise SystemExit("DOM witness lost visible conversation sample")
+    if len(witness["fingerprintSha256"]) != 64:
+        raise SystemExit("DOM witness fingerprint is not SHA-256")
 
 print("native host smoke PASS")
