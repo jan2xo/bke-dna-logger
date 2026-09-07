@@ -19,7 +19,7 @@ public static class DnaWireProtocol
                 $"DNA wire message length {utf8Json.Length} is outside the allowed range.");
         }
 
-        using var document = JsonDocument.Parse(utf8Json);
+        using var document = JsonDocument.Parse(utf8Json.ToArray());
         if (!document.RootElement.TryGetProperty("type", out var typeElement))
         {
             throw new InvalidDataException("DNA wire message has no type.");
