@@ -14,8 +14,10 @@ if len(sys.argv) != 2:
     raise SystemExit("usage: native-host-smoke.py <host-dll>")
 
 host_dll = Path(sys.argv[1]).resolve()
-body = b'{"mapping":{"a":{"message":{"author":{"role":"user"},"content":{"parts":["GO ATTACK BRO"]}}}}}'
-expected_sha = hashlib.sha256(body).hexdigest()
+conversation_body = b'{"mapping":{"a":{"parent":null,"children":[],"message":{"author":{"role":"user"},"content":{"parts":["GO ATTACK BRO"]}}}}}'
+config_body = b'{"flags":{"new_navigation":true,"experiment_bucket":"A"},"account":{"tier":"test"}}'
+conversation_sha = hashlib.sha256(conversation_body).hexdigest()
+config_sha = hashlib.sha256(config_body).hexdigest()
 
 
 def frame(message):
@@ -23,7 +25,7 @@ def frame(message):
     return struct.pack("<I", len(payload)) + payload
 
 
-def capture_messages(capture_id):
+def capture_messages(capture_id, body):
     midpoint = len(body) // 2
     chunks = [body[:midpoint], body[midpoint:]]
     messages = [
@@ -54,8 +56,13 @@ def capture_messages(capture_id):
     return messages
 
 
-capture_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
-wire = b"".join(frame(message) for capture_id in capture_ids for message in capture_messages(capture_id))
+conversation_capture_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+config_capture_id = str(uuid.uuid4())
+messages = []
+for capture_id in conversation_capture_ids:
+    messages.extend(capture_messages(capture_id, conversation_body))
+messages.extend(capture_messages(config_capture_id, config_body))
+wire = b"".join(frame(message) for message in messages)
 
 with tempfile.TemporaryDirectory(prefix="bke-dna-") as temp:
     root = Path(temp) / "captures"
@@ -75,20 +82,51 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-") as temp:
         sys.stderr.write(result.stderr.decode("utf-8", errors="replace"))
         raise SystemExit(f"native host exited {result.returncode}")
 
-    body_path = root / "bodies" / f"{expected_sha}.body"
-    if body_path.read_bytes() != body:
-        raise SystemExit("content-addressed body does not match captured bytes")
+    conversation_path = root / "bodies" / f"{conversation_sha}.body"
+    if conversation_path.read_bytes() != conversation_body:
+        raise SystemExit("content-addressed conversation body does not match captured bytes")
+
+    config_path = root / "bodies" / f"{config_sha}.body"
+    if config_path.read_bytes() != config_body:
+        raise SystemExit("content-addressed config body does not match captured bytes")
 
     body_files = list((root / "bodies").glob("*.body"))
-    if len(body_files) != 1:
-        raise SystemExit(f"expected deduplicated single body, found {len(body_files)}")
+    if len(body_files) != 2:
+        raise SystemExit(f"expected two deduplicated bodies, found {len(body_files)}")
 
-    for capture_id in capture_ids:
+    for capture_id in conversation_capture_ids:
         observation_path = root / "observations" / f"{capture_id}.json"
         observation = json.loads(observation_path.read_text(encoding="utf-8"))
-        if observation["sha256"] != expected_sha:
-            raise SystemExit("observation SHA-256 mismatch")
-        if observation["byteLength"] != len(body):
-            raise SystemExit("observation byte length mismatch")
+        if observation["sha256"] != conversation_sha:
+            raise SystemExit("conversation observation SHA-256 mismatch")
+        if observation["byteLength"] != len(conversation_body):
+            raise SystemExit("conversation observation byte length mismatch")
+
+    config_observation = json.loads(
+        (root / "observations" / f"{config_capture_id}.json").read_text(encoding="utf-8")
+    )
+    if config_observation["sha256"] != config_sha:
+        raise SystemExit("config observation SHA-256 mismatch")
+
+    conversation_classification = json.loads(
+        (root / "classifications" / f"{conversation_sha}.json").read_text(encoding="utf-8")
+    )
+    result_classification = conversation_classification["classification"]
+    if result_classification["kind"] != "conversation_payload_candidate":
+        raise SystemExit(f"conversation payload was not classified as candidate: {result_classification}")
+    if result_classification["confidence"] not in {"medium", "high"}:
+        raise SystemExit(f"conversation confidence unexpectedly weak: {result_classification}")
+    if "conversation_graph_shape" not in result_classification["signals"]:
+        raise SystemExit("conversation graph signal missing")
+
+    config_classification = json.loads(
+        (root / "classifications" / f"{config_sha}.json").read_text(encoding="utf-8")
+    )
+    if config_classification["classification"]["kind"] != "other":
+        raise SystemExit(f"config payload false-positive classification: {config_classification}")
+
+    classification_files = list((root / "classifications").glob("*.json"))
+    if len(classification_files) != 2:
+        raise SystemExit(f"classification should deduplicate by body hash, found {len(classification_files)} files")
 
 print("native host smoke PASS")
