@@ -14,7 +14,22 @@ if len(sys.argv) != 2:
     raise SystemExit("usage: native-host-smoke.py <host-dll>")
 
 host_dll = Path(sys.argv[1]).resolve()
-conversation_body = b'{"mapping":{"a":{"parent":null,"children":[],"message":{"author":{"role":"user"},"content":{"parts":["GO ATTACK BRO"]}}}}}'
+visible_phrase = "GO ATTACK BRO NETWORK DOM WITNESS PROOF"
+conversation_body = json.dumps(
+    {
+        "mapping": {
+            "a": {
+                "parent": None,
+                "children": [],
+                "message": {
+                    "author": {"role": "user"},
+                    "content": {"parts": [visible_phrase]},
+                },
+            }
+        }
+    },
+    separators=(",", ":"),
+).encode("utf-8")
 config_body = b'{"flags":{"new_navigation":true,"experiment_bucket":"A"},"account":{"tier":"test"}}'
 conversation_sha = hashlib.sha256(conversation_body).hexdigest()
 config_sha = hashlib.sha256(config_body).hexdigest()
@@ -59,22 +74,24 @@ def capture_messages(capture_id, body):
 conversation_capture_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
 config_capture_id = str(uuid.uuid4())
 witness_id = str(uuid.uuid4())
-messages = []
-for capture_id in conversation_capture_ids:
-    messages.extend(capture_messages(capture_id, conversation_body))
-messages.extend(capture_messages(config_capture_id, config_body))
-messages.append(
+
+# Intentionally send the witness first. It begins unmatched, then later capture_end
+# events must re-run reconciliation and upgrade it to corroborated.
+messages = [
     {
         "type": "dom_witness",
         "witnessId": witness_id,
         "pageUrl": "https://chatgpt.com/c/example",
         "observedAt": "2026-09-07T00:00:01.000Z",
         "snippets": [
-            "GO ATTACK BRO",
+            visible_phrase,
             "This visible text sample exists only as corroborating DOM evidence.",
         ],
     }
-)
+]
+for capture_id in conversation_capture_ids:
+    messages.extend(capture_messages(capture_id, conversation_body))
+messages.extend(capture_messages(config_capture_id, config_body))
 wire = b"".join(frame(message) for message in messages)
 
 with tempfile.TemporaryDirectory(prefix="bke-dna-") as temp:
@@ -146,9 +163,26 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-") as temp:
     witness = json.loads(witness_path.read_text(encoding="utf-8"))
     if witness["pageUrl"] != "https://chatgpt.com/c/example":
         raise SystemExit("DOM witness page URL mismatch")
-    if "GO ATTACK BRO" not in witness["snippets"]:
+    if visible_phrase not in witness["snippets"]:
         raise SystemExit("DOM witness lost visible conversation sample")
     if len(witness["fingerprintSha256"]) != 64:
         raise SystemExit("DOM witness fingerprint is not SHA-256")
+
+    reconciliation_path = root / "reconciliations" / f"{witness_id}.json"
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    if reconciliation["status"] != "corroborated":
+        raise SystemExit(f"network/DOM witness did not become corroborated: {reconciliation}")
+    matched_shas = {match["sha256"] for match in reconciliation["matches"]}
+    if conversation_sha not in matched_shas:
+        raise SystemExit("reconciliation did not link DOM witness to conversation body")
+    if config_sha in matched_shas:
+        raise SystemExit("ordinary config JSON was incorrectly used as corroborating conversation evidence")
+    conversation_match = next(
+        match for match in reconciliation["matches"] if match["sha256"] == conversation_sha
+    )
+    if visible_phrase not in conversation_match["matchedSnippets"]:
+        raise SystemExit("reconciliation lost the exact visible witness phrase")
+    if set(conversation_match["captureIds"]) != set(conversation_capture_ids):
+        raise SystemExit("reconciliation did not retain all observations of the matched body")
 
 print("native host smoke PASS")
