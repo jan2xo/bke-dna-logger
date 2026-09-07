@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Text.Json;
+using BKE.Dna.Logger.Host.Aggregation;
 using BKE.Dna.Logger.Host.Capture;
 using BKE.Dna.Logger.Host.Normalization;
 using BKE.Dna.Logger.Host.Protocol;
@@ -25,6 +26,7 @@ internal static class NativeMessageLoop
         WitnessStore witnessStore,
         ReconciliationEngine reconciliation,
         GraphNormalizationEngine normalization,
+        ConversationAggregationEngine aggregation,
         SqliteProjectionEngine? projection)
     {
         Span<byte> prefix = stackalloc byte[PrefixBytes];
@@ -39,7 +41,7 @@ internal static class NativeMessageLoop
 
             var payload = new byte[(int)payloadLength];
             ReadExactly(input, payload);
-            Dispatch(payload, captureStore, witnessStore, reconciliation, normalization, projection);
+            Dispatch(payload, captureStore, witnessStore, reconciliation, normalization, aggregation, projection);
         }
     }
 
@@ -49,6 +51,7 @@ internal static class NativeMessageLoop
         WitnessStore witnessStore,
         ReconciliationEngine reconciliation,
         GraphNormalizationEngine normalization,
+        ConversationAggregationEngine aggregation,
         SqliteProjectionEngine? projection)
     {
         using var document = JsonDocument.Parse(payload);
@@ -69,6 +72,7 @@ internal static class NativeMessageLoop
             case "capture_end":
                 captureStore.End(Deserialize<CaptureEnd>(payload.Span));
                 TryNormalize(normalization);
+                aggregation.TryAggregateAll();
                 TryReconcile(reconciliation);
                 projection?.TryProjectAll();
                 break;
