@@ -17,16 +17,30 @@ host_dll = Path(sys.argv[1]).resolve()
 visible_phrase = "GO ATTACK BRO NETWORK DOM WITNESS PROOF"
 conversation_body = json.dumps(
     {
+        "conversation_id": "conversation-native-1",
+        "current_node": "node-assistant",
         "mapping": {
-            "a": {
+            "node-user": {
                 "parent": None,
+                "children": ["node-assistant"],
+                "message": {
+                    "id": "message-user",
+                    "author": {"role": "user"},
+                    "create_time": 1000.5,
+                    "content": {"content_type": "text", "parts": [visible_phrase]},
+                },
+            },
+            "node-assistant": {
+                "parent": "node-user",
                 "children": [],
                 "message": {
-                    "author": {"role": "user"},
-                    "content": {"parts": [visible_phrase]},
+                    "id": "message-assistant",
+                    "author": {"role": "assistant"},
+                    "create_time": 1001,
+                    "content": {"content_type": "text", "parts": ["ACKNOWLEDGED"]},
                 },
-            }
-        }
+            },
+        },
     },
     separators=(",", ":"),
 ).encode("utf-8")
@@ -155,9 +169,42 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-") as temp:
     if config_classification["classification"]["kind"] != "other":
         raise SystemExit(f"config payload false-positive classification: {config_classification}")
 
+    normalized = json.loads(
+        (root / "normalized" / f"{conversation_sha}.json").read_text(encoding="utf-8")
+    )
+    if normalized["sourceSha256"] != conversation_sha:
+        raise SystemExit("normalized graph source SHA mismatch")
+    if normalized["conversationNativeId"] != "conversation-native-1":
+        raise SystemExit("native conversation ID was not preserved")
+    if normalized["currentNodeNativeId"] != "node-assistant":
+        raise SystemExit("native current-node ID was not preserved")
+    if normalized["coverageStatus"] != "unknown":
+        raise SystemExit("normalizer must not claim completeness yet")
+    if normalized["unresolvedParentNativeIds"]:
+        raise SystemExit("fully linked synthetic graph unexpectedly has unresolved parents")
+    if len(normalized["nodes"]) != 2:
+        raise SystemExit("normalized graph did not preserve both mapping nodes")
+
+    nodes = {node["nodeNativeId"]: node for node in normalized["nodes"]}
+    user_node = nodes["node-user"]
+    assistant_node = nodes["node-assistant"]
+    if user_node["messageNativeId"] != "message-user" or user_node["role"] != "user":
+        raise SystemExit("user native message identity/role was not preserved")
+    if user_node["parentNativeId"] is not None or user_node["childNativeIds"] != ["node-assistant"]:
+        raise SystemExit("user graph edges were not preserved")
+    if user_node["textParts"] != [visible_phrase]:
+        raise SystemExit("user normalized text parts mismatch")
+    if assistant_node["messageNativeId"] != "message-assistant" or assistant_node["role"] != "assistant":
+        raise SystemExit("assistant native message identity/role was not preserved")
+    if assistant_node["parentNativeId"] != "node-user" or assistant_node["childNativeIds"]:
+        raise SystemExit("assistant graph edges were not preserved")
+
     classification_files = list((root / "classifications").glob("*.json"))
     if len(classification_files) != 2:
         raise SystemExit(f"classification should deduplicate by body hash, found {len(classification_files)} files")
+    normalized_files = list((root / "normalized").glob("*.json"))
+    if len(normalized_files) != 1:
+        raise SystemExit("only conversation candidates should produce normalized graphs")
 
     witness_path = root / "witnesses" / f"{witness_id}.json"
     witness = json.loads(witness_path.read_text(encoding="utf-8"))
