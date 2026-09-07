@@ -27,3 +27,5 @@ jobs:
         run: python3 tests/sqlite-projection-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
       - name: DNA archive build verify corruption and durability smoke
         run: python3 tests/dna-archive-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
+      - name: Multi-snapshot conversation aggregation smoke
+        run: python3 tests/conversation-aggregation-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
