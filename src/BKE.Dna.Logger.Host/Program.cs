@@ -46,6 +46,13 @@ internal static class Program
                 return 0;
             }
 
+            if (args.Length == 2 && string.Equals(args[0], "--verify-conversation-dna", StringComparison.Ordinal))
+            {
+                var verification = ConversationDnaArchiveService.VerifyArchive(args[1]);
+                Console.Out.WriteLine(JsonSerializer.Serialize(verification, OutputJson));
+                return 0;
+            }
+
             using var liveIndex = SqliteLiveIndex.TryOpen(captureRoot);
             var aggregation = new ConversationAggregationEngine(captureRoot);
             aggregation.TryAggregateAll();
@@ -73,6 +80,20 @@ internal static class Program
                 }
 
                 var archive = new DnaArchiveService(captureRoot, liveIndex.DatabasePath)
+                    .BuildVerifyAndRecord(args[1]);
+                Console.Out.WriteLine(JsonSerializer.Serialize(archive, OutputJson));
+                return 0;
+            }
+
+            if (args.Length == 2 && string.Equals(args[0], "--archive-conversation", StringComparison.Ordinal))
+            {
+                if (liveIndex is null)
+                {
+                    throw new InvalidOperationException(
+                        "A conversation .dna archive can be built only when the SQLite durability index is available.");
+                }
+
+                var archive = new ConversationDnaArchiveService(captureRoot, liveIndex.DatabasePath)
                     .BuildVerifyAndRecord(args[1]);
                 Console.Out.WriteLine(JsonSerializer.Serialize(archive, OutputJson));
                 return 0;
