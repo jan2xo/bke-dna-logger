@@ -32,6 +32,11 @@ internal static class Program
         try
         {
             using var liveIndex = SqliteLiveIndex.TryOpen(captureRoot);
+            var projection = liveIndex is null
+                ? null
+                : new SqliteProjectionEngine(captureRoot, liveIndex.DatabasePath);
+            projection?.TryProjectAll();
+
             using var captureStore = new CaptureStore(captureRoot);
             var witnessStore = new WitnessStore(captureRoot);
             var reconciliation = new ReconciliationEngine(captureRoot);
@@ -41,7 +46,8 @@ internal static class Program
                 captureStore,
                 witnessStore,
                 reconciliation,
-                normalization);
+                normalization,
+                projection);
             return 0;
         }
         catch (Exception error)
