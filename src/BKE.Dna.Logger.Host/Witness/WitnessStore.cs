@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using BKE.Dna.Logger.Host.Protocol;
+using BKE.Dna.Logger.Core.Protocol;
 
 namespace BKE.Dna.Logger.Host.Witness;
 
