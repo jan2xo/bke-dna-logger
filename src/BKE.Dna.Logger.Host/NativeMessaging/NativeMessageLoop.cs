@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text.Json;
 using BKE.Dna.Logger.Host.Capture;
 using BKE.Dna.Logger.Host.Protocol;
+using BKE.Dna.Logger.Host.Witness;
 
 namespace BKE.Dna.Logger.Host.NativeMessaging;
 
@@ -15,7 +16,7 @@ internal static class NativeMessageLoop
         PropertyNameCaseInsensitive = true
     };
 
-    public static void Run(Stream input, CaptureStore store)
+    public static void Run(Stream input, CaptureStore captureStore, WitnessStore witnessStore)
     {
         Span<byte> prefix = stackalloc byte[PrefixBytes];
 
@@ -29,11 +30,14 @@ internal static class NativeMessageLoop
 
             var payload = new byte[(int)payloadLength];
             ReadExactly(input, payload);
-            Dispatch(payload, store);
+            Dispatch(payload, captureStore, witnessStore);
         }
     }
 
-    private static void Dispatch(ReadOnlyMemory<byte> payload, CaptureStore store)
+    private static void Dispatch(
+        ReadOnlyMemory<byte> payload,
+        CaptureStore captureStore,
+        WitnessStore witnessStore)
     {
         using var document = JsonDocument.Parse(payload);
         if (!document.RootElement.TryGetProperty("type", out var typeElement))
@@ -45,13 +49,16 @@ internal static class NativeMessageLoop
         switch (type)
         {
             case "capture_start":
-                store.Start(Deserialize<CaptureStart>(payload.Span));
+                captureStore.Start(Deserialize<CaptureStart>(payload.Span));
                 break;
             case "capture_chunk":
-                store.Append(Deserialize<CaptureChunk>(payload.Span));
+                captureStore.Append(Deserialize<CaptureChunk>(payload.Span));
                 break;
             case "capture_end":
-                store.End(Deserialize<CaptureEnd>(payload.Span));
+                captureStore.End(Deserialize<CaptureEnd>(payload.Span));
+                break;
+            case "dom_witness":
+                witnessStore.Record(Deserialize<DomWitness>(payload.Span));
                 break;
             default:
                 throw new InvalidDataException($"Unknown native message type '{type}'.");
