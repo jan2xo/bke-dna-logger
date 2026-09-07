@@ -264,33 +264,40 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-conversation-archive-") as temp
         if before != [(source, None, 0) for source in sorted(sources)]:
             raise SystemExit(f"conversation sources were clearable before archive verification: {before}")
 
-        # Break one durability row deliberately. The archive may be built and verified,
-        # but the all-source durability transaction must fail and roll back the other source.
-        connection.execute("DELETE FROM durability_state WHERE raw_sha256 = ?", (source_b,))
+        # Force source B's durability update to fail. Source A is updated first inside
+        # the same transaction, so rollback proves all-source atomicity.
+        connection.execute(
+            f"""
+            CREATE TRIGGER reject_source_b_archive
+            BEFORE UPDATE OF clearable ON durability_state
+            WHEN NEW.raw_sha256 = '{source_b}' AND NEW.clearable = 1
+            BEGIN
+                SELECT RAISE(ABORT, 'forced source B durability failure');
+            END;
+            """
+        )
         connection.commit()
     finally:
         connection.close()
 
     atomic_failure = run_host(root, "--archive-conversation", conversation_id)
     if atomic_failure.returncode == 0:
-        raise SystemExit("conversation archive durability incorrectly succeeded with a missing source row")
+        raise SystemExit("conversation archive durability incorrectly survived forced source B failure")
 
     connection = sqlite3.connect(database)
     try:
-        source_a_state = connection.execute(
-            "SELECT dna_archive_id, dna_archive_sha256, archived_at, clearable "
-            "FROM durability_state WHERE raw_sha256 = ?",
-            (source_a,),
-        ).fetchone()
-        if source_a_state != (None, None, None, 0):
-            raise SystemExit("failed all-source durability transaction partially committed source A")
+        states = connection.execute(
+            "SELECT raw_sha256, dna_archive_id, dna_archive_sha256, archived_at, clearable "
+            "FROM durability_state WHERE raw_sha256 IN (?, ?) ORDER BY raw_sha256",
+            (source_a, source_b),
+        ).fetchall()
+        expected_uncommitted = [(source, None, None, None, 0) for source in sorted(sources)]
+        if states != expected_uncommitted:
+            raise SystemExit(f"failed all-source durability transaction partially committed: {states}")
+        connection.execute("DROP TRIGGER reject_source_b_archive")
+        connection.commit()
     finally:
         connection.close()
-
-    # Startup replay restores the missing durability row without changing raw evidence.
-    replay = run_host(root)
-    if replay.returncode != 0:
-        raise SystemExit("host could not restore missing durability index row")
 
     first = run_host(root, "--archive-conversation", conversation_id)
     if first.returncode != 0:
@@ -367,7 +374,6 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-conversation-archive-") as temp
     finally:
         connection.close()
 
-    # Corrupt only source B in a copied archive. The independent verifier must reject it.
     corrupted_path = root / "archives" / "corrupted-conversation-proof.dna"
     with zipfile.ZipFile(archive_path, "r") as source_zip, zipfile.ZipFile(
         corrupted_path, "w", compression=zipfile.ZIP_STORED
