@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-android</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>BKE.Dna.Logger.Platform.Android</AssemblyName>
+    <RootNamespace>BKE.Dna.Logger.Platform.Android</RootNamespace>
+    <ApplicationId>com.bke.dna.logger</ApplicationId>
+    <ApplicationTitle>BKE DNA Logger</ApplicationTitle>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationDisplayVersion>0.0.1-poc</ApplicationDisplayVersion>
+    <SupportedOSPlatformVersion>26.0</SupportedOSPlatformVersion>
+    <AndroidPackageFormat>apk</AndroidPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../BKE.Dna.Logger.Core/BKE.Dna.Logger.Core.csproj" />
+    <AndroidAsset Include="../../extension/main-interceptor.js"
+                  Link="Assets/dna-extension/main-interceptor.js" />
+  </ItemGroup>
+</Project>
