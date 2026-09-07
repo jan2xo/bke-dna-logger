@@ -4,6 +4,7 @@ using BKE.Dna.Logger.Host.Capture;
 using BKE.Dna.Logger.Host.Normalization;
 using BKE.Dna.Logger.Host.Protocol;
 using BKE.Dna.Logger.Host.Reconciliation;
+using BKE.Dna.Logger.Host.Storage;
 using BKE.Dna.Logger.Host.Witness;
 
 namespace BKE.Dna.Logger.Host.NativeMessaging;
@@ -23,7 +24,8 @@ internal static class NativeMessageLoop
         CaptureStore captureStore,
         WitnessStore witnessStore,
         ReconciliationEngine reconciliation,
-        GraphNormalizationEngine normalization)
+        GraphNormalizationEngine normalization,
+        SqliteProjectionEngine? projection)
     {
         Span<byte> prefix = stackalloc byte[PrefixBytes];
 
@@ -37,7 +39,7 @@ internal static class NativeMessageLoop
 
             var payload = new byte[(int)payloadLength];
             ReadExactly(input, payload);
-            Dispatch(payload, captureStore, witnessStore, reconciliation, normalization);
+            Dispatch(payload, captureStore, witnessStore, reconciliation, normalization, projection);
         }
     }
 
@@ -46,7 +48,8 @@ internal static class NativeMessageLoop
         CaptureStore captureStore,
         WitnessStore witnessStore,
         ReconciliationEngine reconciliation,
-        GraphNormalizationEngine normalization)
+        GraphNormalizationEngine normalization,
+        SqliteProjectionEngine? projection)
     {
         using var document = JsonDocument.Parse(payload);
         if (!document.RootElement.TryGetProperty("type", out var typeElement))
@@ -67,10 +70,12 @@ internal static class NativeMessageLoop
                 captureStore.End(Deserialize<CaptureEnd>(payload.Span));
                 TryNormalize(normalization);
                 TryReconcile(reconciliation);
+                projection?.TryProjectAll();
                 break;
             case "dom_witness":
                 witnessStore.Record(Deserialize<DomWitness>(payload.Span));
                 TryReconcile(reconciliation);
+                projection?.TryProjectAll();
                 break;
             default:
                 throw new InvalidDataException($"Unknown native message type '{type}'.");
