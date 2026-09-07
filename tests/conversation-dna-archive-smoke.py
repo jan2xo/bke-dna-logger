@@ -21,7 +21,7 @@ body_a = b'{"conversation_id":"conversation-dna-v2-proof","snapshot":"A"}'
 body_b = b'{"conversation_id":"conversation-dna-v2-proof","snapshot":"B"}'
 source_a = hashlib.sha256(body_a).hexdigest()
 source_b = hashlib.sha256(body_b).hexdigest()
-sources = [source_a, source_b]
+sources = sorted([source_a, source_b])
 
 
 def run_host(root, *args):
@@ -37,31 +37,84 @@ def run_host(root, *args):
     )
 
 
-def content(text):
+def content_json(text):
     return json.dumps({"content_type": "text", "parts": [text]}, separators=(",", ":"))
+
+
+def node(node_id, message_id, parent, children, role, text):
+    return {
+        "nodeNativeId": node_id,
+        "messageNativeId": message_id,
+        "parentNativeId": parent,
+        "childNativeIds": children,
+        "role": role,
+        "createdAt": "1000",
+        "textParts": [text],
+        "contentJson": content_json(text),
+    }
+
+
+def normalized_snapshot(source_sha, current_node, nodes, observed_at):
+    return {
+        "sourceSha256": source_sha,
+        "parser": "generic-mapping-graph-v0",
+        "conversationNativeId": conversation_id,
+        "currentNodeNativeId": current_node,
+        "coverageStatus": "complete",
+        "coverageBasis": "structural_graph_closure_only",
+        "rootFound": True,
+        "currentNodeFound": True,
+        "currentLeafFound": True,
+        "parentChainComplete": True,
+        "cycleDetected": False,
+        "unresolvedParentNativeIds": [],
+        "unresolvedChildNativeIds": [],
+        "nodes": nodes,
+        "normalizedAt": observed_at,
+    }
 
 
 with tempfile.TemporaryDirectory(prefix="bke-dna-conversation-archive-") as temp:
     root = Path(temp) / "captures"
-    for directory in [
-        "bodies",
-        "observations",
-        "normalized",
-        "classifications",
-        "conversations",
-        "witnesses",
-        "reconciliations",
-    ]:
+    for directory in ["bodies", "observations", "normalized"]:
         (root / directory).mkdir(parents=True, exist_ok=True)
 
     (root / "bodies" / f"{source_a}.body").write_bytes(body_a)
     (root / "bodies" / f"{source_b}.body").write_bytes(body_b)
 
-    capture_ids = {}
-    for index, (source_sha, body) in enumerate([(source_a, body_a), (source_b, body_b)]):
+    snapshots = [
+        (
+            source_a,
+            body_a,
+            "2026-09-07T00:00:01.000Z",
+            normalized_snapshot(
+                source_a,
+                "assistant-a",
+                [
+                    node("user-root", "message-user", None, ["assistant-a"], "user", "ORIGINAL PROMPT"),
+                    node("assistant-a", "message-assistant-a", "user-root", [], "assistant", "ANSWER A"),
+                ],
+                "2026-09-07T00:00:01.000Z",
+            ),
+        ),
+        (
+            source_b,
+            body_b,
+            "2026-09-07T00:00:02.000Z",
+            normalized_snapshot(
+                source_b,
+                "assistant-b",
+                [
+                    node("user-root", "message-user", None, ["assistant-b"], "user", "EDITED PROMPT"),
+                    node("assistant-b", "message-assistant-b", "user-root", [], "assistant", "ANSWER B"),
+                ],
+                "2026-09-07T00:00:02.000Z",
+            ),
+        ),
+    ]
+
+    for source_sha, body, captured_at, normalized in snapshots:
         capture_id = str(uuid.uuid4())
-        capture_ids[source_sha] = capture_id
-        captured_at = f"2026-09-07T00:00:0{index + 1}.000Z"
         observation = {
             "capture": {
                 "type": "capture_start",
@@ -84,174 +137,31 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-conversation-archive-") as temp
         (root / "observations" / f"{capture_id}.json").write_text(
             json.dumps(observation, indent=2), encoding="utf-8"
         )
-
-        normalized = {
-            "sourceSha256": source_sha,
-            "parser": "generic-mapping-graph-v0",
-            "conversationNativeId": conversation_id,
-            "currentNodeNativeId": "assistant-a" if index == 0 else "assistant-b",
-            "coverageStatus": "complete",
-            "coverageBasis": "structural_graph_closure_only",
-            "rootFound": True,
-            "currentNodeFound": True,
-            "currentLeafFound": True,
-            "parentChainComplete": True,
-            "cycleDetected": False,
-            "unresolvedParentNativeIds": [],
-            "unresolvedChildNativeIds": [],
-            "nodes": [],
-            "normalizedAt": captured_at,
-        }
         (root / "normalized" / f"{source_sha}.json").write_text(
             json.dumps(normalized, indent=2), encoding="utf-8"
         )
-
-        classification = {
-            "sha256": source_sha,
-            "byteLength": len(body),
-            "contentType": "application/json",
-            "classifiedAt": captured_at,
-            "classification": {
-                "kind": "conversation_payload_candidate",
-                "confidence": "high",
-                "score": 10,
-                "signals": ["conversation_graph_shape"],
-            },
-            "errorType": None,
-        }
-        (root / "classifications" / f"{source_sha}.json").write_text(
-            json.dumps(classification, indent=2), encoding="utf-8"
-        )
-
-    original_content = content("ORIGINAL PROMPT")
-    edited_content = content("EDITED PROMPT")
-    answer_a_content = content("ANSWER A")
-    answer_b_content = content("ANSWER B")
-    state = {
-        "conversationKey": conversation_key,
-        "conversationNativeId": conversation_id,
-        "currentNodeNativeId": "assistant-b",
-        "stateObservedThrough": "2026-09-07T00:00:02.000Z",
-        "coverageStatus": "complete",
-        "coverageBasis": "multi_snapshot_structural_union",
-        "rootFound": True,
-        "currentNodeFound": True,
-        "currentLeafFound": True,
-        "parentChainComplete": True,
-        "cycleDetected": False,
-        "unresolvedParentNativeIds": [],
-        "unresolvedChildNativeIds": [],
-        "sources": [
-            {
-                "sourceSha256": source_a,
-                "observedAt": "2026-09-07T00:00:01.000Z",
-                "currentNodeNativeId": "assistant-a",
-                "coverageStatus": "complete",
-                "coverageBasis": "structural_graph_closure_only",
-            },
-            {
-                "sourceSha256": source_b,
-                "observedAt": "2026-09-07T00:00:02.000Z",
-                "currentNodeNativeId": "assistant-b",
-                "coverageStatus": "complete",
-                "coverageBasis": "structural_graph_closure_only",
-            },
-        ],
-        "nodes": [
-            {
-                "nodeNativeId": "user-root",
-                "messageNativeIds": ["message-user"],
-                "parentNativeIds": [],
-                "childNativeIds": ["assistant-a", "assistant-b"],
-                "roles": ["user"],
-                "revisions": [
-                    {
-                        "revisionSha256": hashlib.sha256(original_content.encode()).hexdigest(),
-                        "contentJson": original_content,
-                        "textParts": ["ORIGINAL PROMPT"],
-                        "sourceSha256s": [source_a],
-                        "firstObservedAt": "2026-09-07T00:00:01.000Z",
-                        "lastObservedAt": "2026-09-07T00:00:01.000Z",
-                    },
-                    {
-                        "revisionSha256": hashlib.sha256(edited_content.encode()).hexdigest(),
-                        "contentJson": edited_content,
-                        "textParts": ["EDITED PROMPT"],
-                        "sourceSha256s": [source_b],
-                        "firstObservedAt": "2026-09-07T00:00:02.000Z",
-                        "lastObservedAt": "2026-09-07T00:00:02.000Z",
-                    },
-                ],
-            },
-            {
-                "nodeNativeId": "assistant-a",
-                "messageNativeIds": ["message-assistant-a"],
-                "parentNativeIds": ["user-root"],
-                "childNativeIds": [],
-                "roles": ["assistant"],
-                "revisions": [{
-                    "revisionSha256": hashlib.sha256(answer_a_content.encode()).hexdigest(),
-                    "contentJson": answer_a_content,
-                    "textParts": ["ANSWER A"],
-                    "sourceSha256s": [source_a],
-                    "firstObservedAt": "2026-09-07T00:00:01.000Z",
-                    "lastObservedAt": "2026-09-07T00:00:01.000Z",
-                }],
-            },
-            {
-                "nodeNativeId": "assistant-b",
-                "messageNativeIds": ["message-assistant-b"],
-                "parentNativeIds": ["user-root"],
-                "childNativeIds": [],
-                "roles": ["assistant"],
-                "revisions": [{
-                    "revisionSha256": hashlib.sha256(answer_b_content.encode()).hexdigest(),
-                    "contentJson": answer_b_content,
-                    "textParts": ["ANSWER B"],
-                    "sourceSha256s": [source_b],
-                    "firstObservedAt": "2026-09-07T00:00:02.000Z",
-                    "lastObservedAt": "2026-09-07T00:00:02.000Z",
-                }],
-            },
-        ],
-    }
-    (root / "conversations" / f"{conversation_key}.json").write_text(
-        json.dumps(state, indent=2), encoding="utf-8"
-    )
-
-    witness_id = str(uuid.uuid4())
-    witness = {
-        "witnessId": witness_id,
-        "pageUrl": page_url,
-        "observedAt": "2026-09-07T00:00:03.000Z",
-        "snippets": ["EDITED PROMPT", "ANSWER B"],
-        "fingerprintSha256": hashlib.sha256(b"EDITED PROMPT\nANSWER B").hexdigest(),
-        "storedAt": "2026-09-07T00:00:03.000Z",
-    }
-    (root / "witnesses" / f"{witness_id}.json").write_text(
-        json.dumps(witness, indent=2), encoding="utf-8"
-    )
-    reconciliation = {
-        "witnessId": witness_id,
-        "pageUrl": page_url,
-        "status": "corroborated",
-        "matches": [{
-            "sha256": source_b,
-            "captureIds": [capture_ids[source_b]],
-            "classifierScore": 10,
-            "matchedSnippets": ["EDITED PROMPT", "ANSWER B"],
-            "matchRatio": 1.0,
-        }],
-        "reconciledAt": "2026-09-07T00:00:03.000Z",
-    }
-    (root / "reconciliations" / f"{witness_id}.json").write_text(
-        json.dumps(reconciliation, indent=2), encoding="utf-8"
-    )
 
     initialized = run_host(root)
     if initialized.returncode != 0:
         sys.stderr.write(initialized.stderr.decode("utf-8", errors="replace"))
         raise SystemExit("host failed initializing conversation archive proof state")
+
+    state_path = root / "conversations" / f"{conversation_key}.json"
+    if not state_path.exists():
+        raise SystemExit("real aggregation did not create conversation state")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if state["conversationNativeId"] != conversation_id:
+        raise SystemExit("aggregated fixture lost native conversation identity")
+    if [source["sourceSha256"] for source in state["sources"]] != [source_a, source_b]:
+        raise SystemExit("aggregated fixture did not preserve observation-order source lineage")
+    user = next(node for node in state["nodes"] if node["nodeNativeId"] == "user-root")
+    if set(user["childNativeIds"]) != {"assistant-a", "assistant-b"}:
+        raise SystemExit("aggregated fixture did not preserve both branches")
+    if {tuple(revision["textParts"]) for revision in user["revisions"]} != {
+        ("ORIGINAL PROMPT",),
+        ("EDITED PROMPT",),
+    }:
+        raise SystemExit("aggregated fixture did not preserve prompt revisions")
 
     database = root / "dna.sqlite3"
     connection = sqlite3.connect(database)
@@ -261,11 +171,9 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-conversation-archive-") as temp
             "WHERE raw_sha256 IN (?, ?) ORDER BY raw_sha256",
             (source_a, source_b),
         ).fetchall()
-        if before != [(source, None, 0) for source in sorted(sources)]:
+        if before != [(source, None, 0) for source in sources]:
             raise SystemExit(f"conversation sources were clearable before archive verification: {before}")
 
-        # Force source B's durability update to fail. Source A is updated first inside
-        # the same transaction, so rollback proves all-source atomicity.
         connection.execute(
             f"""
             CREATE TRIGGER reject_source_b_archive
@@ -291,8 +199,7 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-conversation-archive-") as temp
             "FROM durability_state WHERE raw_sha256 IN (?, ?) ORDER BY raw_sha256",
             (source_a, source_b),
         ).fetchall()
-        expected_uncommitted = [(source, None, None, None, 0) for source in sorted(sources)]
-        if states != expected_uncommitted:
+        if states != [(source, None, None, None, 0) for source in sources]:
             raise SystemExit(f"failed all-source durability transaction partially committed: {states}")
         connection.execute("DROP TRIGGER reject_source_b_archive")
         connection.commit()
@@ -306,7 +213,7 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-conversation-archive-") as temp
     result = json.loads(first.stdout.decode("utf-8"))
     if result["conversationKey"] != conversation_key or result["conversationNativeId"] != conversation_id:
         raise SystemExit("conversation archive identity mismatch")
-    if result["sourceSha256s"] != sorted(sources):
+    if result["sourceSha256s"] != sources:
         raise SystemExit("conversation archive source set mismatch")
 
     archive_path = Path(result["archivePath"])
@@ -327,20 +234,23 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-conversation-archive-") as temp
             raise SystemExit("conversation .dna changed source A raw bytes")
         if archive.read(f"sources/{source_b}/raw.body") != body_b:
             raise SystemExit("conversation .dna changed source B raw bytes")
+
         archived_state = json.loads(archive.read("conversation/state.json"))
-        if archived_state["conversationNativeId"] != conversation_id:
-            raise SystemExit("conversation .dna state lost native conversation identity")
-        user = next(node for node in archived_state["nodes"] if node["nodeNativeId"] == "user-root")
-        if set(user["childNativeIds"]) != {"assistant-a", "assistant-b"}:
+        archived_user = next(
+            node for node in archived_state["nodes"] if node["nodeNativeId"] == "user-root"
+        )
+        if set(archived_user["childNativeIds"]) != {"assistant-a", "assistant-b"}:
             raise SystemExit("conversation .dna flattened branch graph")
-        if {tuple(revision["textParts"]) for revision in user["revisions"]} != {
-            ("ORIGINAL PROMPT",), ("EDITED PROMPT",)
+        if {tuple(revision["textParts"]) for revision in archived_user["revisions"]} != {
+            ("ORIGINAL PROMPT",),
+            ("EDITED PROMPT",),
         }:
             raise SystemExit("conversation .dna lost prompt revision archaeology")
+
         manifest = json.loads(archive.read("manifest.json"))
         if manifest["formatVersion"] != 2 or manifest["scope"] != "conversation":
             raise SystemExit("conversation .dna manifest format mismatch")
-        if manifest["sourceSha256s"] != sorted(sources):
+        if manifest["sourceSha256s"] != sources:
             raise SystemExit("conversation .dna manifest source set mismatch")
 
     verified = run_host(root, "--verify-conversation-dna", str(archive_path))
@@ -367,7 +277,7 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-conversation-archive-") as temp
         ).fetchall()
         expected = [
             (source, result["archiveId"], result["archiveSha256"], 1)
-            for source in sorted(sources)
+            for source in sources
         ]
         if rows != expected:
             raise SystemExit(f"verified conversation .dna did not mark every source durable: {rows}")
