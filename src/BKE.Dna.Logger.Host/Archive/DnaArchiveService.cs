@@ -453,7 +453,7 @@ internal sealed class DnaArchiveService
     private static void ValidateArchivePath(string path)
     {
         if (string.IsNullOrWhiteSpace(path) ||
-            path.StartsWith('/', StringComparison.Ordinal) ||
+            path.StartsWith("/", StringComparison.Ordinal) ||
             path.Contains('\\') ||
             path.Split('/').Any(static segment => segment is "" or "." or ".."))
         {
