@@ -1,3 +1,5 @@
+using System.Text.Json;
+using BKE.Dna.Logger.Host.Archive;
 using BKE.Dna.Logger.Host.Capture;
 using BKE.Dna.Logger.Host.NativeMessaging;
 using BKE.Dna.Logger.Host.Normalization;
@@ -10,6 +12,11 @@ namespace BKE.Dna.Logger.Host;
 internal static class Program
 {
     private const string Version = "0.0.1-poc0";
+
+    private static readonly JsonSerializerOptions OutputJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
     public static int Main(string[] args)
     {
@@ -31,11 +38,37 @@ internal static class Program
 
         try
         {
+            if (args.Length == 2 && string.Equals(args[0], "--verify-dna", StringComparison.Ordinal))
+            {
+                var verification = DnaArchiveService.VerifyArchive(args[1]);
+                Console.Out.WriteLine(JsonSerializer.Serialize(verification, OutputJson));
+                return 0;
+            }
+
             using var liveIndex = SqliteLiveIndex.TryOpen(captureRoot);
             var projection = liveIndex is null
                 ? null
                 : new SqliteProjectionEngine(captureRoot, liveIndex.DatabasePath);
             projection?.TryProjectAll();
+
+            if (args.Length == 2 && string.Equals(args[0], "--archive", StringComparison.Ordinal))
+            {
+                if (liveIndex is null)
+                {
+                    throw new InvalidOperationException(
+                        "A .dna archive can be built only when the SQLite durability index is available.");
+                }
+
+                var archive = new DnaArchiveService(captureRoot, liveIndex.DatabasePath)
+                    .BuildVerifyAndRecord(args[1]);
+                Console.Out.WriteLine(JsonSerializer.Serialize(archive, OutputJson));
+                return 0;
+            }
+
+            if (args.Length != 0)
+            {
+                throw new ArgumentException("Unknown BKE DNA Logger command.");
+            }
 
             using var captureStore = new CaptureStore(captureRoot);
             var witnessStore = new WitnessStore(captureRoot);
