@@ -6,6 +6,13 @@
     <AssemblyName>BKE.Dna.Logger.GeckoView.Bindings</AssemblyName>
     <RootNamespace>BKE.Dna.Logger.GeckoView.Bindings</RootNamespace>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+
+    <!-- GeckoView's Java surface is machine-translated by the .NET Android binding
+         generator. Keep repository warnings-as-errors for hand-written BKE code,
+         but do not promote generator compatibility warnings (for example CS0108,
+         CS0114, and CS8764) to errors in this binding-only project. Real compiler
+         errors and Java dependency verification remain fully enforced. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
