@@ -1,0 +1,37 @@
+{
+  "manifest_version": 2,
+  "name": "BKE DNA Android Bridge",
+  "version": "0.0.1",
+  "description": "Captures ChatGPT browser response evidence for the BKE DNA Android host.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "bke-dna-logger@jl-bke.com"
+    }
+  },
+  "permissions": [
+    "nativeMessaging",
+    "nativeMessagingFromContent",
+    "geckoViewAddons"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["dom-witness.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    "main-interceptor.js"
+  ]
+}
