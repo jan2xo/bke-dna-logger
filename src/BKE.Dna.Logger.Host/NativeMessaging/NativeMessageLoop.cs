@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text.Json;
 using BKE.Dna.Logger.Host.Capture;
 using BKE.Dna.Logger.Host.Protocol;
+using BKE.Dna.Logger.Host.Reconciliation;
 using BKE.Dna.Logger.Host.Witness;
 
 namespace BKE.Dna.Logger.Host.NativeMessaging;
@@ -16,7 +17,11 @@ internal static class NativeMessageLoop
         PropertyNameCaseInsensitive = true
     };
 
-    public static void Run(Stream input, CaptureStore captureStore, WitnessStore witnessStore)
+    public static void Run(
+        Stream input,
+        CaptureStore captureStore,
+        WitnessStore witnessStore,
+        ReconciliationEngine reconciliation)
     {
         Span<byte> prefix = stackalloc byte[PrefixBytes];
 
@@ -30,14 +35,15 @@ internal static class NativeMessageLoop
 
             var payload = new byte[(int)payloadLength];
             ReadExactly(input, payload);
-            Dispatch(payload, captureStore, witnessStore);
+            Dispatch(payload, captureStore, witnessStore, reconciliation);
         }
     }
 
     private static void Dispatch(
         ReadOnlyMemory<byte> payload,
         CaptureStore captureStore,
-        WitnessStore witnessStore)
+        WitnessStore witnessStore,
+        ReconciliationEngine reconciliation)
     {
         using var document = JsonDocument.Parse(payload);
         if (!document.RootElement.TryGetProperty("type", out var typeElement))
@@ -56,12 +62,26 @@ internal static class NativeMessageLoop
                 break;
             case "capture_end":
                 captureStore.End(Deserialize<CaptureEnd>(payload.Span));
+                TryReconcile(reconciliation);
                 break;
             case "dom_witness":
                 witnessStore.Record(Deserialize<DomWitness>(payload.Span));
+                TryReconcile(reconciliation);
                 break;
             default:
                 throw new InvalidDataException($"Unknown native message type '{type}'.");
+        }
+    }
+
+    private static void TryReconcile(ReconciliationEngine reconciliation)
+    {
+        try
+        {
+            reconciliation.ReconcileAll();
+        }
+        catch
+        {
+            // Reconciliation is derivative metadata and cannot invalidate primary evidence.
         }
     }
 
