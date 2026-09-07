@@ -1,4 +1,5 @@
 using System.Text.Json;
+using BKE.Dna.Logger.Host.Aggregation;
 using BKE.Dna.Logger.Host.Archive;
 using BKE.Dna.Logger.Host.Capture;
 using BKE.Dna.Logger.Host.NativeMessaging;
@@ -46,6 +47,9 @@ internal static class Program
             }
 
             using var liveIndex = SqliteLiveIndex.TryOpen(captureRoot);
+            var aggregation = new ConversationAggregationEngine(captureRoot);
+            aggregation.TryAggregateAll();
+
             var projection = liveIndex is null
                 ? null
                 : new SqliteProjectionEngine(captureRoot, liveIndex.DatabasePath);
@@ -80,6 +84,7 @@ internal static class Program
                 witnessStore,
                 reconciliation,
                 normalization,
+                aggregation,
                 projection);
             return 0;
         }
