@@ -13,5 +13,33 @@
       Include="org.mozilla.geckoview:geckoview-arm64-v8a"
       Version="154.0.20260824154132"
       Repository="https://maven.mozilla.org/maven2/" />
+
+    <!-- GeckoView requires these exact runtime artifacts. They are implementation
+         dependencies only; no BKE C# surface is generated for them. -->
+    <AndroidMavenLibrary
+      Include="org.jetbrains.kotlin:kotlin-stdlib"
+      Version="2.4.10"
+      Repository="https://repo1.maven.org/maven2/"
+      Bind="false" />
+    <AndroidMavenLibrary
+      Include="org.yaml:snakeyaml"
+      Version="2.2"
+      Repository="https://repo1.maven.org/maven2/"
+      Bind="false" />
+
+    <!-- Microsoft bindings whose Java artifact identities exactly satisfy the
+         versions declared by GeckoView stable 154. -->
+    <PackageReference Include="Xamarin.AndroidX.Annotation" Version="1.10.0.1" />
+    <PackageReference Include="Xamarin.AndroidX.Annotation.Experimental" Version="1.6.0.1" />
+    <PackageReference Include="Xamarin.AndroidX.Collection" Version="1.6.0.1" />
+    <PackageReference Include="Xamarin.AndroidX.Core" Version="1.19.0.1" />
+    <PackageReference Include="Xamarin.AndroidX.Lifecycle.Common" Version="2.11.0.1" />
+    <PackageReference Include="Xamarin.AndroidX.Lifecycle.Process" Version="2.11.0.1" />
+    <PackageReference Include="Xamarin.GooglePlayServices.Fido" Version="121.3.0.1" />
+    <PackageReference Include="Xamarin.AndroidX.Media3.Common" Version="1.10.1.1" />
+    <PackageReference Include="Xamarin.AndroidX.Media3.DataSource" Version="1.10.1.1" />
+    <PackageReference Include="Xamarin.AndroidX.Media3.Decoder" Version="1.10.1.1" />
+    <PackageReference Include="Xamarin.AndroidX.Media3.ExoPlayer" Version="1.10.1.1" />
+    <PackageReference Include="Xamarin.AndroidX.Media3.ExoPlayer.Hls" Version="1.10.1.1" />
   </ItemGroup>
 </Project>
