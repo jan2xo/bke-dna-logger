@@ -50,6 +50,6 @@ jobs:
       - name: Install .NET Android workload
         run: dotnet workload install android --skip-manifest-update
       - name: Build Android APK foundation
-        run: dotnet build src/BKE.Dna.Logger.Platform.Android/BKE.Dna.Logger.Platform.Android.csproj --configuration Release
+        run: dotnet build src/BKE.Dna.Logger.Platform.Android/BKE.Dna.Logger.Platform.Android.csproj --configuration Release -r android-arm64
       - name: Android extension and shared protocol contract smoke
         run: python3 tests/android-foundation-smoke.py
