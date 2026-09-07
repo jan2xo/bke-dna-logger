@@ -31,6 +31,15 @@
       "js": ["bridge.js"],
       "run_at": "document_start",
       "world": "ISOLATED"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["dom-witness.js"],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
     }
   ]
 }
