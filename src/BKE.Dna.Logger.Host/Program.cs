@@ -1,5 +1,6 @@
 using BKE.Dna.Logger.Host.Capture;
 using BKE.Dna.Logger.Host.NativeMessaging;
+using BKE.Dna.Logger.Host.Witness;
 
 namespace BKE.Dna.Logger.Host;
 
@@ -27,8 +28,9 @@ internal static class Program
 
         try
         {
-            using var store = new CaptureStore(captureRoot);
-            NativeMessageLoop.Run(Console.OpenStandardInput(), store);
+            using var captureStore = new CaptureStore(captureRoot);
+            var witnessStore = new WitnessStore(captureRoot);
+            NativeMessageLoop.Run(Console.OpenStandardInput(), captureStore, witnessStore);
             return 0;
         }
         catch (Exception error)
