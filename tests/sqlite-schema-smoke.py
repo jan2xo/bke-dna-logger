@@ -21,6 +21,12 @@ expected_tables = {
     "dom_witness",
     "reconciliation",
     "durability_state",
+    "logical_conversation",
+    "conversation_source",
+    "logical_message_node",
+    "logical_message_edge",
+    "logical_message_revision",
+    "logical_message_revision_source",
 }
 
 with tempfile.TemporaryDirectory(prefix="bke-dna-sqlite-") as temp:
@@ -46,9 +52,6 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-sqlite-") as temp:
 
     connection = sqlite3.connect(database_path)
     try:
-        # SQLite foreign-key enforcement is connection-local. The .NET live index
-        # enables it when opening its connection; this separate verifier connection
-        # must enable it independently before testing enforcement.
         connection.execute("PRAGMA foreign_keys = ON")
 
         tables = {
@@ -64,11 +67,11 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-sqlite-") as temp:
         schema_version = connection.execute(
             "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
         ).fetchone()
-        if schema_version != ("1",):
+        if schema_version != ("2",):
             raise SystemExit(f"unexpected schema metadata version: {schema_version}")
 
         user_version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if user_version != 1:
+        if user_version != 2:
             raise SystemExit(f"unexpected PRAGMA user_version: {user_version}")
 
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0].lower()
@@ -84,6 +87,22 @@ with tempfile.TemporaryDirectory(prefix="bke-dna-sqlite-") as temp:
         ).fetchall()
         if not any(row[2] == "raw_capture" for row in observation_fks):
             raise SystemExit("capture_observation does not declare raw_capture foreign key")
+
+        source_fks = connection.execute(
+            "PRAGMA foreign_key_list(conversation_source)"
+        ).fetchall()
+        if not any(row[2] == "raw_capture" for row in source_fks):
+            raise SystemExit("conversation_source does not declare raw_capture foreign key")
+        if not any(row[2] == "logical_conversation" for row in source_fks):
+            raise SystemExit("conversation_source does not declare logical_conversation foreign key")
+
+        revision_source_fks = connection.execute(
+            "PRAGMA foreign_key_list(logical_message_revision_source)"
+        ).fetchall()
+        if not any(row[2] == "raw_capture" for row in revision_source_fks):
+            raise SystemExit("logical revision source does not preserve raw_capture foreign key")
+        if not any(row[2] == "logical_message_revision" for row in revision_source_fks):
+            raise SystemExit("logical revision source does not preserve revision foreign key")
 
         durability_fks = connection.execute(
             "PRAGMA foreign_key_list(durability_state)"
