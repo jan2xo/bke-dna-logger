@@ -1,11 +1,14 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using BKE.Dna.Logger.Host.Classification;
 using BKE.Dna.Logger.Host.Protocol;
 
 namespace BKE.Dna.Logger.Host.Capture;
 
 internal sealed class CaptureStore : IDisposable
 {
+    private const long MaxClassificationBytes = 16L * 1024 * 1024;
+
     private static readonly JsonSerializerOptions ObservationJsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -14,6 +17,7 @@ internal sealed class CaptureStore : IDisposable
 
     private readonly string _bodiesDirectory;
     private readonly string _observationsDirectory;
+    private readonly string _classificationsDirectory;
     private readonly string _partialDirectory;
     private readonly Dictionary<string, CaptureSession> _sessions = new(StringComparer.Ordinal);
 
@@ -22,10 +26,12 @@ internal sealed class CaptureStore : IDisposable
         var root = Path.GetFullPath(captureRoot);
         _bodiesDirectory = Path.Combine(root, "bodies");
         _observationsDirectory = Path.Combine(root, "observations");
+        _classificationsDirectory = Path.Combine(root, "classifications");
         _partialDirectory = Path.Combine(root, "partial");
 
         Directory.CreateDirectory(_bodiesDirectory);
         Directory.CreateDirectory(_observationsDirectory);
+        Directory.CreateDirectory(_classificationsDirectory);
         Directory.CreateDirectory(_partialDirectory);
     }
 
@@ -104,6 +110,12 @@ internal sealed class CaptureStore : IDisposable
         File.WriteAllText(
             observationPath,
             JsonSerializer.Serialize(observation, ObservationJsonOptions));
+
+        WriteClassificationWithoutAffectingEvidence(
+            bodyPath,
+            result.Sha256,
+            result.ByteLength,
+            session.Start.ContentType);
     }
 
     public void Dispose()
@@ -114,6 +126,54 @@ internal sealed class CaptureStore : IDisposable
         }
 
         _sessions.Clear();
+    }
+
+    private void WriteClassificationWithoutAffectingEvidence(
+        string bodyPath,
+        string sha256,
+        long byteLength,
+        string? contentType)
+    {
+        var classificationPath = Path.Combine(_classificationsDirectory, $"{sha256}.json");
+        if (File.Exists(classificationPath))
+        {
+            return;
+        }
+
+        PayloadClassification classification;
+        string? errorType = null;
+
+        try
+        {
+            classification = byteLength > MaxClassificationBytes
+                ? PayloadClassification.Other("classification_size_limit")
+                : ConversationPayloadClassifier.Classify(File.ReadAllBytes(bodyPath), contentType);
+        }
+        catch (Exception error)
+        {
+            classification = PayloadClassification.Other("classifier_error");
+            errorType = error.GetType().Name;
+        }
+
+        var envelope = new ClassificationEnvelope(
+            sha256,
+            byteLength,
+            contentType,
+            DateTimeOffset.UtcNow.ToString("O"),
+            classification,
+            errorType);
+
+        try
+        {
+            File.WriteAllText(
+                classificationPath,
+                JsonSerializer.Serialize(envelope, ObservationJsonOptions));
+        }
+        catch
+        {
+            // Classification is derivative metadata. Raw evidence and its observation
+            // have already been persisted and must not be invalidated by this failure.
+        }
     }
 
     private CaptureSession GetSession(string captureId)
@@ -200,4 +260,12 @@ internal sealed class CaptureStore : IDisposable
         long ByteLength,
         string BodyPath,
         string StoredAt);
+
+    private sealed record ClassificationEnvelope(
+        string Sha256,
+        long ByteLength,
+        string? ContentType,
+        string ClassifiedAt,
+        PayloadClassification Classification,
+        string? ErrorType);
 }
