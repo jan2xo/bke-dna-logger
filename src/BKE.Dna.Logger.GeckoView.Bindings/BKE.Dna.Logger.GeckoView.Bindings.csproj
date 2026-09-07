@@ -22,6 +22,11 @@
       Repository="https://repo1.maven.org/maven2/"
       Bind="false" />
     <AndroidMavenLibrary
+      Include="org.jetbrains:annotations"
+      Version="13.0"
+      Repository="https://repo1.maven.org/maven2/"
+      Bind="false" />
+    <AndroidMavenLibrary
       Include="org.yaml:snakeyaml"
       Version="2.2"
       Repository="https://repo1.maven.org/maven2/"
