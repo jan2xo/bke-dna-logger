@@ -2,6 +2,7 @@ using BKE.Dna.Logger.Host.Capture;
 using BKE.Dna.Logger.Host.NativeMessaging;
 using BKE.Dna.Logger.Host.Normalization;
 using BKE.Dna.Logger.Host.Reconciliation;
+using BKE.Dna.Logger.Host.Storage;
 using BKE.Dna.Logger.Host.Witness;
 
 namespace BKE.Dna.Logger.Host;
@@ -30,6 +31,7 @@ internal static class Program
 
         try
         {
+            using var liveIndex = SqliteLiveIndex.TryOpen(captureRoot);
             using var captureStore = new CaptureStore(captureRoot);
             var witnessStore = new WitnessStore(captureRoot);
             var reconciliation = new ReconciliationEngine(captureRoot);
