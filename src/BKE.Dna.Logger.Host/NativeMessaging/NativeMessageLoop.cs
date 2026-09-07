@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Text.Json;
 using BKE.Dna.Logger.Host.Capture;
+using BKE.Dna.Logger.Host.Normalization;
 using BKE.Dna.Logger.Host.Protocol;
 using BKE.Dna.Logger.Host.Reconciliation;
 using BKE.Dna.Logger.Host.Witness;
@@ -21,7 +22,8 @@ internal static class NativeMessageLoop
         Stream input,
         CaptureStore captureStore,
         WitnessStore witnessStore,
-        ReconciliationEngine reconciliation)
+        ReconciliationEngine reconciliation,
+        GraphNormalizationEngine normalization)
     {
         Span<byte> prefix = stackalloc byte[PrefixBytes];
 
@@ -35,7 +37,7 @@ internal static class NativeMessageLoop
 
             var payload = new byte[(int)payloadLength];
             ReadExactly(input, payload);
-            Dispatch(payload, captureStore, witnessStore, reconciliation);
+            Dispatch(payload, captureStore, witnessStore, reconciliation, normalization);
         }
     }
 
@@ -43,7 +45,8 @@ internal static class NativeMessageLoop
         ReadOnlyMemory<byte> payload,
         CaptureStore captureStore,
         WitnessStore witnessStore,
-        ReconciliationEngine reconciliation)
+        ReconciliationEngine reconciliation,
+        GraphNormalizationEngine normalization)
     {
         using var document = JsonDocument.Parse(payload);
         if (!document.RootElement.TryGetProperty("type", out var typeElement))
@@ -62,6 +65,7 @@ internal static class NativeMessageLoop
                 break;
             case "capture_end":
                 captureStore.End(Deserialize<CaptureEnd>(payload.Span));
+                TryNormalize(normalization);
                 TryReconcile(reconciliation);
                 break;
             case "dom_witness":
@@ -70,6 +74,18 @@ internal static class NativeMessageLoop
                 break;
             default:
                 throw new InvalidDataException($"Unknown native message type '{type}'.");
+        }
+    }
+
+    private static void TryNormalize(GraphNormalizationEngine normalization)
+    {
+        try
+        {
+            normalization.NormalizeAllCandidates();
+        }
+        catch
+        {
+            // Normalization is derivative metadata and cannot invalidate primary evidence.
         }
     }
 
