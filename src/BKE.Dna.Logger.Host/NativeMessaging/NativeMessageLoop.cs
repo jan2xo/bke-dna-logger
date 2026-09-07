@@ -27,7 +27,8 @@ internal static class NativeMessageLoop
         ReconciliationEngine reconciliation,
         GraphNormalizationEngine normalization,
         ConversationAggregationEngine aggregation,
-        SqliteProjectionEngine? projection)
+        SqliteProjectionEngine? projection,
+        ConversationSqliteProjectionEngine? conversationProjection)
     {
         Span<byte> prefix = stackalloc byte[PrefixBytes];
 
@@ -41,7 +42,15 @@ internal static class NativeMessageLoop
 
             var payload = new byte[(int)payloadLength];
             ReadExactly(input, payload);
-            Dispatch(payload, captureStore, witnessStore, reconciliation, normalization, aggregation, projection);
+            Dispatch(
+                payload,
+                captureStore,
+                witnessStore,
+                reconciliation,
+                normalization,
+                aggregation,
+                projection,
+                conversationProjection);
         }
     }
 
@@ -52,7 +61,8 @@ internal static class NativeMessageLoop
         ReconciliationEngine reconciliation,
         GraphNormalizationEngine normalization,
         ConversationAggregationEngine aggregation,
-        SqliteProjectionEngine? projection)
+        SqliteProjectionEngine? projection,
+        ConversationSqliteProjectionEngine? conversationProjection)
     {
         using var document = JsonDocument.Parse(payload);
         if (!document.RootElement.TryGetProperty("type", out var typeElement))
@@ -75,6 +85,7 @@ internal static class NativeMessageLoop
                 aggregation.TryAggregateAll();
                 TryReconcile(reconciliation);
                 projection?.TryProjectAll();
+                conversationProjection?.TryProjectAll();
                 break;
             case "dom_witness":
                 witnessStore.Record(Deserialize<DomWitness>(payload.Span));
