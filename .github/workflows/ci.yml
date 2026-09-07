@@ -25,3 +25,5 @@ jobs:
         run: python3 tests/sqlite-schema-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
       - name: SQLite live projection and replay smoke
         run: python3 tests/sqlite-projection-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
+      - name: DNA archive build verify corruption and durability smoke
+        run: python3 tests/dna-archive-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
