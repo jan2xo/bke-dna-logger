@@ -57,7 +57,9 @@ for token in (
     'classifier_error',
     'readClassificationOutcome(sourceSha256)',
     'logClassificationOutcome(readClassificationOutcome(sourceSha256))',
+    'classification.getInt("score")',
     'classification.getJSONArray("signals")',
+    'logLowScoreClassifierShape(outcome)',
     'Raw evidence and its immutable observation are already durable',
     'Log.d(TAG, "BKE DNA derivation: started")',
     '"classification_candidate_high"',
@@ -68,6 +70,24 @@ for token in (
     '"classification_other_invalid_utf8"',
     '"classification_other_no_json"',
     '"classification_other_low_score"',
+    '"BKE DNA derivation: classifier_score_0_9"',
+    '"BKE DNA derivation: classifier_score_10_19"',
+    '"BKE DNA derivation: classifier_score_20_27"',
+    '"BKE DNA derivation: classifier_score_unexpected"',
+    '"BKE DNA derivation: classifier_signal_mapping"',
+    '"BKE DNA derivation: classifier_signal_messages"',
+    '"BKE DNA derivation: classifier_signal_message"',
+    '"BKE DNA derivation: classifier_signal_author"',
+    '"BKE DNA derivation: classifier_signal_role"',
+    '"BKE DNA derivation: classifier_signal_content"',
+    '"BKE DNA derivation: classifier_signal_parts"',
+    '"BKE DNA derivation: classifier_signal_parent"',
+    '"BKE DNA derivation: classifier_signal_children"',
+    '"BKE DNA derivation: classifier_signal_conversation_id"',
+    '"BKE DNA derivation: classifier_signal_current_node"',
+    '"BKE DNA derivation: classifier_signal_recognized_role"',
+    '"BKE DNA derivation: classifier_signal_graph_shape"',
+    '"BKE DNA derivation: classifier_signal_authored_shape"',
     'Log.d(TAG, "BKE DNA derivation: normalization_skipped")',
     'Log.d(TAG, "BKE DNA derivation: normalization_complete")',
     'Log.d(TAG, "BKE DNA derivation: reconciliation_complete")',
@@ -75,8 +95,9 @@ for token in (
 ):
     assert token in pipeline, token
 
-# Classification reason diagnostics must remain fixed categories derived only
-# from persisted classifier metadata. They must not expose evidence identity or content.
+# Classification diagnostics must remain fixed categories derived only from
+# persisted classifier metadata. They must not expose evidence identity,
+# content, raw signal collections, or dynamically formatted score/signal names.
 for forbidden in (
     'Log.d(TAG, sourceSha256',
     'Log.d(TAG, bodyFile',
@@ -85,10 +106,21 @@ for forbidden in (
     'Log.d(TAG, outcome.signals',
     'Log.d(TAG, outcome.kind',
     'Log.d(TAG, outcome.confidence',
+    'Log.d(TAG, outcome.score',
+    'classifier_signal_$',
+    'classifier_score_$',
     '"classification_other")',
     '"classification_candidate")',
 ):
     assert forbidden not in pipeline, forbidden
+
+# Low-score shape diagnostics are observation only; classifier admission stays
+# locked to the existing native parity thresholds.
+assert 'score >= 28' in classifier
+assert 'score >= 55' in classifier
+assert 'if (event == "classification_other_low_score")' in pipeline
+assert pipeline.index('classification.getInt("score")') < pipeline.index('logLowScoreClassifierShape(outcome)')
+assert pipeline.index('"classification_other_low_score"') < pipeline.index('logLowScoreClassifierShape(outcome)')
 
 assert pipeline.index('ensureClassification(') < pipeline.index('readClassificationOutcome(sourceSha256)')
 assert pipeline.index('readClassificationOutcome(sourceSha256)') < pipeline.index('normalizer.normalizeCandidate(sourceSha256)')
