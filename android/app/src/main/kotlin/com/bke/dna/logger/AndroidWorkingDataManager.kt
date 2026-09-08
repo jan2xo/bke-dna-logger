@@ -40,6 +40,10 @@ class AndroidWorkingDataManager(context: Context) {
             ?: error("Working Data generation does not exist")
     }
 
+    fun savedWorkingDataBytes(): Long = workingDataRoot.walkTopDown()
+        .filter { it.isFile }
+        .sumOf { it.length() }
+
     /**
      * Save the current Latest generation and start a fresh writable Latest.
      * The caller must pause live capture before invoking this operation.
@@ -65,7 +69,7 @@ class AndroidWorkingDataManager(context: Context) {
             }
 
             val snapshotConversations = File(generationDirectory, SNAPSHOT_CONVERSATIONS_DIRECTORY)
-            snapshotConversations.mkdirs()
+            check(snapshotConversations.mkdirs()) { "Unable to create Working Data conversation-state snapshot" }
             val liveConversations = File(captureRoot, "conversations")
             liveConversations.listFiles().orEmpty()
                 .filter { it.isFile && it.extension == "json" }
