@@ -9,9 +9,10 @@ import android.widget.ScrollView
 import android.widget.TextView
 import java.util.Locale
 
-/** Read-only conversation recovery surface for Latest or a saved Working Data generation. */
+/** Full conversation data is resolved only after the owner opens a unified-library item. */
 class AndroidConversationReaderActivity : Activity() {
-    private lateinit var conversationKey: String
+    private lateinit var conversationNativeId: String
+    private lateinit var location: AndroidUnifiedConversationLocation
     private lateinit var workingData: AndroidWorkingDataGeneration
     private lateinit var human: AndroidHumanExportService
     private lateinit var body: TextView
@@ -19,15 +20,18 @@ class AndroidConversationReaderActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        conversationKey = intent.getStringExtra(EXTRA_CONVERSATION_KEY).orEmpty()
-        val workingDataId = intent.getStringExtra(EXTRA_WORKING_DATA_ID)
-            ?: AndroidWorkingDataManager.LATEST_ID
-        if (conversationKey.isBlank()) {
+        conversationNativeId = intent.getStringExtra(EXTRA_CONVERSATION_NATIVE_ID).orEmpty()
+        if (conversationNativeId.isBlank()) {
             finish()
             return
         }
 
-        workingData = runCatching { AndroidWorkingDataManager(this).generation(workingDataId) }
+        location = runCatching { AndroidUnifiedConversationLibrary(this).resolve(conversationNativeId) }
+            .getOrElse {
+                finish()
+                return
+            }
+        workingData = runCatching { AndroidWorkingDataManager(this).generation(location.generation.id) }
             .getOrElse {
                 finish()
                 return
@@ -38,8 +42,8 @@ class AndroidConversationReaderActivity : Activity() {
     }
 
     private fun renderUi() {
-        val descriptor = runCatching { human.describe(conversationKey) }.getOrNull()
-        val attributedBytes = runCatching { human.conversationWorkingBytes(conversationKey) }.getOrDefault(0L)
+        val descriptor = runCatching { human.describe(location.conversationKey) }.getOrNull()
+        val attributedBytes = runCatching { human.conversationWorkingBytes(location.conversationKey) }.getOrDefault(0L)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -47,15 +51,16 @@ class AndroidConversationReaderActivity : Activity() {
         }
 
         root.addView(TextView(this).apply {
-            text = descriptor?.title ?: "Conversation"
+            text = descriptor?.title ?: location.displayTitle
             textSize = 22f
         })
         root.addView(TextView(this).apply {
             text = buildString {
-                append(workingData.label)
+                append("Resolved from: ${workingData.label}")
+                append("\nSeen in ${location.allGenerationIds.size} Working Data generation(s)")
                 append("\nAttributed conversation evidence: ${formatBytes(attributedBytes)}")
                 append(" · SQLite shared projection excluded")
-                if (workingData.isReadOnly) append("\nREAD-ONLY RECOVERY")
+                if (workingData.isReadOnly) append("\nREAD-ONLY RECOVERY SOURCE")
             }
             textSize = 14f
             setPadding(0, 8, 0, 12)
@@ -92,13 +97,13 @@ class AndroidConversationReaderActivity : Activity() {
 
     private fun showClean() {
         modeLabel.text = "CLEAN · JAN / RIGHT-HAND only · no tools"
-        body.text = runCatching { human.renderCleanMarkdown(conversationKey) }
+        body.text = runCatching { human.renderCleanMarkdown(location.conversationKey) }
             .getOrElse { "Unable to render CLEAN view: ${it.message}" }
     }
 
     private fun showRaw() {
         modeLabel.text = "RAW · unfiltered captured conversation payloads"
-        body.text = runCatching { human.renderRawMarkdown(conversationKey) }
+        body.text = runCatching { human.renderRawMarkdown(location.conversationKey) }
             .getOrElse { "Unable to render RAW view: ${it.message}" }
     }
 
@@ -118,7 +123,6 @@ class AndroidConversationReaderActivity : Activity() {
     }
 
     companion object {
-        const val EXTRA_CONVERSATION_KEY = "conversationKey"
-        const val EXTRA_WORKING_DATA_ID = "workingDataId"
+        const val EXTRA_CONVERSATION_NATIVE_ID = "conversationNativeId"
     }
 }
