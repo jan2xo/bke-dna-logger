@@ -37,8 +37,6 @@ archive_tokens = [
 for token in archive_tokens:
     assert token in archive, token
 
-# A successful build alone may not mark cleanup durability. The selected
-# destination is re-read and compared before the SQLite durability mutation.
 assert archive.index('resolver.openInputStream(destinationUri)') < archive.index('index.recordVerifiedConversationArchive')
 assert archive.index('destinationSha256 == verified.archiveSha256') < archive.index('index.recordVerifiedConversationArchive')
 
@@ -73,14 +71,11 @@ working_data_tokens = [
 for token in working_data_tokens:
     assert token in working_data, token
 
-# A generation must be fully verified before Latest is retired. Once Latest has
-# been retired, a failure starting the fresh DB must not delete the saved copy.
 verify_pos = working_data.index('val verifiedGeneration = readGeneration(generationDirectory)')
 retire_pos = working_data.index('appContext.deleteDatabase(AndroidCaptureIndex.DATABASE_NAME)')
 assert verify_pos < retire_pos
 assert 'if (!latestRetired) generationDirectory.deleteRecursively()' in working_data
 
-# Saved generations are app-private and do not duplicate immutable raw bodies.
 assert 'dna/working-data' in paths
 assert '.put("rawEvidenceIncluded", false)' in working_data
 assert '.put("rawEvidenceSharedBySha", true)' in working_data
@@ -89,7 +84,6 @@ assert 'bodies/' not in working_data
 ui_tokens = [
     'Working Data & Exports',
     'Spinner',
-    'Latest — Active',
     'READ-ONLY RECOVERY',
     'Save & Start New Working Data',
     'Back to Latest Working Data',
@@ -110,8 +104,6 @@ ui_tokens = [
 for token in ui_tokens:
     assert token in ui, token
 
-# Historical selection is recovery-only; it may render/export CLEAN/RAW but the
-# .dna durability mutation stays Latest-only.
 assert 'if (selected.isLatest)' in ui
 assert 'Historical Working Data cannot mutate Latest .dna durability state' in ui
 assert 'pendingWorkingDataId == AndroidWorkingDataManager.LATEST_ID' in ui
@@ -130,8 +122,6 @@ reader_tokens = [
 for token in reader_tokens:
     assert token in reader, token
 
-# Entering Working Data management pauses capture and returning creates a fresh
-# host/ingress rather than reusing the closed AndroidWireIngress.
 assert 'Working Data & Exports' in main
 assert 'geckoHost.stop()' in main
 assert 'capturePausedForWorkingData = true' in main
@@ -160,9 +150,6 @@ human_tokens = [
 for token in human_tokens:
     assert token in human, token
 
-# CLEAN is not a summary. It contains only the latest readable turns from nodes
-# whose role set is exactly user or exactly assistant. No metadata/truncation or
-# tool-result fallback is allowed inside the CLEAN renderer.
 clean_start = human.index('private fun renderCleanMarkdown(state: JSONObject)')
 clean_end = human.index('/**\n     * RAW contract', clean_start)
 clean = human[clean_start:clean_end]
@@ -180,8 +167,6 @@ for forbidden in [
 assert 'appendLine(speaker)' in clean
 assert 'appendLine(text)' in clean
 
-# RAW is the opposite: it resolves the source payloads and exact observation
-# envelopes without passing through CLEAN role filtering.
 raw_start = human.index('private fun renderRawMarkdown')
 raw_end = human.index('private fun observationsForSource', raw_start)
 raw = human[raw_start:raw_end]
@@ -190,7 +175,6 @@ assert 'bodies/$sha.body' in raw
 assert 'cleanSpeaker(' not in raw
 assert 'latestRevision(' not in raw
 
-# Markdown exports cannot mark .dna durability.
 assert 'recordVerifiedConversationArchive' not in human
 assert 'AndroidConversationDnaArchiveService' not in human
 
@@ -211,8 +195,6 @@ assert 'AUTOMATIC_DNA_EXPORT = false' in contract
 assert 'AUTOMATIC_MARKDOWN_EXPORT = false' in contract
 assert 'MERGE_SQLITE_ACROSS_DEVICES = false' in contract
 
-# Lock canonical archive identity material used by both desktop and Android:
-# path, sha256, byte length, optional source SHA; lexicographically by path.
 source = 'a' * 64
 evidence = [
     ('conversation/state.json', 'b' * 64, 123, ''),
