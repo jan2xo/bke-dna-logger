@@ -25,10 +25,12 @@ app_build = (app / "build.gradle.kts").read_text(encoding="utf-8")
 
 if 'id("com.android.application") version "9.3.2"' not in root_build:
     raise SystemExit("Android Gradle Plugin 9.3.2 pin is missing")
+if 'classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.10")' not in root_build:
+    raise SystemExit("built-in Kotlin compiler override KGP 2.4.10 is missing")
 
 # AGP 9+ provides built-in Kotlin support. Applying the standalone Kotlin
-# Android plugin is an error and would revive the exact CI failure this gate
-# eliminated.
+# Android plugin is an error. KGP is upgraded only through the top-level
+# buildscript classpath so the built-in compiler matches GeckoView's stdlib.
 for build_name, build_text in {
     "root build": root_build,
     "app build": app_build,
