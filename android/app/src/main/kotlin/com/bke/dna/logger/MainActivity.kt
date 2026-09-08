@@ -12,11 +12,13 @@ import org.mozilla.geckoview.GeckoView
 
 class MainActivity : Activity() {
     private lateinit var geckoHost: GeckoViewHost
+    private var capturePausedForWorkingData = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         AndroidDnaPaths.capturesRoot(this)
+        AndroidDnaPaths.workingDataRoot(this)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -46,8 +48,12 @@ class MainActivity : Activity() {
             }
         }
         val exportsButton = Button(this).apply {
-            text = "Exports & Backups"
+            text = "Working Data & Exports"
             setOnClickListener {
+                if (::geckoHost.isInitialized) {
+                    geckoHost.stop()
+                    capturePausedForWorkingData = true
+                }
                 startActivity(Intent(this@MainActivity, AndroidExportsBackupsActivity::class.java))
             }
         }
@@ -73,6 +79,14 @@ class MainActivity : Activity() {
 
         geckoHost = GeckoViewHost(this, geckoView)
         geckoHost.start()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (capturePausedForWorkingData && ::geckoHost.isInitialized) {
+            geckoHost.start()
+            capturePausedForWorkingData = false
+        }
     }
 
     override fun onDestroy() {
