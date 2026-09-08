@@ -9,9 +9,10 @@ import android.widget.ScrollView
 import android.widget.TextView
 import java.util.Locale
 
-/** Lightweight in-app reader for CLEAN/RAW human derivatives. */
+/** Read-only conversation recovery surface for Latest or a saved Working Data generation. */
 class AndroidConversationReaderActivity : Activity() {
     private lateinit var conversationKey: String
+    private lateinit var workingData: AndroidWorkingDataGeneration
     private lateinit var human: AndroidHumanExportService
     private lateinit var body: TextView
     private lateinit var modeLabel: TextView
@@ -19,11 +20,19 @@ class AndroidConversationReaderActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         conversationKey = intent.getStringExtra(EXTRA_CONVERSATION_KEY).orEmpty()
+        val workingDataId = intent.getStringExtra(EXTRA_WORKING_DATA_ID)
+            ?: AndroidWorkingDataManager.LATEST_ID
         if (conversationKey.isBlank()) {
             finish()
             return
         }
-        human = AndroidHumanExportService(this)
+
+        workingData = runCatching { AndroidWorkingDataManager(this).generation(workingDataId) }
+            .getOrElse {
+                finish()
+                return
+            }
+        human = AndroidHumanExportService(this, workingData.conversationStateDirectory)
         renderUi()
         showClean()
     }
@@ -42,7 +51,12 @@ class AndroidConversationReaderActivity : Activity() {
             textSize = 22f
         })
         root.addView(TextView(this).apply {
-            text = "Attributed evidence storage: ${formatBytes(attributedBytes)} · SQLite shared projection excluded"
+            text = buildString {
+                append(workingData.label)
+                append("\nAttributed conversation evidence: ${formatBytes(attributedBytes)}")
+                append(" · SQLite shared projection excluded")
+                if (workingData.isReadOnly) append("\nREAD-ONLY RECOVERY")
+            }
             textSize = 14f
             setPadding(0, 8, 0, 12)
         })
@@ -77,13 +91,13 @@ class AndroidConversationReaderActivity : Activity() {
     }
 
     private fun showClean() {
-        modeLabel.text = "CLEAN · token-efficient continuation view"
+        modeLabel.text = "CLEAN · JAN / RIGHT-HAND only · no tools"
         body.text = runCatching { human.renderCleanMarkdown(conversationKey) }
             .getOrElse { "Unable to render CLEAN view: ${it.message}" }
     }
 
     private fun showRaw() {
-        modeLabel.text = "RAW · all reconciled revisions / readable content"
+        modeLabel.text = "RAW · unfiltered captured conversation payloads"
         body.text = runCatching { human.renderRawMarkdown(conversationKey) }
             .getOrElse { "Unable to render RAW view: ${it.message}" }
     }
@@ -105,5 +119,6 @@ class AndroidConversationReaderActivity : Activity() {
 
     companion object {
         const val EXTRA_CONVERSATION_KEY = "conversationKey"
+        const val EXTRA_WORKING_DATA_ID = "workingDataId"
     }
 }
