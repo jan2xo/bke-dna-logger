@@ -60,6 +60,7 @@ class AndroidWorkingDataManager(context: Context) {
         check(!generationDirectory.exists()) { "Working Data generation already exists" }
         check(generationDirectory.mkdirs()) { "Unable to create Working Data generation" }
 
+        var latestRetired = false
         try {
             val snapshotDatabase = File(generationDirectory, SNAPSHOT_DATABASE_NAME)
             copyDurably(activeDatabase, snapshotDatabase)
@@ -68,17 +69,18 @@ class AndroidWorkingDataManager(context: Context) {
                 "Working Data SQLite snapshot verification failed"
             }
 
+            val summaries = listConversationsFromDatabase(snapshotDatabase)
             val snapshotConversations = File(generationDirectory, SNAPSHOT_CONVERSATIONS_DIRECTORY)
             check(snapshotConversations.mkdirs()) { "Unable to create Working Data conversation-state snapshot" }
             val liveConversations = File(captureRoot, "conversations")
-            liveConversations.listFiles().orEmpty()
-                .filter { it.isFile && it.extension == "json" }
-                .sortedBy { it.name }
-                .forEach { source ->
-                    copyDurably(source, File(snapshotConversations, source.name))
+            summaries.forEach { summary ->
+                val source = File(liveConversations, "${summary.conversationKey}.json")
+                require(source.isFile) {
+                    "Latest Working Data indexes conversation '${summary.conversationKey}' without a state file"
                 }
+                copyDurably(source, File(snapshotConversations, source.name))
+            }
 
-            val summaries = listConversationsFromDatabase(snapshotDatabase)
             val manifest = JSONObject()
                 .put("format", WORKING_DATA_FORMAT)
                 .put("formatVersion", 1)
@@ -94,6 +96,9 @@ class AndroidWorkingDataManager(context: Context) {
                 .put("rawEvidenceSharedBySha", true)
             writeDurably(File(generationDirectory, MANIFEST_NAME), manifest.toString(2))
 
+            val verifiedGeneration = readGeneration(generationDirectory)
+                ?: error("Unable to verify saved Working Data generation")
+
             snapshotDatabase.setReadOnly()
             snapshotConversations.listFiles().orEmpty().forEach(File::setReadOnly)
             File(generationDirectory, MANIFEST_NAME).setReadOnly()
@@ -101,12 +106,14 @@ class AndroidWorkingDataManager(context: Context) {
             require(appContext.deleteDatabase(AndroidCaptureIndex.DATABASE_NAME)) {
                 "Unable to retire Latest Working Data SQLite after verified snapshot"
             }
+            latestRetired = true
             ensureActiveDatabaseCreated()
 
-            return readGeneration(generationDirectory)
-                ?: error("Unable to reopen saved Working Data generation")
+            return verifiedGeneration.copy(
+                snapshotBytes = generationDirectory.walkTopDown().filter { it.isFile }.sumOf { it.length() },
+            )
         } catch (error: Throwable) {
-            generationDirectory.deleteRecursively()
+            if (!latestRetired) generationDirectory.deleteRecursively()
             throw error
         }
     }
@@ -149,8 +156,15 @@ class AndroidWorkingDataManager(context: Context) {
         require(manifest.getInt("formatVersion") == 1)
         require(manifest.getString("generationId") == directory.name)
         require(manifest.getString("mode") == "read_only_recovery")
+        require(manifest.getBoolean("conversationStateIncluded"))
+        require(!manifest.getBoolean("rawEvidenceIncluded"))
         require(manifest.getBoolean("rawEvidenceSharedBySha"))
         require(sha256File(database) == manifest.getString("sqliteSha256"))
+        val summaries = listConversationsFromDatabase(database)
+        require(summaries.size == manifest.getInt("conversationCount"))
+        summaries.forEach { summary ->
+            require(File(states, "${summary.conversationKey}.json").isFile)
+        }
         val createdAt = Instant.parse(manifest.getString("createdAt"))
         AndroidWorkingDataGeneration(
             id = directory.name,
