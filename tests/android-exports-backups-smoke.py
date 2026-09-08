@@ -15,6 +15,7 @@ paths = (base / "AndroidDnaPaths.kt").read_text()
 backup = (base / "AndroidWorkingBackupService.kt").read_text()
 contract = (base / "DnaReconciliationContract.kt").read_text()
 manifest = (root / "android" / "app" / "src" / "main" / "AndroidManifest.xml").read_text()
+readme = (root / "README.md").read_text()
 
 archive_tokens = [
     '"formatVersion", 2',
@@ -100,6 +101,8 @@ ui_tokens = [
     'AndroidConversationDnaArchiveService',
     'exportCleanMarkdownToUri',
     'exportRawMarkdownToUri',
+    'operationInProgress',
+    'Working Data operation in progress',
 ]
 for token in ui_tokens:
     assert token in ui, token
@@ -189,6 +192,16 @@ for token in backup_tokens:
     assert token in backup, token
 assert 'SQLiteDatabase' not in backup
 assert 'ATTACH DATABASE' not in backup.upper()
+
+for token in [
+    'SQLite is local **Working Data**',
+    '`Latest — Active`',
+    '`JAN` user turns',
+    '`RIGHT-HAND` assistant turns',
+    'RAW conversation export preserves the unfiltered captured conversation payload sources',
+    '`.dna` is the self-contained durable archive format',
+]:
+    assert token in readme, token
 
 assert 'STORAGE_WARNING_BYTES = 1_073_741_824L' in contract
 assert 'AUTOMATIC_DNA_EXPORT = false' in contract
