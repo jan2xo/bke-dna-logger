@@ -26,7 +26,9 @@ class AndroidUnifiedConversationLibrary(context: Context) {
 
         while (true) {
             val rows = generations.flatMap { generation ->
-                queryGeneration(generation, normalizedQuery, perGenerationLimit)
+                runCatching {
+                    queryGeneration(generation, normalizedQuery, perGenerationLimit)
+                }.getOrDefault(emptyList())
             }
             merged = rows
                 .groupBy { it.conversationNativeId }
@@ -48,9 +50,9 @@ class AndroidUnifiedConversationLibrary(context: Context) {
     fun resolve(conversationNativeId: String): AndroidUnifiedConversationLocation {
         require(conversationNativeId.isNotBlank())
         val copies = workingData.listWorkingData().mapNotNull { generation ->
-            queryExact(generation, conversationNativeId)
+            runCatching { queryExact(generation, conversationNativeId) }.getOrNull()
         }
-        require(copies.isNotEmpty()) { "Conversation does not exist in any Working Data generation" }
+        require(copies.isNotEmpty()) { "Conversation does not exist in any readable Working Data generation" }
         return preferred(copies).toLocation(copies.map { it.generation.id }.distinct())
     }
 
