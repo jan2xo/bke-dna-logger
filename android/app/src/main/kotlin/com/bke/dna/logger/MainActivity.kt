@@ -13,7 +13,6 @@ import org.mozilla.geckoview.GeckoView
 class MainActivity : Activity() {
     private lateinit var geckoView: GeckoView
     private lateinit var geckoHost: GeckoViewHost
-    private var capturePausedForWorkingData = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,10 +50,9 @@ class MainActivity : Activity() {
         val exportsButton = Button(this).apply {
             text = "Working Data & Exports"
             setOnClickListener {
-                if (::geckoHost.isInitialized) {
-                    geckoHost.stop()
-                    capturePausedForWorkingData = true
-                }
+                // Management is a sibling Activity. Keep the GeckoSession alive so
+                // Back returns to the exact ChatGPT page/scroll/session instead of
+                // constructing a new browser and loading chatgpt.com again.
                 startActivity(Intent(this@MainActivity, AndroidExportsBackupsActivity::class.java))
             }
         }
@@ -80,15 +78,6 @@ class MainActivity : Activity() {
 
         geckoHost = GeckoViewHost(this, geckoView)
         geckoHost.start()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        if (capturePausedForWorkingData && ::geckoView.isInitialized) {
-            geckoHost = GeckoViewHost(this, geckoView)
-            geckoHost.start()
-            capturePausedForWorkingData = false
-        }
     }
 
     override fun onDestroy() {
