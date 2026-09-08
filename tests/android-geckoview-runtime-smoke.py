@@ -49,6 +49,42 @@ for token in (
     if token not in host:
         raise SystemExit(f"GeckoView host contract missing {token!r}")
 
+route_tokens = (
+    'ROUTE_CONVERSATION = "capture_route_conversation"',
+    'ROUTE_CONVERSATIONS_LIST = "capture_route_conversations_list"',
+    'ROUTE_BACKEND_API = "capture_route_backend_api"',
+    'ROUTE_PUBLIC_API = "capture_route_public_api"',
+    'ROUTE_OTHER = "capture_route_other"',
+    "private fun classifyCaptureRoute(requestUrl: String?): String",
+    'path == "/backend-api/conversations"',
+    'path.startsWith("/backend-api/conversation/")',
+    'path.startsWith("/backend-api/")',
+    'path.startsWith("/public-api/")',
+    'if (type == "capture_start")',
+    'Log.d(TAG, "DNA capture route: ${classifyCaptureRoute(requestUrl)}")',
+)
+for token in route_tokens:
+    if token not in host:
+        raise SystemExit(f"GeckoView host is missing capture-route diagnostic contract {token!r}")
+
+if host.index('path == "/backend-api/conversations"') > host.index('path.startsWith("/backend-api/")'):
+    raise SystemExit("conversations-list route must be classified before generic backend-api fallback")
+if host.index('path.startsWith("/backend-api/conversation/")') > host.index('path.startsWith("/backend-api/")'):
+    raise SystemExit("single-conversation route must be classified before generic backend-api fallback")
+if host.index('val type = ingress.accept(') > host.index('Log.d(TAG, "DNA capture route: ${classifyCaptureRoute(requestUrl)}")'):
+    raise SystemExit("capture route must be logged only after native capture_start persistence succeeds")
+
+for forbidden in (
+    'Log.d(TAG, requestUrl',
+    'Log.i(TAG, requestUrl',
+    'Log.w(TAG, requestUrl',
+    'Log.e(TAG, requestUrl',
+    '"DNA capture route: $requestUrl"',
+    '"DNA capture route: ${message.optString',
+):
+    if forbidden in host:
+        raise SystemExit(f"capture-route diagnostics must not expose request URLs: {forbidden!r}")
+
 interceptor_diagnostics = (
     "interceptor_ready",
     "fetch_seen",
