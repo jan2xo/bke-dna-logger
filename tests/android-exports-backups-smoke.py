@@ -64,8 +64,6 @@ for token in working_data_tokens:
 assert 'bodies/' not in working_data
 assert 'dna/working-data' in paths
 
-# Unified library federates read-only summary queries; it must never open full
-# conversation state or raw bodies while rendering/searching the list.
 for token in [
     'class AndroidUnifiedConversationLibrary',
     'workingData.listWorkingData()',
@@ -76,7 +74,11 @@ for token in [
     'generationCount',
     'hasLatest',
     'DEFAULT_PAGE_SIZE = 40',
-    'MAX_PAGE_SIZE = 400',
+    'MAX_PAGE_SIZE = 10_000',
+    'MAX_METADATA_ROWS_PER_GENERATION = 10_000',
+    'while (true)',
+    'merged.size >= limit',
+    'perGenerationLimit * 2',
     'fun resolve(conversationNativeId: String)',
 ]:
     assert token in unified, token
@@ -106,7 +108,6 @@ ui_tokens = [
 for token in ui_tokens:
     assert token in ui, token
 
-# Critical lazy-loading contract: cards use SQLite summary metadata only.
 conversation_loop = ui[ui.index('conversations.forEach'):ui.index('private fun prepareHumanExport')]
 assert 'human.describe' not in conversation_loop
 assert 'conversationWorkingBytes' not in conversation_loop
@@ -116,8 +117,6 @@ assert 'summary.displayTitle' in conversation_loop
 assert 'summary.generationCount' in conversation_loop
 assert 'EXTRA_CONVERSATION_NATIVE_ID' in conversation_loop
 
-# Historical generations remain immutable. .dna durability mutation stays tied
-# to a conversation that exists in Latest; CLEAN/RAW can resolve historical data.
 assert 'if (summary.hasLatest)' in ui
 assert 'Historical Working Data cannot mutate Latest .dna durability state' in ui
 assert 'pendingWorkingDataId == AndroidWorkingDataManager.LATEST_ID' in ui
@@ -138,7 +137,6 @@ reader_tokens = [
 for token in reader_tokens:
     assert token in reader, token
 
-# Heavy human evidence resolution belongs behind the click/export trigger.
 assert 'human.describe(location.conversationKey)' in reader
 assert 'conversationWorkingBytes(location.conversationKey)' in reader
 assert 'AndroidHumanExportService' in ui[ui.index('private fun prepareHumanExport'):]
