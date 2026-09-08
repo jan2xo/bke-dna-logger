@@ -82,9 +82,15 @@
     }
 
     try {
-      // Brand-check using the ArrayBuffer internal slot rather than realm-sensitive instanceof.
+      // Brand-check the transferred ArrayBuffer without realm-sensitive instanceof.
       ArrayBuffer.prototype.slice.call(body, 0, 0);
-      const bytes = new Uint8Array(body);
+
+      // Copy foreign/page-owned bytes into a typed array owned by this extension realm.
+      // Gecko content-script sandboxes can reject methods such as subarray() on views
+      // that remain backed directly by cross-compartment ArrayBuffers.
+      const foreignBytes = new Uint8Array(body);
+      const bytes = new Uint8Array(foreignBytes.byteLength);
+      bytes.set(foreignBytes);
       return bytes.byteLength === expectedByteLength ? bytes : null;
     } catch (_) {
       return null;
