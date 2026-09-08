@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
@@ -27,10 +26,6 @@ android {
     sourceSets {
         getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/dna-assets"))
     }
-}
-
-kotlin {
-    jvmToolchain(17)
 }
 
 val syncMainInterceptor by tasks.registering(Copy::class) {

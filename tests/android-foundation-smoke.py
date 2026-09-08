@@ -23,12 +23,18 @@ settings = (android / "settings.gradle.kts").read_text(encoding="utf-8")
 root_build = (android / "build.gradle.kts").read_text(encoding="utf-8")
 app_build = (app / "build.gradle.kts").read_text(encoding="utf-8")
 
-for token in (
-    'id("com.android.application") version "9.1.0"',
-    'id("org.jetbrains.kotlin.android") version "2.4.10"',
-):
-    if token not in root_build:
-        raise SystemExit(f"Android toolchain pin missing {token!r}")
+if 'id("com.android.application") version "9.1.0"' not in root_build:
+    raise SystemExit("Android Gradle Plugin 9.1.0 pin is missing")
+
+# AGP 9+ provides built-in Kotlin support. Applying the standalone Kotlin
+# Android plugin is an error and would revive the exact CI failure this gate
+# eliminated.
+for build_name, build_text in {
+    "root build": root_build,
+    "app build": app_build,
+}.items():
+    if "org.jetbrains.kotlin.android" in build_text:
+        raise SystemExit(f"{build_name} reintroduces retired standalone Kotlin Android plugin")
 
 for token in (
     'maven("https://maven.mozilla.org/maven2/")',
