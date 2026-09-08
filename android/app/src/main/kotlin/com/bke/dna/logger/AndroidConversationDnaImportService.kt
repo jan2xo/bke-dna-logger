@@ -13,10 +13,13 @@ import java.util.zip.ZipFile
  *
  * This never attaches or merges another device's SQLite database. Archives are
  * independently verified, staged, then admitted into this device's local
- * evidence store. Manual archive export remains a separate owner action.
+ * evidence store. Imported normalized evidence is then reconciled into this
+ * device's own logical conversation projection. Manual archive export remains
+ * a separate owner action.
  */
 class AndroidConversationDnaImportService(context: Context) {
-    private val captureRoot = AndroidDnaPaths.capturesRoot(context.applicationContext)
+    private val appContext = context.applicationContext
+    private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
 
     fun importVerified(archives: List<File>): AndroidConversationDnaImportResult {
         require(archives.isNotEmpty()) { "At least one conversation .dna archive is required" }
@@ -34,12 +37,19 @@ class AndroidConversationDnaImportService(context: Context) {
             verified.forEach { archive -> stageArchive(archive, stagingRoot, staged) }
             staged.values.sortedBy { it.relativeTarget }.forEach(::commitStaged)
 
+            val logicalConversation = AndroidConversationAggregationEngine(appContext).use { engine ->
+                engine.aggregateAll().singleOrNull { it.conversationNativeId == conversationNativeId }
+            } ?: error("Imported conversation DNA did not produce a logical conversation state")
+
             return AndroidConversationDnaImportResult(
                 contractId = DnaReconciliationContract.CONTRACT_ID,
                 conversationNativeId = conversationNativeId,
+                conversationKey = logicalConversation.conversationKey,
                 archiveCount = verified.size,
                 sourceSha256s = verified.flatMap { it.sourceSha256s }.distinct().sorted(),
                 importedFileCount = staged.size,
+                coverageStatus = logicalConversation.coverageStatus,
+                nodeCount = logicalConversation.nodes.size,
             )
         } finally {
             stagingRoot.deleteRecursively()
@@ -260,9 +270,12 @@ data class VerifiedConversationDna(
 data class AndroidConversationDnaImportResult(
     val contractId: String,
     val conversationNativeId: String,
+    val conversationKey: String,
     val archiveCount: Int,
     val sourceSha256s: List<String>,
     val importedFileCount: Int,
+    val coverageStatus: String,
+    val nodeCount: Int,
 )
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
