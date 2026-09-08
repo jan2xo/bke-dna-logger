@@ -4,7 +4,11 @@ plugins {
 
 android {
     namespace = "com.bke.dna.logger"
-    compileSdk = 37
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 1
+        }
+    }
 
     defaultConfig {
         applicationId = "com.bke.dna.logger"

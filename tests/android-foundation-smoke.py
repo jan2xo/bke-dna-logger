@@ -23,8 +23,8 @@ settings = (android / "settings.gradle.kts").read_text(encoding="utf-8")
 root_build = (android / "build.gradle.kts").read_text(encoding="utf-8")
 app_build = (app / "build.gradle.kts").read_text(encoding="utf-8")
 
-if 'id("com.android.application") version "9.2.1"' not in root_build:
-    raise SystemExit("Android Gradle Plugin 9.2.1 pin is missing")
+if 'id("com.android.application") version "9.3.2"' not in root_build:
+    raise SystemExit("Android Gradle Plugin 9.3.2 pin is missing")
 
 # AGP 9+ provides built-in Kotlin support. Applying the standalone Kotlin
 # Android plugin is an error and would revive the exact CI failure this gate
@@ -39,7 +39,8 @@ for build_name, build_text in {
 for token in (
     'maven("https://maven.mozilla.org/maven2/")',
     'org.mozilla.geckoview:geckoview-arm64-v8a:154.0.20260824154132',
-    'compileSdk = 37',
+    'version = release(37)',
+    'minorApiLevel = 1',
     'minSdk = 26',
     'targetSdk = 36',
     'abiFilters += "arm64-v8a"',
@@ -141,8 +142,8 @@ for forbidden in ("dotnet workload install android", "BKE.Dna.Logger.GeckoView.B
     if forbidden in ci:
         raise SystemExit(f"CI still contains retired managed Android path {forbidden!r}")
 for required in (
-    'sdkmanager "platforms;android-37.0" "build-tools;36.0.0"',
-    "gradle-version: '9.4.1'",
+    'sdkmanager "platforms;android-37.1" "build-tools;36.0.0"',
+    "gradle-version: '9.5.0'",
     "gradle -p android :app:assembleDebug",
 ):
     if required not in ci:

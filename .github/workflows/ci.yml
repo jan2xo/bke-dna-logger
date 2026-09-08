@@ -45,11 +45,11 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
-      - name: Install Android SDK 37.0
-        run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0"
+      - name: Install Android SDK 37.1
+        run: sdkmanager "platforms;android-37.1" "build-tools;36.0.0"
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.4.1'
+          gradle-version: '9.5.0'
       - name: Build Kotlin Android APK with stable GeckoView
         run: gradle -p android :app:assembleDebug --stacktrace
       - name: Android Kotlin contract smoke
