@@ -37,6 +37,8 @@ jobs:
         run: python3 tests/android-foundation-smoke.py
       - name: Android GeckoView runtime smoke
         run: python3 tests/android-geckoview-runtime-smoke.py
+      - name: Android native ingress smoke
+        run: python3 tests/android-native-ingress-smoke.py
 
   android:
     runs-on: ubuntu-latest
@@ -58,3 +60,5 @@ jobs:
         run: python3 tests/android-foundation-smoke.py
       - name: Android GeckoView runtime smoke
         run: python3 tests/android-geckoview-runtime-smoke.py
+      - name: Android native ingress smoke
+        run: python3 tests/android-native-ingress-smoke.py

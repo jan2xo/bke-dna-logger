@@ -2,15 +2,14 @@ package com.bke.dna.logger
 
 import android.app.Activity
 import android.util.Log
+import org.json.JSONObject
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoView
 import org.mozilla.geckoview.WebExtension
+import java.nio.charset.StandardCharsets
 
-/**
- * Owns the Android browser surface only. GeckoView stays native to Kotlin;
- * DNA persistence/normalization remains a separate layer for the next stack.
- */
+/** Owns GeckoView and routes DNA WebExtension messages into native Android ingress. */
 class GeckoViewHost(
     activity: Activity,
     private val view: GeckoView,
@@ -25,6 +24,7 @@ class GeckoViewHost(
 
     private val runtime = GeckoRuntimeProvider.get(activity.applicationContext)
     private val session = GeckoSession()
+    private val ingress = AndroidWireIngress(activity.applicationContext)
     private var started = false
 
     private val messageDelegate = object : WebExtension.MessageDelegate {
@@ -38,10 +38,17 @@ class GeckoViewHost(
                 return null
             }
 
-            // #17 proves the GeckoView/WebExtension channel is registered.
-            // #18 will validate and persist the DNA wire payload through
-            // AndroidWireIngress -> SQLite -> verified .dna.
-            Log.d(TAG, "DNA message reached native endpoint: ${message.javaClass.simpleName}")
+            if (message !is JSONObject) {
+                Log.w(TAG, "Ignoring non-object DNA message: ${message.javaClass.simpleName}")
+                return null
+            }
+
+            try {
+                val type = ingress.accept(message.toString().toByteArray(StandardCharsets.UTF_8))
+                Log.d(TAG, "Persisted DNA wire message: $type")
+            } catch (error: Exception) {
+                Log.e(TAG, "Rejected DNA wire message", error)
+            }
             return null
         }
     }
@@ -50,14 +57,10 @@ class GeckoViewHost(
         check(!started) { "GeckoViewHost is already started" }
         started = true
 
-        // Mozilla's embedding guidance recommends a ContentDelegate even when
-        // no content callbacks are needed yet.
         session.setContentDelegate(object : GeckoSession.ContentDelegate {})
         session.open(runtime)
         view.setSession(session)
 
-        // Install/refresh the privileged built-in extension before ChatGPT is
-        // loaded so document_start capture is present on the first navigation.
         runtime.getWebExtensionController()
             .ensureBuiltIn(EXTENSION_URI, EXTENSION_ID)
             .accept(
@@ -81,14 +84,11 @@ class GeckoViewHost(
     }
 
     fun stop() {
-        if (!started) {
-            return
-        }
+        if (!started) return
 
         view.releaseSession()
-        if (session.isOpen) {
-            session.close()
-        }
+        if (session.isOpen) session.close()
+        ingress.close()
         started = false
     }
 }

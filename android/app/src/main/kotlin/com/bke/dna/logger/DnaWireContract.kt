@@ -3,11 +3,7 @@ package com.bke.dna.logger
 import org.json.JSONObject
 import java.nio.charset.StandardCharsets
 
-/**
- * Kotlin implementation of the platform-neutral BKE DNA wire contract.
- * Windows/macOS implement the same contract in .NET; Android does not load the
- * .NET runtime just to share implementation code.
- */
+/** Platform-neutral DNA wire validation implemented natively for Android. */
 object DnaWireContract {
     const val MAX_MESSAGE_BYTES: Int = 2 * 1024 * 1024
 
@@ -18,7 +14,16 @@ object DnaWireContract {
         "dom_witness",
     )
 
-    fun validate(rawMessage: ByteArray): String {
+    private val forbiddenMetadataKeys = setOf(
+        "authorization",
+        "cookie",
+        "cookies",
+        "requestHeaders",
+        "responseHeaders",
+        "headers",
+    )
+
+    fun parse(rawMessage: ByteArray): JSONObject {
         require(rawMessage.size <= MAX_MESSAGE_BYTES) {
             "DNA wire message exceeds $MAX_MESSAGE_BYTES bytes"
         }
@@ -26,6 +31,13 @@ object DnaWireContract {
         val json = JSONObject(String(rawMessage, StandardCharsets.UTF_8))
         val type = json.optString("type")
         require(type in allowedTypes) { "Unsupported DNA wire type: $type" }
-        return type
+
+        forbiddenMetadataKeys.forEach { key ->
+            require(!json.has(key)) { "Forbidden sensitive metadata field: $key" }
+        }
+
+        return json
     }
+
+    fun validate(rawMessage: ByteArray): String = parse(rawMessage).getString("type")
 }
