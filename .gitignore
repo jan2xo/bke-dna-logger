@@ -8,3 +8,4 @@ local.properties
 .DS_Store
 captures/
 *.part
+android/app/src/main/assets/dna-extension/main-interceptor.js

@@ -22,15 +22,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-
-    sourceSets {
-        getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/dna-assets"))
-    }
 }
 
 val syncMainInterceptor by tasks.registering(Copy::class) {
     from(rootProject.file("../extension/main-interceptor.js"))
-    into(layout.buildDirectory.dir("generated/dna-assets/dna-extension"))
+    into("src/main/assets/dna-extension")
 }
 
 tasks.named("preBuild").configure {
