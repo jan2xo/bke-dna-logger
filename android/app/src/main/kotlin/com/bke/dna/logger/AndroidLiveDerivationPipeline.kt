@@ -93,6 +93,7 @@ class AndroidLiveDerivationPipeline(context: Context) {
         }
         return ClassificationOutcome(
             kind = classification.getString("kind"),
+            score = classification.getInt("score"),
             confidence = classification.getString("confidence"),
             signals = signals,
         )
@@ -118,6 +119,33 @@ class AndroidLiveDerivationPipeline(context: Context) {
                 "classification_other_low_score"
         }
         Log.d(TAG, "BKE DNA derivation: $event")
+        if (event == "classification_other_low_score") {
+            logLowScoreClassifierShape(outcome)
+        }
+    }
+
+    private fun logLowScoreClassifierShape(outcome: ClassificationOutcome) {
+        when (outcome.score) {
+            in 0..9 -> Log.d(TAG, "BKE DNA derivation: classifier_score_0_9")
+            in 10..19 -> Log.d(TAG, "BKE DNA derivation: classifier_score_10_19")
+            in 20..27 -> Log.d(TAG, "BKE DNA derivation: classifier_score_20_27")
+            else -> Log.d(TAG, "BKE DNA derivation: classifier_score_unexpected")
+        }
+
+        if ("mapping" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_mapping")
+        if ("messages" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_messages")
+        if ("message" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_message")
+        if ("author" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_author")
+        if ("role" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_role")
+        if ("content" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_content")
+        if ("parts" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_parts")
+        if ("parent" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_parent")
+        if ("children" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_children")
+        if ("conversation_id" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_conversation_id")
+        if ("current_node" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_current_node")
+        if ("recognized_message_role" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_recognized_role")
+        if ("conversation_graph_shape" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_graph_shape")
+        if ("authored_message_shape" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_authored_shape")
     }
 
     private fun writeDerivativeAtomically(target: File, text: String) {
@@ -145,6 +173,7 @@ class AndroidLiveDerivationPipeline(context: Context) {
 
     private data class ClassificationOutcome(
         val kind: String,
+        val score: Int,
         val confidence: String,
         val signals: Set<String>,
     )
