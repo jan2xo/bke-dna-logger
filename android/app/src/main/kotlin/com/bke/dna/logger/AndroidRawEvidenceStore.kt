@@ -45,8 +45,14 @@ class AndroidRawEvidenceStore private constructor(
         createSchema(database)
     }
 
+    fun hasSchema(): Boolean = database.rawQuery(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'raw_source' LIMIT 1",
+        null,
+    ).use { it.moveToFirst() }
+
     fun contains(sourceSha256: String): Boolean {
         requireSha(sourceSha256)
+        if (!hasSchema()) return false
         database.rawQuery(
             "SELECT 1 FROM raw_source WHERE source_sha256 = ? LIMIT 1",
             arrayOf(sourceSha256),
@@ -55,6 +61,7 @@ class AndroidRawEvidenceStore private constructor(
 
     fun descriptor(sourceSha256: String): AndroidRawSourceDescriptor? {
         requireSha(sourceSha256)
+        if (!hasSchema()) return null
         database.query(
             "raw_source",
             arrayOf("byte_length", "chunk_count", "codec", "stored_at", "compressed_bytes"),
@@ -77,11 +84,6 @@ class AndroidRawEvidenceStore private constructor(
         }
     }
 
-    /**
-     * Import a completed staging file transactionally. Existing exact sources
-     * are reused by SHA. The source is read and hashed while chunks are inserted,
-     * then read back through SQLite and hashed again before success is returned.
-     */
     fun importVerified(
         sourceSha256: String,
         stagingFile: File,
@@ -135,8 +137,7 @@ class AndroidRawEvidenceStore private constructor(
             require(byteLength == expectedByteLength) {
                 "RAW staging length changed during SQLite import"
             }
-            val computedSha = digest.digest().toLowerHex()
-            require(computedSha == sourceSha256) {
+            require(digest.digest().toLowerHex() == sourceSha256) {
                 "RAW staging SHA-256 does not match source identity"
             }
 
@@ -161,18 +162,10 @@ class AndroidRawEvidenceStore private constructor(
             throw error
         }
 
-        return AndroidRawImportResult(
-            descriptor = requireNotNull(descriptor(sourceSha256)),
-            reused = false,
-        )
+        return AndroidRawImportResult(requireNotNull(descriptor(sourceSha256)), reused = false)
     }
 
-    /** Exact bounded page from the decompressed source byte stream. */
-    fun readPage(
-        sourceSha256: String,
-        byteOffset: Long,
-        maxBytes: Int,
-    ): ByteArray {
+    fun readPage(sourceSha256: String, byteOffset: Long, maxBytes: Int): ByteArray {
         requireSha(sourceSha256)
         require(byteOffset >= 0)
         require(maxBytes in 1..MAX_READ_PAGE_BYTES)
@@ -194,8 +187,7 @@ class AndroidRawEvidenceStore private constructor(
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 val chunkOffset = cursor.getLong(0)
-                val expectedLength = cursor.getInt(1)
-                val chunk = decompress(cursor.getBlob(2), expectedLength)
+                val chunk = decompress(cursor.getBlob(2), cursor.getInt(1))
                 val localStart = maxOf(0L, byteOffset - chunkOffset).toInt()
                 val localEnd = minOf(chunk.size.toLong(), endExclusive - chunkOffset).toInt()
                 if (localEnd > localStart) output.write(chunk, localStart, localEnd - localStart)
@@ -204,9 +196,8 @@ class AndroidRawEvidenceStore private constructor(
         return output.toByteArray()
     }
 
-    /** Bounded whole-source read for parsers that still have an explicit cap. */
     fun readAllBytes(sourceSha256: String, maxBytes: Long): ByteArray {
-        require(maxBytes >= 0)
+        require(maxBytes in 0..Int.MAX_VALUE.toLong())
         val source = descriptor(sourceSha256) ?: error("RAW source is not stored in SQLite")
         require(source.byteLength <= maxBytes) { "RAW source exceeds bounded read limit" }
         val output = ByteArrayOutputStream(source.byteLength.toInt())
@@ -228,8 +219,7 @@ class AndroidRawEvidenceStore private constructor(
             "sequence ASC",
         ).use { cursor ->
             while (cursor.moveToNext()) {
-                val expectedLength = cursor.getInt(0)
-                val chunk = decompress(cursor.getBlob(1), expectedLength)
+                val chunk = decompress(cursor.getBlob(1), cursor.getInt(0))
                 output.write(chunk)
                 written += chunk.size
             }
@@ -296,7 +286,6 @@ class AndroidRawEvidenceStore private constructor(
         )
         private var chunk = ByteArray(0)
         private var chunkOffset = 0
-        private var totalRead = 0L
         private var closed = false
 
         override fun read(): Int {
@@ -316,7 +305,6 @@ class AndroidRawEvidenceStore private constructor(
                 System.arraycopy(chunk, chunkOffset, buffer, offset + written, copy)
                 chunkOffset += copy
                 written += copy
-                totalRead += copy
             }
             return if (written == 0) -1 else written
         }
@@ -332,9 +320,6 @@ class AndroidRawEvidenceStore private constructor(
             if (closed) return
             closed = true
             cursor.close()
-            require(totalRead == source.byteLength) {
-                "RAW SQLite stream closed before exact source length was consumed"
-            }
         }
     }
 
