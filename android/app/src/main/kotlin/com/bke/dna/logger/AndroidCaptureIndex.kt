@@ -5,6 +5,8 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
 
 /**
  * Android live SQLite projection.
@@ -15,6 +17,7 @@ import org.json.JSONArray
  */
 class AndroidCaptureIndex(context: Context) :
     SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
+    private val appContext = context.applicationContext
 
     override fun onCreate(db: SQLiteDatabase) {
         createCaptureSchema(db)
@@ -24,6 +27,7 @@ class AndroidCaptureIndex(context: Context) :
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createConversationSchema(db)
         if (oldVersion == 2 && newVersion >= 3) upgradeDurabilitySchemaV3(db)
+        if (oldVersion in 2..3 && newVersion >= 4) upgradeLibrarySchemaV4(db)
     }
 
     fun record(observation: JSONObjectObservation) {
@@ -61,6 +65,7 @@ class AndroidCaptureIndex(context: Context) :
             val conversationValues = ContentValues().apply {
                 put("conversation_key", conversation.conversationKey)
                 put("conversation_native_id", conversation.conversationNativeId)
+                put("display_title", conversation.displayTitle)
                 put("current_node_native_id", conversation.currentNodeNativeId)
                 put("state_observed_through", conversation.stateObservedThrough)
                 put("coverage_status", conversation.coverageStatus)
@@ -226,6 +231,7 @@ class AndroidCaptureIndex(context: Context) :
             arrayOf(
                 "conversation_key",
                 "conversation_native_id",
+                "display_title",
                 "state_observed_through",
                 "coverage_status",
                 "source_count",
@@ -245,12 +251,13 @@ class AndroidCaptureIndex(context: Context) :
                 result += AndroidConversationSummary(
                     conversationKey = it.getString(0),
                     conversationNativeId = it.getString(1),
-                    stateObservedThrough = it.getString(2),
-                    coverageStatus = it.getString(3),
-                    sourceCount = it.getInt(4),
-                    nodeCount = it.getInt(5),
-                    dnaArchived = it.getInt(6) != 0,
-                    archivedAt = if (it.isNull(7)) null else it.getString(7),
+                    displayTitle = if (it.isNull(2)) it.getString(1) else it.getString(2),
+                    stateObservedThrough = it.getString(3),
+                    coverageStatus = it.getString(4),
+                    sourceCount = it.getInt(5),
+                    nodeCount = it.getInt(6),
+                    dnaArchived = it.getInt(7) != 0,
+                    archivedAt = if (it.isNull(8)) null else it.getString(8),
                 )
             }
             return result
@@ -302,6 +309,7 @@ class AndroidCaptureIndex(context: Context) :
             CREATE TABLE IF NOT EXISTS logical_conversation (
                 conversation_key TEXT PRIMARY KEY,
                 conversation_native_id TEXT NOT NULL UNIQUE,
+                display_title TEXT,
                 current_node_native_id TEXT,
                 state_observed_through TEXT NOT NULL,
                 coverage_status TEXT NOT NULL,
@@ -405,15 +413,86 @@ class AndroidCaptureIndex(context: Context) :
         ).forEach(db::execSQL)
     }
 
+    private fun upgradeLibrarySchemaV4(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE logical_conversation ADD COLUMN display_title TEXT")
+        val cursor = db.query(
+            "logical_conversation",
+            arrayOf("conversation_key", "conversation_native_id", "state_path"),
+            "display_title IS NULL OR display_title = ''",
+            null,
+            null,
+            null,
+            null,
+        )
+        cursor.use {
+            while (it.moveToNext()) {
+                val conversationKey = it.getString(0)
+                val conversationNativeId = it.getString(1)
+                val statePath = it.getString(2)
+                val title = deriveDisplayTitleFromState(statePath) ?: conversationNativeId
+                val values = ContentValues().apply { put("display_title", title) }
+                db.update(
+                    "logical_conversation",
+                    values,
+                    "conversation_key = ?",
+                    arrayOf(conversationKey),
+                )
+            }
+        }
+    }
+
+    private fun deriveDisplayTitleFromState(relativeStatePath: String): String? {
+        val state = runCatching {
+            JSONObject(File(AndroidDnaPaths.capturesRoot(appContext), relativeStatePath).readText())
+        }.getOrNull() ?: return null
+        state.optString("displayTitle").trim().takeIf { it.isNotBlank() }?.let { return it }
+
+        val nodes = state.optJSONArray("nodes") ?: return null
+        val candidates = buildList {
+            for (index in 0 until nodes.length()) {
+                val node = nodes.optJSONObject(index) ?: continue
+                val roles = node.optJSONArray("roles") ?: continue
+                val roleSet = buildSet {
+                    for (roleIndex in 0 until roles.length()) add(roles.optString(roleIndex))
+                }
+                if (roleSet != setOf("user")) continue
+                val revisions = node.optJSONArray("revisions") ?: continue
+                if (revisions.length() == 0) continue
+                val latest = (0 until revisions.length())
+                    .mapNotNull { revisions.optJSONObject(it) }
+                    .maxByOrNull { it.optString("lastObservedAt") }
+                    ?: continue
+                val parts = latest.optJSONArray("textParts") ?: continue
+                val text = buildList {
+                    for (partIndex in 0 until parts.length()) {
+                        parts.optString(partIndex).takeIf { it.isNotBlank() }?.let(::add)
+                    }
+                }.joinToString("\n\n").trim()
+                if (text.isBlank()) continue
+                val created = node.optJSONArray("createdAtValues")?.optString(0).orEmpty()
+                add(created to text)
+            }
+        }
+        return candidates.sortedBy { it.first.ifBlank { "~" } }
+            .firstOrNull()
+            ?.second
+            ?.lineSequence()
+            ?.firstOrNull { it.isNotBlank() }
+            ?.trim()
+            ?.take(DISPLAY_TITLE_LIMIT)
+    }
+
     companion object {
         const val DATABASE_NAME = "bke-dna-live.db"
-        private const val DATABASE_VERSION = 3
+        private const val DATABASE_VERSION = 4
+        private const val DISPLAY_TITLE_LIMIT = 120
     }
 }
 
 data class AndroidConversationSummary(
     val conversationKey: String,
     val conversationNativeId: String,
+    val displayTitle: String,
     val stateObservedThrough: String,
     val coverageStatus: String,
     val sourceCount: Int,
