@@ -31,10 +31,7 @@ class AndroidLiveDerivationPipeline(context: Context) {
         try {
             Log.d(TAG, "BKE DNA derivation: started")
             ensureClassification(bodyFile, sourceSha256, byteLength, contentType)
-            when (readClassificationKind(sourceSha256)) {
-                CANDIDATE_KIND -> Log.d(TAG, "BKE DNA derivation: classification_candidate")
-                else -> Log.d(TAG, "BKE DNA derivation: classification_other")
-            }
+            logClassificationOutcome(readClassificationOutcome(sourceSha256))
 
             val normalized = normalizer.normalizeCandidate(sourceSha256)
             if (normalized == null) {
@@ -85,11 +82,42 @@ class AndroidLiveDerivationPipeline(context: Context) {
         writeDerivativeAtomically(target, envelope.toString(2))
     }
 
-    private fun readClassificationKind(sourceSha256: String): String {
+    private fun readClassificationOutcome(sourceSha256: String): ClassificationOutcome {
         val target = File(classificationsDirectory, "$sourceSha256.json")
-        return JSONObject(target.readText())
-            .getJSONObject("classification")
-            .getString("kind")
+        val classification = JSONObject(target.readText()).getJSONObject("classification")
+        val signals = buildSet {
+            val array = classification.getJSONArray("signals")
+            for (index in 0 until array.length()) {
+                add(array.getString(index))
+            }
+        }
+        return ClassificationOutcome(
+            kind = classification.getString("kind"),
+            confidence = classification.getString("confidence"),
+            signals = signals,
+        )
+    }
+
+    private fun logClassificationOutcome(outcome: ClassificationOutcome) {
+        val event = when {
+            outcome.kind == CANDIDATE_KIND && outcome.confidence == "high" ->
+                "classification_candidate_high"
+            outcome.kind == CANDIDATE_KIND ->
+                "classification_candidate_medium"
+            "classification_size_limit" in outcome.signals ->
+                "classification_other_size_limit"
+            "classifier_error" in outcome.signals ->
+                "classification_other_error"
+            "non_textual_content_type" in outcome.signals ->
+                "classification_other_non_textual"
+            "invalid_utf8" in outcome.signals ->
+                "classification_other_invalid_utf8"
+            "no_json_structure" in outcome.signals ->
+                "classification_other_no_json"
+            else ->
+                "classification_other_low_score"
+        }
+        Log.d(TAG, "BKE DNA derivation: $event")
     }
 
     private fun writeDerivativeAtomically(target: File, text: String) {
@@ -114,6 +142,12 @@ class AndroidLiveDerivationPipeline(context: Context) {
             if (temp.exists()) temp.delete()
         }
     }
+
+    private data class ClassificationOutcome(
+        val kind: String,
+        val confidence: String,
+        val signals: Set<String>,
+    )
 
     companion object {
         private const val TAG = "BkeDnaDerivation"
