@@ -71,6 +71,17 @@ internal static class Program
                 }
             }
 
+            if (args.Length >= 2 && string.Equals(args[0], "--reconcile-conversation-dna", StringComparison.Ordinal))
+            {
+                var imported = new ConversationDnaImportService(captureRoot)
+                    .ImportVerified(args[1..]);
+                aggregation.TryAggregateAll();
+                projection?.TryProjectAll();
+                conversationProjection?.TryProjectAll();
+                Console.Out.WriteLine(JsonSerializer.Serialize(imported, OutputJson));
+                return 0;
+            }
+
             if (args.Length == 2 && string.Equals(args[0], "--archive", StringComparison.Ordinal))
             {
                 if (liveIndex is null)
