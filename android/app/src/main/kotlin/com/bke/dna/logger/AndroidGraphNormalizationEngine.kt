@@ -153,6 +153,11 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
             Log.d(TAG, "BKE DNA normalization: candidate_root_current_node")
         }
 
+        val rootMessages = root?.opt("messages")
+        if (root?.has("messages") == true) {
+            Log.d(TAG, "BKE DNA normalization: candidate_root_messages")
+        }
+
         val nested = findNestedCandidateStructure(rootValue)
         if (nested.mapping) {
             Log.d(TAG, "BKE DNA normalization: candidate_nested_mapping")
@@ -163,6 +168,15 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
         if (nested.currentNode) {
             Log.d(TAG, "BKE DNA normalization: candidate_nested_current_node")
         }
+        if (nested.messages) {
+            Log.d(TAG, "BKE DNA normalization: candidate_nested_messages")
+        }
+        if (rootMessages is JSONArray || nested.messagesArray) {
+            Log.d(TAG, "BKE DNA normalization: candidate_messages_array")
+        }
+        if (rootMessages is JSONObject || nested.messagesObject) {
+            Log.d(TAG, "BKE DNA normalization: candidate_messages_object")
+        }
     }
 
     private fun findNestedCandidateStructure(rootValue: Any?): CandidateStructurePresence {
@@ -172,18 +186,38 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
         var mapping = false
         var conversationId = false
         var currentNode = false
-        while (stack.isNotEmpty() && !(mapping && conversationId && currentNode)) {
+        var messages = false
+        var messagesArray = false
+        var messagesObject = false
+        while (
+            stack.isNotEmpty() &&
+            !(mapping && conversationId && currentNode && messages && messagesArray && messagesObject)
+        ) {
             when (val current = stack.removeLast()) {
                 is JSONObject -> {
                     if (current.optJSONObject("mapping") != null) mapping = true
                     if (current.has("conversation_id")) conversationId = true
                     if (current.has("current_node")) currentNode = true
+                    if (current.has("messages")) {
+                        messages = true
+                        when (current.opt("messages")) {
+                            is JSONArray -> messagesArray = true
+                            is JSONObject -> messagesObject = true
+                        }
+                    }
                     addChildren(current, stack)
                 }
                 is JSONArray -> addChildren(current, stack)
             }
         }
-        return CandidateStructurePresence(mapping, conversationId, currentNode)
+        return CandidateStructurePresence(
+            mapping = mapping,
+            conversationId = conversationId,
+            currentNode = currentNode,
+            messages = messages,
+            messagesArray = messagesArray,
+            messagesObject = messagesObject,
+        )
     }
 
     private fun addChildren(value: Any?, stack: ArrayDeque<Any>) {
@@ -323,6 +357,9 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
         val mapping: Boolean,
         val conversationId: Boolean,
         val currentNode: Boolean,
+        val messages: Boolean,
+        val messagesArray: Boolean,
+        val messagesObject: Boolean,
     )
 
     private data class ParentChainResult(val complete: Boolean, val cycleDetected: Boolean)
