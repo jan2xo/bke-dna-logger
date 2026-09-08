@@ -3,10 +3,13 @@ from pathlib import Path
 
 repo = Path(__file__).resolve().parents[1]
 kotlin = repo / "android" / "app" / "src" / "main" / "kotlin" / "com" / "bke" / "dna" / "logger"
+assets = repo / "android" / "app" / "src" / "main" / "assets" / "dna-extension"
 manifest = (repo / "android" / "app" / "src" / "main" / "AndroidManifest.xml").read_text(encoding="utf-8")
 main = (kotlin / "MainActivity.kt").read_text(encoding="utf-8")
 provider = (kotlin / "GeckoRuntimeProvider.kt").read_text(encoding="utf-8")
 host = (kotlin / "GeckoViewHost.kt").read_text(encoding="utf-8")
+bridge = (assets / "bridge.js").read_text(encoding="utf-8")
+interceptor = (repo / "extension" / "main-interceptor.js").read_text(encoding="utf-8")
 
 for token in (
     "GeckoView(this)",
@@ -50,5 +53,36 @@ if host.index("ensureBuiltIn(EXTENSION_URI, EXTENSION_ID)") > host.index("sessio
 
 if 'android:windowSoftInputMode="stateUnspecified|adjustResize"' not in manifest:
     raise SystemExit("GeckoView activity must resize for the Android soft keyboard")
+
+for token in (
+    '"capture_body_read"',
+    '"capture_packet_posted"',
+):
+    if token not in interceptor:
+        raise SystemExit(f"main interceptor missing capture-boundary diagnostic {token}")
+
+for token in (
+    '"capture_packet_seen"',
+    '"capture_body_rejected"',
+    '"capture_forward_start"',
+    "function toCaptureBytes(body, expectedByteLength)",
+    "const bytes = new Uint8Array(body)",
+    "bytes.byteLength !== expectedByteLength",
+):
+    if token not in bridge:
+        raise SystemExit(f"Android bridge missing capture-boundary contract {token!r}")
+
+if "instanceof ArrayBuffer" in bridge:
+    raise SystemExit("Android bridge must not use realm-sensitive ArrayBuffer instanceof validation")
+
+for event in (
+    "capture_body_read",
+    "capture_packet_posted",
+    "capture_packet_seen",
+    "capture_body_rejected",
+    "capture_forward_start",
+):
+    if f'"{event}"' not in host:
+        raise SystemExit(f"GeckoViewHost diagnostic whitelist missing {event!r}")
 
 print("android GeckoView runtime smoke PASS")
