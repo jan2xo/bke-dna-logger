@@ -19,7 +19,11 @@ aggregation_tokens = [
     "sourceSha256s",
     "firstObservedAt",
     "lastObservedAt",
-    'coverageBasis = "multi_snapshot_structural_union"',
+    'GRAPH_COVERAGE_BASIS = "structural_graph_closure_only"',
+    'LOGICAL_GRAPH_COVERAGE_BASIS = "multi_snapshot_structural_union"',
+    'MESSAGES_COVERAGE_BASIS = "messages_array_no_graph_edges"',
+    "val graphSnapshots = snapshots.filter { it.coverageBasis == GRAPH_COVERAGE_BASIS }",
+    "computeGraphlessCoverage",
     "computeCoverage",
     "unresolvedParentNativeIds",
     "unresolvedChildNativeIds",
@@ -29,6 +33,16 @@ aggregation_tokens = [
     "index.replaceLogicalConversation",
 ]
 for token in aggregation_tokens:
+    assert token in aggregation, token
+
+# Messages-only evidence has no graph topology and must never be upgraded to a
+# complete structural graph merely because its normalized nodes have empty edge lists.
+for token in (
+    'status = "indeterminate"',
+    "rootFound = false",
+    "currentLeafFound = false",
+    "parentChainComplete = false",
+):
     assert token in aggregation, token
 
 schema_tokens = [
@@ -61,13 +75,14 @@ assert "AUTOMATIC_DNA_EXPORT = false" in contract
 assert "AUTOMATIC_MARKDOWN_EXPORT = false" in contract
 assert "MERGE_SQLITE_ACROSS_DEVICES = false" in contract
 
-# Contract fixture: two independent device snapshots for one native conversation
-# must preserve both branches, one prompt revision identity, and both sources.
+# Contract fixture: two independent graph-backed device snapshots for one native
+# conversation must preserve both branches, one prompt identity, and both sources.
 source_a = "a" * 64
 source_b = "b" * 64
 snapshots = [
     {
         "source": source_a,
+        "coverage_basis": "structural_graph_closure_only",
         "nodes": {
             "user-root": {"children": ["assistant-a"], "message": "message-user"},
             "assistant-a": {"children": [], "message": "message-a"},
@@ -75,6 +90,7 @@ snapshots = [
     },
     {
         "source": source_b,
+        "coverage_basis": "structural_graph_closure_only",
         "nodes": {
             "user-root": {"children": ["assistant-b"], "message": "message-user"},
             "assistant-b": {"children": [], "message": "message-b"},
@@ -83,6 +99,7 @@ snapshots = [
 ]
 union = {}
 for snapshot in snapshots:
+    assert snapshot["coverage_basis"] == "structural_graph_closure_only"
     for node_id, node in snapshot["nodes"].items():
         current = union.setdefault(node_id, {"children": set(), "messages": set(), "sources": set()})
         current["children"].update(node["children"])
@@ -92,5 +109,17 @@ for snapshot in snapshots:
 assert union["user-root"]["children"] == {"assistant-a", "assistant-b"}
 assert union["user-root"]["messages"] == {"message-user"}
 assert set().union(*(node["sources"] for node in union.values())) == {source_a, source_b}
+
+# A messages-array snapshot can contribute message evidence, but without parent
+# or child fields it cannot independently establish graph completeness.
+messages_snapshot = {
+    "coverage_basis": "messages_array_no_graph_edges",
+    "nodes": [
+        {"id": "message-user", "parent": None, "children": []},
+        {"id": "message-assistant", "parent": None, "children": []},
+    ],
+}
+assert messages_snapshot["coverage_basis"] == "messages_array_no_graph_edges"
+assert all(not node["children"] for node in messages_snapshot["nodes"])
 
 print("android logical conversation reconciliation smoke PASS")
