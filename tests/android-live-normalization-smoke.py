@@ -105,6 +105,8 @@ for token in (
     'classification.getInt("score")',
     'classification.getJSONArray("signals")',
     'logLowScoreClassifierShape(outcome)',
+    'logCandidateClassifierShape(outcome)',
+    'logClassifierSignals(outcome)',
     'Raw evidence and its immutable observation are already durable',
     'Log.d(TAG, "BKE DNA derivation: started")',
     '"classification_candidate_high"',
@@ -159,13 +161,20 @@ for forbidden in (
 ):
     assert forbidden not in pipeline, forbidden
 
-# Low-score shape diagnostics are observation only; classifier admission stays
-# locked to the existing native parity thresholds.
+# Shape diagnostics are observation only; classifier admission stays locked to
+# the existing native parity thresholds. Raw score buckets remain low-score-only,
+# while admitted candidates expose only the same fixed structural signal set.
 assert 'score >= 28' in classifier
 assert 'score >= 55' in classifier
-assert 'if (event == "classification_other_low_score")' in pipeline
+assert 'event == "classification_other_low_score" -> logLowScoreClassifierShape(outcome)' in pipeline
+assert 'outcome.kind == CANDIDATE_KIND -> logCandidateClassifierShape(outcome)' in pipeline
 assert pipeline.index('classification.getInt("score")') < pipeline.index('logLowScoreClassifierShape(outcome)')
-assert pipeline.index('"classification_other_low_score"') < pipeline.index('logLowScoreClassifierShape(outcome)')
+assert pipeline.index('classification.getJSONArray("signals")') < pipeline.index('logCandidateClassifierShape(outcome)')
+assert 'private fun logCandidateClassifierShape(outcome: ClassificationOutcome) {\n        logClassifierSignals(outcome)\n    }' in pipeline
+assert 'private fun logLowScoreClassifierShape(outcome: ClassificationOutcome)' in pipeline
+assert pipeline.count('classifier_score_0_9') == 1
+assert pipeline.count('classifier_score_10_19') == 1
+assert pipeline.count('classifier_score_20_27') == 1
 
 assert pipeline.index('ensureClassification(') < pipeline.index('readClassificationOutcome(sourceSha256)')
 assert pipeline.index('readClassificationOutcome(sourceSha256)') < pipeline.index('normalizer.normalizeCandidate(sourceSha256)')
