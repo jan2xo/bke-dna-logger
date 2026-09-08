@@ -49,7 +49,7 @@ for token in (
     if token not in host:
         raise SystemExit(f"GeckoView host contract missing {token!r}")
 
-diagnostic_events = (
+interceptor_diagnostics = (
     "interceptor_ready",
     "fetch_seen",
     "capture_candidate",
@@ -59,7 +59,7 @@ diagnostic_events = (
     "capture_posted",
     "interceptor_load_error",
 )
-for event in diagnostic_events:
+for event in interceptor_diagnostics:
     quoted = f'"{event}"'
     for name, source in (
         ("main interceptor", interceptor),
@@ -68,6 +68,23 @@ for event in diagnostic_events:
     ):
         if quoted not in source:
             raise SystemExit(f"{name} is missing runtime diagnostic {event!r}")
+
+bridge_diagnostics = (
+    "capture_received",
+    "capture_metadata_rejected",
+    "capture_body_accepted",
+    "capture_body_rejected",
+    "capture_start_sent",
+    "capture_forward_failed",
+)
+for event in bridge_diagnostics:
+    quoted = f'"{event}"'
+    for name, source in (
+        ("Android extension bridge", bridge),
+        ("GeckoView host", host),
+    ):
+        if quoted not in source:
+            raise SystemExit(f"{name} is missing bridge runtime diagnostic {event!r}")
 
 for token in (
     'emitDiagnostic("body_read_started")',
@@ -85,6 +102,26 @@ if interceptor.index("body = await clone.arrayBuffer()") > interceptor.index('em
     raise SystemExit("body_read_complete must be emitted only after the response clone is fully buffered")
 if interceptor.index('kind: "capture"') > interceptor.index('emitDiagnostic("capture_posted")'):
     raise SystemExit("capture_posted must be emitted only after the capture packet is posted")
+
+for token in (
+    'await forwardDiagnostic("capture_received")',
+    'await forwardDiagnostic("capture_metadata_rejected")',
+    'packet.body instanceof ArrayBuffer',
+    'await forwardDiagnostic("capture_body_rejected")',
+    'await forwardDiagnostic("capture_body_accepted")',
+    'type: "capture_start"',
+    'await forwardDiagnostic("capture_start_sent")',
+    'await forwardDiagnostic("capture_forward_failed")',
+):
+    if token not in bridge:
+        raise SystemExit(f"Android extension bridge is missing capture-boundary diagnostic contract {token!r}")
+
+if bridge.index('await forwardDiagnostic("capture_received")') > bridge.index("const metadata = packet.metadata"):
+    raise SystemExit("capture_received must be emitted before capture packet validation")
+if bridge.index('packet.body instanceof ArrayBuffer') > bridge.index('await forwardDiagnostic("capture_body_accepted")'):
+    raise SystemExit("capture_body_accepted must be emitted only after the ArrayBuffer realm/type gate")
+if bridge.index('type: "capture_start"') > bridge.index('await forwardDiagnostic("capture_start_sent")'):
+    raise SystemExit("capture_start_sent must be emitted only after native capture_start is sent")
 
 if 'private val DIAGNOSTIC_KEYS = setOf("type", "event")' not in host:
     raise SystemExit("runtime diagnostics must remain restricted to type + event only")

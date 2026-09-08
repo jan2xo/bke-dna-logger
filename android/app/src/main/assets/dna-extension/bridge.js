@@ -13,6 +13,12 @@
     "body_read_complete",
     "body_read_failed",
     "capture_posted",
+    "capture_received",
+    "capture_metadata_rejected",
+    "capture_body_accepted",
+    "capture_body_rejected",
+    "capture_start_sent",
+    "capture_forward_failed",
     "interceptor_load_error"
   ]);
   const forwardedDiagnostics = new Set();
@@ -66,42 +72,62 @@
   }
 
   async function forwardCapture(packet) {
+    await forwardDiagnostic("capture_received");
+
     const metadata = packet.metadata;
-    if (!metadata || typeof metadata.captureId !== "string" || !(packet.body instanceof ArrayBuffer)) {
+    if (!metadata || typeof metadata.captureId !== "string") {
+      await forwardDiagnostic("capture_metadata_rejected");
       return;
     }
 
-    const bytes = new Uint8Array(packet.body);
-    await sendNative({
-      type: "capture_start",
-      captureId: metadata.captureId,
-      pageUrl: metadata.pageUrl,
-      requestUrl: metadata.requestUrl,
-      method: metadata.method,
-      status: metadata.status,
-      contentType: metadata.contentType,
-      initiator: metadata.initiator,
-      capturedAt: metadata.capturedAt,
-      byteLength: metadata.byteLength,
-      fidelity: metadata.fidelity
-    });
-
-    let sequence = 0;
-    for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
-      const chunk = bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, bytes.length));
-      await sendNative({
-        type: "capture_chunk",
-        captureId: metadata.captureId,
-        sequence,
-        base64: bytesToBase64(chunk)
-      });
-      sequence += 1;
+    if (!(packet.body instanceof ArrayBuffer)) {
+      await forwardDiagnostic("capture_body_rejected");
+      return;
     }
 
-    await sendNative({
-      type: "capture_end",
-      captureId: metadata.captureId
-    });
+    await forwardDiagnostic("capture_body_accepted");
+    const bytes = new Uint8Array(packet.body);
+
+    try {
+      await sendNative({
+        type: "capture_start",
+        captureId: metadata.captureId,
+        pageUrl: metadata.pageUrl,
+        requestUrl: metadata.requestUrl,
+        method: metadata.method,
+        status: metadata.status,
+        contentType: metadata.contentType,
+        initiator: metadata.initiator,
+        capturedAt: metadata.capturedAt,
+        byteLength: metadata.byteLength,
+        fidelity: metadata.fidelity
+      });
+      await forwardDiagnostic("capture_start_sent");
+
+      let sequence = 0;
+      for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
+        const chunk = bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, bytes.length));
+        await sendNative({
+          type: "capture_chunk",
+          captureId: metadata.captureId,
+          sequence,
+          base64: bytesToBase64(chunk)
+        });
+        sequence += 1;
+      }
+
+      await sendNative({
+        type: "capture_end",
+        captureId: metadata.captureId
+      });
+    } catch (error) {
+      try {
+        await forwardDiagnostic("capture_forward_failed");
+      } catch (_) {
+        // The native channel itself may be the failing boundary.
+      }
+      throw error;
+    }
   }
 
   window.addEventListener("message", event => {
