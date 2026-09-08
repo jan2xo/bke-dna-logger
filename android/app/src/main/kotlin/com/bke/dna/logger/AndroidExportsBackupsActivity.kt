@@ -24,10 +24,20 @@ class AndroidExportsBackupsActivity : Activity() {
     private var selectedWorkingDataId: String = AndroidWorkingDataManager.LATEST_ID
     private var pendingWorkingDataId: String = AndroidWorkingDataManager.LATEST_ID
     private var pendingConversationKey: String? = null
+    @Volatile private var operationInProgress = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         refreshUi()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (operationInProgress) {
+            showOperationInProgress()
+            return
+        }
+        super.onBackPressed()
     }
 
     private fun refreshUi() {
@@ -77,6 +87,7 @@ class AndroidExportsBackupsActivity : Activity() {
         spinner.setSelection(generations.indexOfFirst { it.id == selectedWorkingDataId }, false)
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                if (operationInProgress) return
                 val chosen = generations[position].id
                 if (chosen != selectedWorkingDataId) {
                     selectedWorkingDataId = chosen
@@ -326,9 +337,15 @@ class AndroidExportsBackupsActivity : Activity() {
     }
 
     private fun runWork(successMessage: String, work: () -> Unit) {
+        if (operationInProgress) {
+            showOperationInProgress()
+            return
+        }
+        operationInProgress = true
         Thread {
             val result = runCatching(work)
             runOnUiThread {
+                operationInProgress = false
                 Toast.makeText(
                     this,
                     result.fold(
@@ -347,8 +364,14 @@ class AndroidExportsBackupsActivity : Activity() {
     private fun actionButton(label: String, action: () -> Unit): Button =
         Button(this).apply {
             text = label
-            setOnClickListener { action() }
+            setOnClickListener {
+                if (operationInProgress) showOperationInProgress() else action()
+            }
         }
+
+    private fun showOperationInProgress() {
+        Toast.makeText(this, "Working Data operation in progress", Toast.LENGTH_SHORT).show()
+    }
 
     private fun formatBytes(bytes: Long): String {
         if (bytes < 1024L) return "$bytes B"
