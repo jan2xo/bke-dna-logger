@@ -8,6 +8,9 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity
+            android:name=".AndroidConversationReaderActivity"
+            android:exported="false" />
+        <activity
             android:name=".AndroidExportsBackupsActivity"
             android:exported="false" />
         <activity
