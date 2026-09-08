@@ -55,11 +55,19 @@ for token in (
     'engine.aggregateConversation(normalized.conversationNativeId)',
     'classification_size_limit',
     'classifier_error',
-    'readClassificationKind(sourceSha256)',
+    'readClassificationOutcome(sourceSha256)',
+    'logClassificationOutcome(readClassificationOutcome(sourceSha256))',
+    'classification.getJSONArray("signals")',
     'Raw evidence and its immutable observation are already durable',
     'Log.d(TAG, "BKE DNA derivation: started")',
-    'Log.d(TAG, "BKE DNA derivation: classification_candidate")',
-    'Log.d(TAG, "BKE DNA derivation: classification_other")',
+    '"classification_candidate_high"',
+    '"classification_candidate_medium"',
+    '"classification_other_size_limit"',
+    '"classification_other_error"',
+    '"classification_other_non_textual"',
+    '"classification_other_invalid_utf8"',
+    '"classification_other_no_json"',
+    '"classification_other_low_score"',
     'Log.d(TAG, "BKE DNA derivation: normalization_skipped")',
     'Log.d(TAG, "BKE DNA derivation: normalization_complete")',
     'Log.d(TAG, "BKE DNA derivation: reconciliation_complete")',
@@ -67,17 +75,23 @@ for token in (
 ):
     assert token in pipeline, token
 
-# Derivation diagnostics are fixed, non-sensitive stage markers only.
+# Classification reason diagnostics must remain fixed categories derived only
+# from persisted classifier metadata. They must not expose evidence identity or content.
 for forbidden in (
     'Log.d(TAG, sourceSha256',
     'Log.d(TAG, bodyFile',
     'Log.d(TAG, contentType',
     'Log.d(TAG, normalized.conversationNativeId',
+    'Log.d(TAG, outcome.signals',
+    'Log.d(TAG, outcome.kind',
+    'Log.d(TAG, outcome.confidence',
+    '"classification_other")',
+    '"classification_candidate")',
 ):
     assert forbidden not in pipeline, forbidden
 
-assert pipeline.index('ensureClassification(') < pipeline.index('readClassificationKind(sourceSha256)')
-assert pipeline.index('readClassificationKind(sourceSha256)') < pipeline.index('normalizer.normalizeCandidate(sourceSha256)')
+assert pipeline.index('ensureClassification(') < pipeline.index('readClassificationOutcome(sourceSha256)')
+assert pipeline.index('readClassificationOutcome(sourceSha256)') < pipeline.index('normalizer.normalizeCandidate(sourceSha256)')
 assert pipeline.index('normalizer.normalizeCandidate(sourceSha256)') < pipeline.index('engine.aggregateConversation(normalized.conversationNativeId)')
 assert pipeline.index('engine.aggregateConversation(normalized.conversationNativeId)') < pipeline.index('Log.d(TAG, "BKE DNA derivation: reconciliation_complete")')
 
