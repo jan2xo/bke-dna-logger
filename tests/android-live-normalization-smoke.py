@@ -30,6 +30,10 @@ for token in (
     'MAX_BODY_BYTES = 16L * 1024 * 1024',
     'PARSER = "generic-mapping-graph-v0"',
     'COVERAGE_BASIS = "structural_graph_closure_only"',
+    'JSONTokener(bodyPath.readText(Charsets.UTF_8))',
+    'logCandidateStructure(rootValue)',
+    'findNestedCandidateStructure(rootValue)',
+    'addChildren(rootValue, stack)',
     'root.optJSONObject("mapping")',
     'root.opt("conversation_id")',
     'root.opt("current_node")',
@@ -42,10 +46,51 @@ for token in (
     '"parentNativeId"',
     '"childNativeIds"',
     '"normalizedAt"',
+    '"BKE DNA normalization: candidate_root_object"',
+    '"BKE DNA normalization: candidate_root_array"',
+    '"BKE DNA normalization: candidate_root_other"',
+    '"BKE DNA normalization: candidate_root_mapping"',
+    '"BKE DNA normalization: candidate_nested_mapping"',
+    '"BKE DNA normalization: candidate_root_conversation_id"',
+    '"BKE DNA normalization: candidate_nested_conversation_id"',
+    '"BKE DNA normalization: candidate_root_current_node"',
+    '"BKE DNA normalization: candidate_nested_current_node"',
+    '"BKE DNA normalization: normalization_skip_existing_result_unusable"',
+    '"BKE DNA normalization: normalization_skip_body_missing"',
+    '"BKE DNA normalization: normalization_skip_body_oversize"',
+    '"BKE DNA normalization: normalization_skip_invalid_json"',
+    '"BKE DNA normalization: normalization_skip_not_object"',
+    '"BKE DNA normalization: normalization_skip_no_root_mapping"',
+    '"BKE DNA normalization: normalization_skip_missing_conversation_id"',
     'output.fd.sync()',
     'StandardCopyOption.ATOMIC_MOVE',
 ):
     assert token in normalizer, token
+
+# Candidate normalization diagnostics are observation-only. The normalizer still
+# admits only classifier candidates with a root object and root mapping.
+assert normalizer.index('!= CANDIDATE_KIND') < normalizer.index('val rootValue = try')
+assert normalizer.index('logCandidateStructure(rootValue)') < normalizer.index('val root = rootValue as? JSONObject')
+assert normalizer.index('val root = rootValue as? JSONObject') < normalizer.index('val mapping = root.optJSONObject("mapping")')
+assert 'val mapping = root.optJSONObject("mapping") ?: run {' in normalizer
+assert 'Log.d(TAG, "BKE DNA normalization: normalization_skip_no_root_mapping")' in normalizer
+assert normalizer.index('addChildren(rootValue, stack)') < normalizer.index('while (stack.isNotEmpty()')
+
+# Candidate envelope and skip diagnostics must remain fixed, non-sensitive
+# markers. Never expose evidence identity, file paths, payload values, IDs, or
+# dynamically formatted structure names.
+for forbidden in (
+    'Log.d(TAG, sourceSha256',
+    'Log.d(TAG, bodyPath',
+    'Log.d(TAG, rootValue',
+    'Log.d(TAG, conversationNativeId',
+    'Log.d(TAG, currentNodeNativeId',
+    'BKE DNA normalization: $',
+    'candidate_root_$',
+    'candidate_nested_$',
+    'normalization_skip_$',
+):
+    assert forbidden not in normalizer, forbidden
 
 for token in (
     'MAX_CLASSIFICATION_BYTES = 16L * 1024 * 1024',
