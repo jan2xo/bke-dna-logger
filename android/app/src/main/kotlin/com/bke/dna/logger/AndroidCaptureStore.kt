@@ -8,21 +8,22 @@ import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.Executors
 
 /**
  * Android counterpart of the desktop CaptureStore.
  * Streams into app-private partial files, hashes raw bytes, deduplicates bodies,
  * persists immutable observations, projects the observation into SQLite, then
- * runs classification/normalization as a best-effort derivative pipeline.
+ * schedules classification/normalization as a best-effort background derivative.
  */
 class AndroidCaptureStore(context: Context) : AutoCloseable {
-    private val root = AndroidDnaPaths.capturesRoot(context)
+    private val appContext = context.applicationContext
+    private val root = AndroidDnaPaths.capturesRoot(appContext)
     private val bodies = File(root, "bodies").also { it.mkdirs() }
     private val observations = File(root, "observations").also { it.mkdirs() }
     private val partial = File(root, "partial").also { it.mkdirs() }
     private val sessions = mutableMapOf<String, Session>()
-    private val index = AndroidCaptureIndex(context.applicationContext)
-    private val derivation = AndroidLiveDerivationPipeline(context.applicationContext)
+    private val index = AndroidCaptureIndex(appContext)
 
     fun accept(json: JSONObject): String {
         return when (json.getString("type")) {
@@ -37,8 +38,11 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
     private fun start(json: JSONObject): String {
         val captureId = requireCaptureId(json)
         require(!sessions.containsKey(captureId)) { "Capture '$captureId' has already started" }
-        val byteLength = json.getLong("byteLength")
-        require(byteLength >= 0) { "Capture byte length cannot be negative" }
+        val byteLength = if (json.has("byteLength") && !json.isNull("byteLength")) {
+            json.getLong("byteLength").also { require(it >= 0) { "Capture byte length cannot be negative" } }
+        } else {
+            null
+        }
 
         sessions[captureId] = Session(
             start = JSONObject(json.toString()),
@@ -69,8 +73,16 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
         val captureId = requireCaptureId(json)
         val session = sessions.remove(captureId) ?: error("Capture '$captureId' has not started")
         val result = session.finish()
-        require(result.byteLength == session.declaredLength) {
-            "Capture '$captureId' declared ${session.declaredLength} bytes but received ${result.byteLength}"
+        val finalDeclaredLength = if (json.has("byteLength") && !json.isNull("byteLength")) {
+            json.getLong("byteLength")
+        } else {
+            session.declaredLength
+        }
+        require(finalDeclaredLength != null && finalDeclaredLength >= 0) {
+            "Capture '$captureId' did not declare a final byte length"
+        }
+        require(result.byteLength == finalDeclaredLength) {
+            "Capture '$captureId' declared $finalDeclaredLength bytes but received ${result.byteLength}"
         }
 
         val bodyName = "${result.sha256}.body"
@@ -108,12 +120,17 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
             ),
         )
 
-        derivation.processCompletedCapture(
-            bodyFile = body,
-            sourceSha256 = result.sha256,
-            byteLength = result.byteLength,
-            contentType = session.start.optNullableString("contentType"),
-        )
+        // Raw bytes + immutable observation + live capture index are durable now.
+        // Do not keep Gecko/native-message ACK waiting while JSON classification,
+        // normalization and reconciliation process a large conversation body.
+        DERIVATION_EXECUTOR.execute {
+            AndroidLiveDerivationPipeline(appContext).processCompletedCapture(
+                bodyFile = body,
+                sourceSha256 = result.sha256,
+                byteLength = result.byteLength,
+                contentType = session.start.optNullableString("contentType"),
+            )
+        }
         return "capture_end"
     }
 
@@ -131,7 +148,7 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
 
     private class Session(
         val start: JSONObject,
-        val declaredLength: Long,
+        val declaredLength: Long?,
         val file: File,
     ) : AutoCloseable {
         private val output = FileOutputStream(file, false)
@@ -164,11 +181,18 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
             if (!finished) {
                 finished = true
                 output.close()
+                file.delete()
             }
         }
     }
 
     private data class Result(val sha256: String, val byteLength: Long, val partial: File)
+
+    companion object {
+        private val DERIVATION_EXECUTOR = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "bke-dna-derivation").apply { isDaemon = true }
+        }
+    }
 }
 
 private fun JSONObject.optNullableString(key: String): String? =
