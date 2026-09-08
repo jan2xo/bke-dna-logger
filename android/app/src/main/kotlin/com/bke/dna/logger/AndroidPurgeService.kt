@@ -13,14 +13,15 @@ import java.time.Instant
  *
  * A source can be deleted only when the Latest logical conversation and every
  * source row are already backed by a manually written + re-read + verified .dna.
- * Sources referenced by another logical conversation in any readable Working
- * Data generation are retained. SQLite/library rows and logical conversation
- * state stay resident so purge does not erase the owner-facing conversation.
+ * Sources referenced by another logical conversation in any Working Data
+ * generation are retained. If even one saved generation cannot be inspected,
+ * purge fails closed. SQLite/library rows and logical conversation state stay
+ * resident so purge does not erase the owner-facing conversation.
  */
 class AndroidPurgeService(context: Context) {
     private val appContext = context.applicationContext
     private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
-    private val workingData = AndroidWorkingDataManager(appContext)
+    private val workingDataRoot = AndroidDnaPaths.workingDataRoot(appContext)
     private val purgeDirectory = File(captureRoot, "purges").also {
         check(it.exists() || it.mkdirs()) { "Unable to create purge receipt directory" }
     }
@@ -81,6 +82,7 @@ class AndroidPurgeService(context: Context) {
         require(confirmation == CONFIRMATION_TEXT) { "Type exact confirmation '$CONFIRMATION_TEXT'" }
         val current = plan(conversationNativeId)
         require(current.blockedReason == null) { current.blockedReason ?: "Purge is blocked" }
+        val conversationKey = requireNotNull(current.conversationKey)
 
         val observationFiles = observationFilesFor(current.purgeableSourceSha256s.toSet())
         val evidenceFiles = buildList {
@@ -100,7 +102,7 @@ class AndroidPurgeService(context: Context) {
             .put("format", "bke-dna-local-purge")
             .put("formatVersion", 1)
             .put("conversationNativeId", current.conversationNativeId)
-            .put("conversationKey", current.conversationKey)
+            .put("conversationKey", conversationKey)
             .put("archiveId", current.archiveId)
             .put("archiveSha256", current.archiveSha256)
             .put("archivedAt", current.archivedAt ?: JSONObject.NULL)
@@ -109,7 +111,7 @@ class AndroidPurgeService(context: Context) {
             .put("sourceSha256s", JSONArray(current.purgeableSourceSha256s))
             .put("logicalStateRetained", true)
             .put("sqliteRetained", true)
-        writeDurably(File(purgeDirectory, "${current.conversationKey}.json"), receipt.toString(2))
+        writeDurably(File(purgeDirectory, "$conversationKey.json"), receipt.toString(2))
 
         return AndroidPurgeResult(
             conversationsPurged = 1,
@@ -229,9 +231,22 @@ class AndroidPurgeService(context: Context) {
     }
 
     private fun referencedByOtherConversation(sourceSha256: String, targetConversationNativeId: String): Boolean {
-        workingData.listWorkingData().forEach { generation ->
+        val databases = buildList {
+            add(appContext.getDatabasePath(AndroidCaptureIndex.DATABASE_NAME))
+            workingDataRoot.listFiles().orEmpty()
+                .filter { it.isDirectory && it.name.startsWith("wd-") }
+                .sortedBy { it.name }
+                .forEach { directory ->
+                    val snapshot = File(directory, "working.sqlite")
+                    require(snapshot.isFile) { "Saved Working Data has no SQLite snapshot" }
+                    add(snapshot)
+                }
+        }
+
+        databases.forEach { databaseFile ->
+            require(databaseFile.isFile) { "Working Data SQLite does not exist" }
             SQLiteDatabase.openDatabase(
-                generation.databaseFile.absolutePath,
+                databaseFile.absolutePath,
                 null,
                 SQLiteDatabase.OPEN_READONLY,
             ).use { database ->
