@@ -113,7 +113,9 @@ for token in (
     'await forwardDiagnostic("capture_metadata_rejected")',
     "function toCaptureBytes(body, expectedByteLength)",
     "ArrayBuffer.prototype.slice.call(body, 0, 0)",
-    "new Uint8Array(body)",
+    "const foreignBytes = new Uint8Array(body)",
+    "const bytes = new Uint8Array(foreignBytes.byteLength)",
+    "bytes.set(foreignBytes)",
     "bytes.byteLength === expectedByteLength",
     'await forwardDiagnostic("capture_body_rejected")',
     'await forwardDiagnostic("capture_body_accepted")',
@@ -134,9 +136,15 @@ for token in (
 
 if "packet.body instanceof ArrayBuffer" in bridge:
     raise SystemExit("Android extension bridge must not use realm-sensitive ArrayBuffer instanceof validation")
+if "const bytes = new Uint8Array(body)" in bridge:
+    raise SystemExit("Android extension bridge must not keep its chunking view directly backed by the foreign page ArrayBuffer")
 
 if bridge.index('await forwardDiagnostic("capture_received")') > bridge.index("const metadata = packet.metadata"):
     raise SystemExit("capture_received must be emitted before capture packet validation")
+if bridge.index("const foreignBytes = new Uint8Array(body)") > bridge.index("bytes.set(foreignBytes)"):
+    raise SystemExit("foreign capture bytes must be copied into an extension-owned typed array")
+if bridge.index("bytes.set(foreignBytes)") > bridge.index("return bytes.byteLength === expectedByteLength ? bytes : null"):
+    raise SystemExit("capture byte-length validation must run after the extension-owned copy is populated")
 if bridge.index("const bytes = toCaptureBytes(packet.body, metadata.byteLength)") > bridge.index('await forwardDiagnostic("capture_body_accepted")'):
     raise SystemExit("capture_body_accepted must be emitted only after realm-safe body conversion succeeds")
 if bridge.index('type: "capture_start"') > bridge.index('await forwardDiagnostic("capture_start_sent")'):
