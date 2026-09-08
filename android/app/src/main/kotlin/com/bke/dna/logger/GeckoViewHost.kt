@@ -25,6 +25,11 @@ class GeckoViewHost(
             "interceptor_ready",
             "fetch_seen",
             "capture_candidate",
+            "capture_body_read",
+            "capture_packet_posted",
+            "capture_packet_seen",
+            "capture_body_rejected",
+            "capture_forward_start",
             "interceptor_load_error",
         )
         private val DIAGNOSTIC_KEYS = setOf("type", "event")
