@@ -133,15 +133,40 @@ class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
 
         val nodes = nodeMap.values.map { it.toRecord() }.sortedBy { it.nodeNativeId }
         val latest = snapshots.last()
-        val coverage = computeCoverage(latest.currentNodeNativeId, nodes)
+        val graphSnapshots = snapshots.filter { it.coverageBasis == GRAPH_COVERAGE_BASIS }
+        val latestGraphSnapshot = graphSnapshots.lastOrNull()
+        val graphNodes = if (graphSnapshots.isEmpty()) {
+            emptyList()
+        } else {
+            val graphNodeMap = linkedMapOf<String, NodeAccumulator>()
+            graphSnapshots.forEach { snapshot ->
+                snapshot.nodes.forEach { node ->
+                    graphNodeMap.getOrPut(node.nodeNativeId) { NodeAccumulator(node.nodeNativeId) }
+                        .observe(node, snapshot.sourceSha256, snapshot.observedAt)
+                }
+            }
+            graphNodeMap.values.map { it.toRecord() }.sortedBy { it.nodeNativeId }
+        }
+        val stateCurrentNodeNativeId = latestGraphSnapshot?.currentNodeNativeId ?: latest.currentNodeNativeId
+        val coverage = if (latestGraphSnapshot != null) {
+            computeCoverage(latestGraphSnapshot.currentNodeNativeId, graphNodes)
+        } else {
+            computeGraphlessCoverage(latest.currentNodeNativeId, nodes)
+        }
+        val logicalCoverageBasis = if (latestGraphSnapshot != null) {
+            LOGICAL_GRAPH_COVERAGE_BASIS
+        } else {
+            MESSAGES_COVERAGE_BASIS
+        }
+
         val conversationKey = sha256Text(conversationNativeId)
         val state = AndroidLogicalConversation(
             conversationKey = conversationKey,
             conversationNativeId = conversationNativeId,
-            currentNodeNativeId = latest.currentNodeNativeId,
+            currentNodeNativeId = stateCurrentNodeNativeId,
             stateObservedThrough = latest.observedAt,
             coverageStatus = coverage.status,
-            coverageBasis = "multi_snapshot_structural_union",
+            coverageBasis = logicalCoverageBasis,
             rootFound = coverage.rootFound,
             currentNodeFound = coverage.currentNodeFound,
             currentLeafFound = coverage.currentLeafFound,
@@ -188,6 +213,23 @@ class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
         } finally {
             if (temp.exists()) temp.delete()
         }
+    }
+
+    private fun computeGraphlessCoverage(
+        currentNodeNativeId: String?,
+        nodes: List<AndroidLogicalNode>,
+    ): CoverageResult {
+        val currentFound = currentNodeNativeId != null && nodes.any { it.nodeNativeId == currentNodeNativeId }
+        return CoverageResult(
+            status = "indeterminate",
+            rootFound = false,
+            currentNodeFound = currentFound,
+            currentLeafFound = false,
+            parentChainComplete = false,
+            cycleDetected = false,
+            unresolvedParents = emptyList(),
+            unresolvedChildren = emptyList(),
+        )
     }
 
     private fun computeCoverage(
@@ -368,6 +410,12 @@ class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
         val unresolvedParents: List<String>,
         val unresolvedChildren: List<String>,
     )
+
+    companion object {
+        private const val GRAPH_COVERAGE_BASIS = "structural_graph_closure_only"
+        private const val LOGICAL_GRAPH_COVERAGE_BASIS = "multi_snapshot_structural_union"
+        private const val MESSAGES_COVERAGE_BASIS = "messages_array_no_graph_edges"
+    }
 }
 
 data class AndroidLogicalConversation(
