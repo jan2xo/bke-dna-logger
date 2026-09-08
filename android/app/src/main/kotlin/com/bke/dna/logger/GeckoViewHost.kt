@@ -73,9 +73,9 @@ class GeckoViewHost(
         }
     }
 
-    private val runtime = GeckoRuntimeProvider.get(activity.applicationContext)
+    private val appContext = activity.applicationContext
+    private val runtime = GeckoRuntimeProvider.get(appContext)
     private val session = GeckoSession()
-    private val ingress = AndroidWireIngress(activity.applicationContext)
     private var started = false
 
     private val messageDelegate = object : WebExtension.MessageDelegate {
@@ -100,7 +100,10 @@ class GeckoViewHost(
             }
 
             try {
-                val type = ingress.accept(message.toString().toByteArray(StandardCharsets.UTF_8))
+                val type = AndroidCaptureRuntime.accept(
+                    appContext,
+                    message.toString().toByteArray(StandardCharsets.UTF_8),
+                ) ?: return null
                 if (type == "capture_start") {
                     val requestUrl = if (message.has("requestUrl") && !message.isNull("requestUrl")) {
                         message.optString("requestUrl")
@@ -139,6 +142,7 @@ class GeckoViewHost(
     fun start() {
         check(!started) { "GeckoViewHost is already started" }
         started = true
+        AndroidCaptureRuntime.start(appContext)
 
         session.setContentDelegate(object : GeckoSession.ContentDelegate {})
         session.open(runtime)
@@ -171,7 +175,7 @@ class GeckoViewHost(
 
         view.releaseSession()
         if (session.isOpen) session.close()
-        ingress.close()
+        AndroidCaptureRuntime.stop()
         started = false
     }
 }
