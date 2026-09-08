@@ -7,6 +7,7 @@ contract = (kotlin / "DnaWireContract.kt").read_text(encoding="utf-8")
 ingress = (kotlin / "AndroidWireIngress.kt").read_text(encoding="utf-8")
 runtime = (kotlin / "AndroidCaptureRuntime.kt").read_text(encoding="utf-8")
 store = (kotlin / "AndroidCaptureStore.kt").read_text(encoding="utf-8")
+queue = (kotlin / "AndroidDerivationQueue.kt").read_text(encoding="utf-8")
 index = (kotlin / "AndroidCaptureIndex.kt").read_text(encoding="utf-8")
 host = (kotlin / "GeckoViewHost.kt").read_text(encoding="utf-8")
 bridge = (repo / "android" / "app" / "src" / "main" / "assets" / "dna-extension" / "bridge.js").read_text(encoding="utf-8")
@@ -30,7 +31,8 @@ for token in (
     "pauseForStorageMutation",
     "resumeAfterStorageMutation",
     "withStorageMutationPause",
-    "AndroidCaptureStore.awaitBackgroundDerivationIdle()",
+    "AndroidDerivationScheduler.start(appContext)",
+    "AndroidCaptureStore.awaitBackgroundDerivationIdle(appContext)",
 ):
     assert token in runtime, token
 
@@ -42,11 +44,24 @@ for token in (
     "finalDeclaredLength",
     "bodies/$bodyName",
     "observations",
-    "DERIVATION_EXECUTOR.execute",
-    "awaitBackgroundDerivationIdle",
+    "AndroidDerivationScheduler.enqueue(",
+    "awaitBackgroundDerivationIdle(context: Context)",
     "insertOrThrow",
 ):
     assert token in store + index, token
+assert "DERIVATION_EXECUTOR" not in store
+assert store.index("index.record(") < store.index("AndroidDerivationScheduler.enqueue(")
+
+for token in (
+    "CREATE TABLE IF NOT EXISTS derivation_queue",
+    "recoverInterrupted()",
+    "Executors.newSingleThreadExecutor",
+    "waitForCaptureQuiet()",
+    "SLOW(500L)",
+    "BALANCED(150L)",
+    "FAST(25L)",
+):
+    assert token in queue, token
 
 assert 'dna_archived INTEGER NOT NULL DEFAULT 0' in index
 
@@ -85,4 +100,4 @@ for token in (
 for forbidden in ("Authorization", "Cookie", "requestHeaders", "responseHeaders"):
     assert forbidden not in bridge, forbidden
 
-print("android streamed native ingress/background derivation smoke PASS")
+print("android streamed native ingress/durable breathing queue smoke PASS")

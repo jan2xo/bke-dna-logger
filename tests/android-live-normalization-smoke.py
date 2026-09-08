@@ -9,6 +9,8 @@ messages_normalizer = (kotlin / "AndroidMessagesNormalizationEngine.kt").read_te
 dispatcher = (kotlin / "AndroidConversationNormalizationDispatcher.kt").read_text(encoding="utf-8")
 pipeline = (kotlin / "AndroidLiveDerivationPipeline.kt").read_text(encoding="utf-8")
 store = (kotlin / "AndroidCaptureStore.kt").read_text(encoding="utf-8")
+queue = (kotlin / "AndroidDerivationQueue.kt").read_text(encoding="utf-8")
+runtime = (kotlin / "AndroidCaptureRuntime.kt").read_text(encoding="utf-8")
 aggregation = (kotlin / "AndroidConversationAggregationEngine.kt").read_text(encoding="utf-8")
 contract = (kotlin / "DnaReconciliationContract.kt").read_text(encoding="utf-8")
 
@@ -78,7 +80,8 @@ for source in (graph_normalizer, messages_normalizer, dispatcher):
     ):
         assert forbidden not in source, forbidden
 
-# Live derivative semantics are unchanged internally and still fail non-fatally.
+# Live derivative semantics remain ordered, but coarse stages are now exposed to
+# the breathing scheduler and failure is reported back to the durable queue.
 for token in (
     'MAX_CLASSIFICATION_BYTES = 16L * 1024 * 1024',
     'CANDIDATE_KIND = "conversation_payload_candidate"',
@@ -94,6 +97,10 @@ for token in (
     'Log.d(TAG, "BKE DNA derivation: normalization_complete")',
     'Log.d(TAG, "BKE DNA derivation: reconciliation_complete")',
     'Log.d(TAG, "BKE DNA derivation: derivative_failed")',
+    'onStage(STAGE_CLASSIFYING)', 'onStage(STAGE_NORMALIZING)', 'onStage(STAGE_RECONCILING)',
+    'const val STAGE_CLASSIFYING = "CLASSIFYING"',
+    'const val STAGE_NORMALIZING = "NORMALIZING"',
+    'const val STAGE_RECONCILING = "RECONCILING"',
 ):
     assert token in pipeline, token
 
@@ -101,17 +108,43 @@ assert pipeline.index('ensureClassification(') < pipeline.index('readClassificat
 assert pipeline.index('readClassificationOutcome(sourceSha256)') < pipeline.index('normalizer.normalizeCandidate(sourceSha256)')
 assert pipeline.index('normalizer.normalizeCandidate(sourceSha256)') < pipeline.index('engine.aggregateConversation(normalized.conversationNativeId)')
 
-# Live capture no longer waits for semantic processing. Raw observation/index
-# persistence precedes scheduling the single-thread derivative worker.
+# Capture ACK path persists RAW + capture index, then only enqueues semantic work.
 for token in (
-    'DERIVATION_EXECUTOR.execute {',
-    'AndroidLiveDerivationPipeline(appContext).processCompletedCapture(',
-    'Executors.newSingleThreadExecutor',
-    'awaitBackgroundDerivationIdle()',
+    'AndroidDerivationScheduler.captureStarted()',
+    'AndroidDerivationScheduler.captureFinished()',
+    'AndroidDerivationScheduler.enqueue(',
+    'awaitBackgroundDerivationIdle(context: Context)',
 ):
     assert token in store, token
-assert store.index('index.record(') < store.index('DERIVATION_EXECUTOR.execute {')
-assert store.index('DERIVATION_EXECUTOR.execute {') < store.index('AndroidLiveDerivationPipeline(appContext).processCompletedCapture(')
+assert 'DERIVATION_EXECUTOR' not in store
+assert 'AndroidLiveDerivationPipeline(appContext).processCompletedCapture(' not in store
+assert store.index('index.record(') < store.index('AndroidDerivationScheduler.enqueue(')
+
+# Durable queue lives in the same Working Data SQLite and recovers interrupted
+# PROCESSING rows. One single-thread scheduler breathes between stages/jobs.
+for token in (
+    'CREATE TABLE IF NOT EXISTS derivation_queue',
+    'source_sha256 TEXT PRIMARY KEY',
+    'status TEXT NOT NULL', 'stage TEXT NOT NULL', 'attempts INTEGER NOT NULL DEFAULT 0',
+    'recoverInterrupted()', 'STATUS_PROCESSING', 'STATUS_WAITING',
+    'Executors.newSingleThreadExecutor', 'bke-dna-breathing-derivation',
+    'enum class AndroidProcessingProfile', 'SLOW(500L)', 'BALANCED(150L)', 'FAST(25L)',
+    'Thread.sleep(restMillis)', 'Thread.yield()',
+    'activeCaptures', 'waitForCaptureQuiet()',
+    'markDone(job.sourceSha256)', 'markFailed(job.sourceSha256, "derivative_failed")',
+    'AndroidDerivationQueueSnapshot', 'currentStage',
+):
+    assert token in queue, token
+assert 'newFixedThreadPool' not in queue
+assert 'newCachedThreadPool' not in queue
+
+# Runtime startup performs queue recovery; storage mutation drains semantic work
+# without destroying the Gecko session.
+for token in (
+    'AndroidDerivationScheduler.start(appContext)',
+    'AndroidCaptureStore.awaitBackgroundDerivationIdle(appContext)',
+):
+    assert token in runtime, token
 
 # Reconciliation must not reinterpret graphless messages as a complete graph.
 for token in (
@@ -127,7 +160,7 @@ for token in (
 assert 'fun aggregateConversation(conversationNativeId: String)' in aggregation
 assert 'aggregateConversationState(conversationNativeId, snapshots)' in aggregation
 
-# Owner-controlled export/storage semantics remain untouched.
+# Owner-controlled export/storage semantics remain untouched in this PR.
 assert 'AUTOMATIC_DNA_EXPORT = false' in contract
 assert 'AUTOMATIC_MARKDOWN_EXPORT = false' in contract
 assert 'MERGE_SQLITE_ACROSS_DEVICES = false' in contract
@@ -168,4 +201,4 @@ assert messages_fixture["messages"][1]["id"] == messages_fixture["current_node"]
 assert "parent" not in messages_fixture["messages"][0]
 assert "children" not in messages_fixture["messages"][0]
 
-print("android live classification and background normalization smoke PASS")
+print("android durable breathing derivation queue smoke PASS")

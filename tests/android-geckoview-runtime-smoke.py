@@ -57,7 +57,8 @@ for token in (
     "pauseForStorageMutation",
     "resumeAfterStorageMutation",
     "withStorageMutationPause",
-    "AndroidCaptureStore.awaitBackgroundDerivationIdle()",
+    "AndroidDerivationScheduler.start(appContext)",
+    "AndroidCaptureStore.awaitBackgroundDerivationIdle(appContext)",
 ):
     assert token in runtime, token
 

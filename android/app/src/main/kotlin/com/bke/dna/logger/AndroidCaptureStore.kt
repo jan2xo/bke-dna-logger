@@ -8,14 +8,13 @@ import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
 
 /**
  * Android counterpart of the desktop CaptureStore.
  * Streams into app-private partial files, hashes raw bytes, deduplicates bodies,
  * persists immutable observations, projects the observation into SQLite, then
- * schedules classification/normalization as a best-effort background derivative.
+ * enqueues classification/normalization/reconciliation in the durable Working
+ * Data processing queue.
  */
 class AndroidCaptureStore(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -50,6 +49,7 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
             declaredLength = byteLength,
             file = File(partial, "$captureId.part"),
         )
+        AndroidDerivationScheduler.captureStarted()
         return "capture_start"
     }
 
@@ -73,6 +73,8 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
     private fun end(json: JSONObject): String {
         val captureId = requireCaptureId(json)
         val session = sessions.remove(captureId) ?: error("Capture '$captureId' has not started")
+        AndroidDerivationScheduler.captureFinished()
+
         val result = session.finish()
         val finalDeclaredLength = if (json.has("byteLength") && !json.isNull("byteLength")) {
             json.getLong("byteLength")
@@ -122,22 +124,23 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
         )
 
         // Raw bytes + immutable observation + live capture index are durable now.
-        // Do not keep Gecko/native-message ACK waiting while JSON classification,
-        // normalization and reconciliation process a large conversation body.
-        DERIVATION_EXECUTOR.execute {
-            AndroidLiveDerivationPipeline(appContext).processCompletedCapture(
-                bodyFile = body,
-                sourceSha256 = result.sha256,
-                byteLength = result.byteLength,
-                contentType = session.start.optNullableString("contentType"),
-            )
-        }
+        // Queue semantic work in SQLite and ACK Gecko without running the heavy
+        // parser on the native-message path.
+        AndroidDerivationScheduler.enqueue(
+            context = appContext,
+            bodyFile = body,
+            sourceSha256 = result.sha256,
+            byteLength = result.byteLength,
+            contentType = session.start.optNullableString("contentType"),
+        )
         return "capture_end"
     }
 
     override fun close() {
+        val interruptedCaptures = sessions.size
         sessions.values.forEach { it.close() }
         sessions.clear()
+        repeat(interruptedCaptures) { AndroidDerivationScheduler.captureFinished() }
         index.close()
     }
 
@@ -190,14 +193,8 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
     private data class Result(val sha256: String, val byteLength: Long, val partial: File)
 
     companion object {
-        private val DERIVATION_EXECUTOR = Executors.newSingleThreadExecutor { runnable ->
-            Thread(runnable, "bke-dna-derivation").apply { isDaemon = true }
-        }
-
-        fun awaitBackgroundDerivationIdle() {
-            val barrier = CountDownLatch(1)
-            DERIVATION_EXECUTOR.execute { barrier.countDown() }
-            barrier.await()
+        fun awaitBackgroundDerivationIdle(context: Context) {
+            AndroidDerivationScheduler.awaitIdle(context.applicationContext)
         }
     }
 }
