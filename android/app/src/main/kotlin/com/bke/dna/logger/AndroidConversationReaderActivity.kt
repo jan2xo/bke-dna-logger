@@ -2,21 +2,45 @@ package com.bke.dna.logger
 
 import android.app.Activity
 import android.os.Bundle
+import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import java.util.Locale
+import java.util.concurrent.Executors
 
-/** Full conversation data is resolved only after the owner opens a unified-library item. */
+/**
+ * Bounded conversation reader.
+ *
+ * Interactive reading must never materialize a whole large conversation into
+ * one String/TextView. CLEAN pages come from SQLite message/revision rows; RAW
+ * pages stream bounded windows from the current exact-evidence backend.
+ */
 class AndroidConversationReaderActivity : Activity() {
     private lateinit var conversationNativeId: String
     private lateinit var location: AndroidUnifiedConversationLocation
     private lateinit var workingData: AndroidWorkingDataGeneration
-    private lateinit var human: AndroidHumanExportService
-    private lateinit var body: TextView
+
+    private lateinit var titleLabel: TextView
     private lateinit var modeLabel: TextView
+    private lateinit var progressLabel: TextView
+    private lateinit var body: TextView
+    private lateinit var previousButton: Button
+    private lateinit var nextButton: Button
+
+    private var cleanPager: AndroidCleanConversationPager? = null
+    private var rawPager: AndroidRawConversationPager? = null
+    private var mode = ReaderMode.CLEAN
+    private var cleanOffset = 0
+    private val cleanHistory = ArrayDeque<Int>()
+    private var rawCursor: AndroidRawCursor? = null
+    private val rawHistory = ArrayDeque<AndroidRawCursor>()
+    private var loadGeneration = 0L
+
+    private val ioExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "bke-dna-reader-io").apply { isDaemon = true }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -26,101 +50,305 @@ class AndroidConversationReaderActivity : Activity() {
             return
         }
 
-        location = runCatching { AndroidUnifiedConversationLibrary(this).resolve(conversationNativeId) }
-            .getOrElse {
-                finish()
-                return
-            }
-        workingData = runCatching { AndroidWorkingDataManager(this).generation(location.generation.id) }
-            .getOrElse {
-                finish()
-                return
-            }
-        human = AndroidHumanExportService(this, workingData.conversationStateDirectory)
-        renderUi()
-        showClean()
+        renderShell()
+        resolveAndOpen()
     }
 
-    private fun renderUi() {
-        val descriptor = runCatching { human.describe(location.conversationKey) }.getOrNull()
-        val attributedBytes = runCatching { human.conversationWorkingBytes(location.conversationKey) }.getOrDefault(0L)
-
+    private fun renderShell() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(28, 28, 28, 36)
+            setPadding(20, 20, 20, 24)
         }
 
-        root.addView(TextView(this).apply {
-            text = descriptor?.title ?: location.displayTitle
-            textSize = 22f
-        })
-        root.addView(TextView(this).apply {
-            text = buildString {
-                append("Resolved from: ${workingData.label}")
-                append("\nSeen in ${location.allGenerationIds.size} Working Data generation(s)")
-                append("\nAttributed conversation evidence: ${formatBytes(attributedBytes)}")
-                append(" · SQLite shared projection excluded")
-                if (workingData.isReadOnly) append("\nREAD-ONLY RECOVERY SOURCE")
-            }
-            textSize = 14f
-            setPadding(0, 8, 0, 12)
-        })
-
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        actions.addView(actionButton("CLEAN") { showClean() })
-        actions.addView(actionButton("RAW") { showRaw() })
-        actions.addView(actionButton("BACK") { finish() })
-        root.addView(actions)
+        titleLabel = TextView(this).apply {
+            text = "Opening conversation…"
+            textSize = 20f
+        }
+        root.addView(titleLabel)
 
         modeLabel = TextView(this).apply {
-            textSize = 14f
-            setPadding(0, 12, 0, 8)
+            textSize = 13f
+            setPadding(0, 6, 0, 6)
         }
         root.addView(modeLabel)
 
+        val modeActions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.START
+        }
+        modeActions.addView(compactButton("CLEAN") { switchMode(ReaderMode.CLEAN) })
+        modeActions.addView(compactButton("RAW") { switchMode(ReaderMode.RAW) })
+        modeActions.addView(compactButton("BACK") { finish() })
+        root.addView(modeActions)
+
+        progressLabel = TextView(this).apply {
+            text = "Preparing bounded reader…"
+            textSize = 12f
+            setPadding(0, 8, 0, 8)
+        }
+        root.addView(progressLabel)
+
         val scroll = ScrollView(this)
         body = TextView(this).apply {
+            text = "Loading…"
             textSize = 14f
             setTextIsSelectable(true)
-            setPadding(0, 8, 0, 48)
+            setPadding(0, 8, 0, 20)
         }
         scroll.addView(
             body,
-            ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
         )
         root.addView(
             scroll,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            ),
         )
+
+        val paging = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        previousButton = compactButton("PREV") { previousPage() }.apply { isEnabled = false }
+        nextButton = compactButton("NEXT") { nextPage() }.apply { isEnabled = false }
+        paging.addView(previousButton)
+        paging.addView(nextButton)
+        root.addView(paging)
+
         setContentView(root)
     }
 
-    private fun showClean() {
-        modeLabel.text = "CLEAN · JAN / RIGHT-HAND only · no tools"
-        body.text = runCatching { human.renderCleanMarkdown(location.conversationKey) }
-            .getOrElse { "Unable to render CLEAN view: ${it.message}" }
+    private fun resolveAndOpen() {
+        val request = ++loadGeneration
+        ioExecutor.execute {
+            val resolved = runCatching {
+                val resolvedLocation = AndroidUnifiedConversationLibrary(this).resolve(conversationNativeId)
+                val generation = AndroidWorkingDataManager(this).generation(resolvedLocation.generation.id)
+                ReaderResolution(resolvedLocation, generation)
+            }
+            runOnUiThread {
+                if (request != loadGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                resolved.fold(
+                    onSuccess = { resolution ->
+                        location = resolution.location
+                        workingData = resolution.generation
+                        titleLabel.text = location.displayTitle
+                        openPagers()
+                        switchMode(ReaderMode.CLEAN, force = true)
+                    },
+                    onFailure = {
+                        body.text = "Unable to open conversation."
+                        progressLabel.text = "Reader unavailable"
+                    },
+                )
+            }
+        }
     }
 
-    private fun showRaw() {
-        modeLabel.text = "RAW · unfiltered captured conversation payloads"
-        body.text = runCatching { human.renderRawMarkdown(location.conversationKey) }
-            .getOrElse { "Unable to render RAW view: ${it.message}" }
+    private fun openPagers() {
+        closePagers()
+        cleanPager = AndroidCleanConversationPager(
+            generation = workingData,
+            conversationKey = location.conversationKey,
+        )
+        rawPager = AndroidRawConversationPager(
+            generation = workingData,
+            conversationKey = location.conversationKey,
+            captureRoot = AndroidDnaPaths.capturesRoot(this),
+        )
+        cleanOffset = 0
+        cleanHistory.clear()
+        rawCursor = rawPager?.firstCursor()
+        rawHistory.clear()
     }
 
-    private fun actionButton(label: String, action: () -> Unit): Button =
+    private fun switchMode(newMode: ReaderMode, force: Boolean = false) {
+        if (!::workingData.isInitialized) return
+        if (!force && mode == newMode) return
+        mode = newMode
+        when (mode) {
+            ReaderMode.CLEAN -> {
+                cleanOffset = 0
+                cleanHistory.clear()
+                loadCleanPage(cleanOffset, pushHistory = false)
+            }
+            ReaderMode.RAW -> {
+                rawCursor = rawPager?.firstCursor()
+                rawHistory.clear()
+                val cursor = rawCursor
+                if (cursor == null) {
+                    modeLabel.text = "RAW · full captured evidence in context · bounded stream"
+                    progressLabel.text = "No RAW sources indexed for this conversation"
+                    body.text = ""
+                    previousButton.isEnabled = false
+                    nextButton.isEnabled = false
+                } else {
+                    loadRawPage(cursor, pushHistory = false)
+                }
+            }
+        }
+    }
+
+    private fun nextPage() {
+        when (mode) {
+            ReaderMode.CLEAN -> {
+                val next = nextButton.tag as? Int ?: return
+                cleanHistory.addLast(cleanOffset)
+                loadCleanPage(next, pushHistory = false)
+            }
+            ReaderMode.RAW -> {
+                val next = nextButton.tag as? AndroidRawCursor ?: return
+                rawCursor?.let(rawHistory::addLast)
+                loadRawPage(next, pushHistory = false)
+            }
+        }
+    }
+
+    private fun previousPage() {
+        when (mode) {
+            ReaderMode.CLEAN -> {
+                val previous = cleanHistory.removeLastOrNull() ?: return
+                loadCleanPage(previous, pushHistory = false)
+            }
+            ReaderMode.RAW -> {
+                val previous = rawHistory.removeLastOrNull() ?: return
+                loadRawPage(previous, pushHistory = false)
+            }
+        }
+    }
+
+    private fun loadCleanPage(offset: Int, pushHistory: Boolean) {
+        val pager = cleanPager ?: return
+        if (pushHistory) cleanHistory.addLast(cleanOffset)
+        val request = ++loadGeneration
+        setLoading("CLEAN · JAN / RIGHT-HAND only · no tools")
+        ioExecutor.execute {
+            val result = runCatching { pager.loadPage(offset) }
+            runOnUiThread {
+                if (request != loadGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = { page ->
+                        cleanOffset = page.startOffset
+                        modeLabel.text = "CLEAN · JAN / RIGHT-HAND only · no tools"
+                        body.text = renderCleanPage(page)
+                        progressLabel.text = buildString {
+                            append("Bounded page · ")
+                            append(page.turns.size)
+                            append(" visible turn(s) · candidate position ")
+                            append(minOf(page.nextOffset ?: page.totalCandidateNodes, page.totalCandidateNodes))
+                            append(" / ")
+                            append(page.totalCandidateNodes)
+                            if (workingData.isReadOnly) append(" · READ-ONLY RECOVERY")
+                        }
+                        previousButton.isEnabled = cleanHistory.isNotEmpty()
+                        nextButton.tag = page.nextOffset
+                        nextButton.isEnabled = page.nextOffset != null
+                    },
+                    onFailure = { error -> showPageError("CLEAN", error) },
+                )
+            }
+        }
+    }
+
+    private fun loadRawPage(cursor: AndroidRawCursor, pushHistory: Boolean) {
+        val pager = rawPager ?: return
+        if (pushHistory) rawCursor?.let(rawHistory::addLast)
+        val request = ++loadGeneration
+        setLoading("RAW · full captured evidence in context · bounded stream")
+        ioExecutor.execute {
+            val result = runCatching { pager.loadPage(cursor) }
+            runOnUiThread {
+                if (request != loadGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = { page ->
+                        rawCursor = page.cursor
+                        modeLabel.text = "RAW · full captured evidence in context · bounded stream"
+                        body.text = page.text
+                        progressLabel.text = buildString {
+                            append("Source ")
+                            append(page.cursor.sourceIndex + 1)
+                            append(" / ")
+                            append(page.sourceCount)
+                            append(" · byte offset ")
+                            append(page.cursor.byteOffset)
+                            append(" · max page ")
+                            append(AndroidRawConversationPager.RAW_PAGE_BYTES / 1024)
+                            append(" KiB")
+                            if (workingData.isReadOnly) append(" · READ-ONLY RECOVERY")
+                        }
+                        previousButton.isEnabled = rawHistory.isNotEmpty()
+                        nextButton.tag = page.nextCursor
+                        nextButton.isEnabled = page.nextCursor != null
+                    },
+                    onFailure = { error -> showPageError("RAW", error) },
+                )
+            }
+        }
+    }
+
+    private fun renderCleanPage(page: AndroidCleanPage): String = buildString {
+        page.turns.forEachIndexed { index, turn ->
+            if (index > 0) appendLine()
+            appendLine(turn.speaker)
+            appendLine()
+            appendLine(turn.text)
+        }
+    }.trimEnd()
+
+    private fun setLoading(label: String) {
+        modeLabel.text = label
+        progressLabel.text = "Loading bounded page…"
+        body.text = "Loading…"
+        previousButton.isEnabled = false
+        nextButton.isEnabled = false
+    }
+
+    private fun showPageError(kind: String, error: Throwable) {
+        modeLabel.text = kind
+        progressLabel.text = "Unable to load page"
+        body.text = error.message ?: "Reader error"
+        previousButton.isEnabled = false
+        nextButton.isEnabled = false
+    }
+
+    private fun compactButton(label: String, action: () -> Unit): Button =
         Button(this).apply {
             text = label
+            textSize = 12f
+            minHeight = 0
+            minimumHeight = 0
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(18, 8, 18, 8)
             setOnClickListener { action() }
         }
 
-    private fun formatBytes(bytes: Long): String {
-        if (bytes < 1024L) return "$bytes B"
-        val kib = bytes / 1024.0
-        if (kib < 1024.0) return String.format(Locale.US, "%.1f KiB", kib)
-        val mib = kib / 1024.0
-        if (mib < 1024.0) return String.format(Locale.US, "%.1f MiB", mib)
-        return String.format(Locale.US, "%.2f GiB", mib / 1024.0)
+    private fun closePagers() {
+        cleanPager?.close()
+        cleanPager = null
+        rawPager?.close()
+        rawPager = null
     }
+
+    override fun onDestroy() {
+        loadGeneration += 1
+        closePagers()
+        ioExecutor.shutdownNow()
+        super.onDestroy()
+    }
+
+    private enum class ReaderMode { CLEAN, RAW }
+
+    private data class ReaderResolution(
+        val location: AndroidUnifiedConversationLocation,
+        val generation: AndroidWorkingDataGeneration,
+    )
 
     companion object {
         const val EXTRA_CONVERSATION_NATIVE_ID = "conversationNativeId"
