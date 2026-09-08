@@ -20,6 +20,13 @@ class GeckoViewHost(
         private const val EXTENSION_URI = "resource://android/assets/dna-extension/"
         private const val EXTENSION_ID = "bke-dna-logger@jl-bke.com"
         private const val NATIVE_APP = "bke.dna.logger"
+        private val RUNTIME_DIAGNOSTIC_EVENTS = setOf(
+            "interceptor_ready",
+            "fetch_seen",
+            "capture_candidate",
+            "interceptor_load_error",
+        )
+        private val RUNTIME_DIAGNOSTIC_FIELDS = setOf("type", "event")
     }
 
     private val runtime = GeckoRuntimeProvider.get(activity.applicationContext)
@@ -43,6 +50,11 @@ class GeckoViewHost(
                 return null
             }
 
+            if (message.optString("type") == "runtime_diagnostic") {
+                logRuntimeDiagnostic(message)
+                return null
+            }
+
             try {
                 val type = ingress.accept(message.toString().toByteArray(StandardCharsets.UTF_8))
                 Log.d(TAG, "Persisted DNA wire message: $type")
@@ -51,6 +63,24 @@ class GeckoViewHost(
             }
             return null
         }
+    }
+
+    private fun logRuntimeDiagnostic(message: JSONObject) {
+        val keys = message.keys()
+        while (keys.hasNext()) {
+            if (keys.next() !in RUNTIME_DIAGNOSTIC_FIELDS) {
+                Log.w(TAG, "Rejected runtime diagnostic with unexpected field")
+                return
+            }
+        }
+
+        val event = message.optString("event")
+        if (event !in RUNTIME_DIAGNOSTIC_EVENTS) {
+            Log.w(TAG, "Rejected unknown runtime diagnostic event")
+            return
+        }
+
+        Log.d(TAG, "Runtime diagnostic: $event")
     }
 
     fun start() {

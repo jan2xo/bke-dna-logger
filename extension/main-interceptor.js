@@ -3,6 +3,7 @@
 
   const SOURCE = "bke-dna-logger";
   const originalFetch = window.fetch.bind(window);
+  const diagnosticsSent = new Set();
 
   const allowedContentTypes = [
     "application/json",
@@ -10,6 +11,19 @@
     "text/event-stream",
     "text/plain"
   ];
+
+  function publishDiagnostic(event) {
+    if (diagnosticsSent.has(event)) {
+      return;
+    }
+
+    diagnosticsSent.add(event);
+    window.postMessage({
+      source: SOURCE,
+      kind: "runtime_diagnostic",
+      event
+    }, "*");
+  }
 
   function shouldCapture(response) {
     const type = (response.headers.get("content-type") || "").toLowerCase();
@@ -38,6 +52,8 @@
       return;
     }
 
+    publishDiagnostic("capture_candidate");
+
     const clone = response.clone();
     const body = await clone.arrayBuffer();
     const captureId = crypto.randomUUID();
@@ -61,7 +77,11 @@
     }, "*", [body]);
   }
 
+  publishDiagnostic("interceptor_ready");
+
   window.fetch = async function bkeDnaFetch(...args) {
+    publishDiagnostic("fetch_seen");
+
     const request = resolveRequest(args);
     const response = await originalFetch(...args);
 

@@ -2,6 +2,7 @@ package com.bke.dna.logger
 
 import android.app.Activity
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup
 import android.widget.Button
@@ -18,6 +19,22 @@ class MainActivity : Activity() {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            setOnApplyWindowInsetsListener { view, insets ->
+                @Suppress("DEPRECATION")
+                val systemTop = insets.systemWindowInsetTop
+                val cutoutTop = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    insets.displayCutout?.safeInsetTop ?: 0
+                } else {
+                    0
+                }
+                view.setPadding(
+                    view.paddingLeft,
+                    maxOf(systemTop, cutoutTop),
+                    view.paddingRight,
+                    view.paddingBottom,
+                )
+                insets
+            }
         }
         val exportsButton = Button(this).apply {
             text = "Exports & Backups"
@@ -43,6 +60,7 @@ class MainActivity : Activity() {
             ),
         )
         setContentView(root)
+        root.requestApplyInsets()
 
         geckoHost = GeckoViewHost(this, geckoView)
         geckoHost.start()
