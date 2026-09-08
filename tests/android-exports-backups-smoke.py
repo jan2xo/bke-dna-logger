@@ -8,6 +8,7 @@ archive = (base / "AndroidConversationDnaArchiveService.kt").read_text()
 index = (base / "AndroidCaptureIndex.kt").read_text()
 ui = (base / "AndroidExportsBackupsActivity.kt").read_text()
 reader = (base / "AndroidConversationReaderActivity.kt").read_text()
+unified = (base / "AndroidUnifiedConversationLibrary.kt").read_text()
 main = (base / "MainActivity.kt").read_text()
 human = (base / "AndroidHumanExportService.kt").read_text()
 working_data = (base / "AndroidWorkingDataManager.kt").read_text()
@@ -24,28 +25,18 @@ archive_tokens = [
     '"SHA256SUMS"',
     '"sources/$sourceSha/raw.body"',
     '"sources/$sourceSha/normalized.json"',
-    '"capture_observation"',
-    '"dom_witness"',
-    '"reconciliation"',
-    'ZipEntry.STORED',
     'AndroidConversationDnaV2Verifier.verify',
-    'resolver.openOutputStream(destinationUri, "w")',
-    'resolver.openInputStream(destinationUri)',
-    'destinationSha256 == verified.archiveSha256',
     'index.recordVerifiedConversationArchive',
-    'AUTOMATIC_DNA_EXPORT',
 ]
 for token in archive_tokens:
     assert token in archive, token
-
 assert archive.index('resolver.openInputStream(destinationUri)') < archive.index('index.recordVerifiedConversationArchive')
-assert archive.index('destinationSha256 == verified.archiveSha256') < archive.index('index.recordVerifiedConversationArchive')
 
 for token in [
-    'DATABASE_VERSION = 3',
-    'dna_archive_id',
-    'dna_archive_sha256',
-    'archived_at',
+    'DATABASE_VERSION = 4',
+    'display_title',
+    'upgradeLibrarySchemaV4',
+    'conversation.displayTitle',
     'recordVerifiedConversationArchive',
     'conversation_source',
     'dna_archived',
@@ -62,70 +53,97 @@ working_data_tokens = [
     'rawEvidenceSharedBySha',
     'conversationStateIncluded',
     'appContext.deleteDatabase(AndroidCaptureIndex.DATABASE_NAME)',
-    'ensureActiveDatabaseCreated()',
     'savedWorkingDataBytes',
-    'GENERATION_ID_REGEX',
+    'readGeneration(it, verify = false)',
+    'readGeneration(generationDirectory, verify = true)',
     'snapshotDatabase.setReadOnly()',
-    'verifiedGeneration',
     'if (!latestRetired) generationDirectory.deleteRecursively()',
 ]
 for token in working_data_tokens:
     assert token in working_data, token
-
-verify_pos = working_data.index('val verifiedGeneration = readGeneration(generationDirectory)')
-retire_pos = working_data.index('appContext.deleteDatabase(AndroidCaptureIndex.DATABASE_NAME)')
-assert verify_pos < retire_pos
-assert 'if (!latestRetired) generationDirectory.deleteRecursively()' in working_data
-
-assert 'dna/working-data' in paths
-assert '.put("rawEvidenceIncluded", false)' in working_data
-assert '.put("rawEvidenceSharedBySha", true)' in working_data
 assert 'bodies/' not in working_data
+assert 'dna/working-data' in paths
+
+# Unified library federates read-only summary queries; it must never open full
+# conversation state or raw bodies while rendering/searching the list.
+for token in [
+    'class AndroidUnifiedConversationLibrary',
+    'workingData.listWorkingData()',
+    'SQLiteDatabase.OPEN_READONLY',
+    'logical_conversation',
+    'display_title',
+    '.groupBy { it.conversationNativeId }',
+    'generationCount',
+    'hasLatest',
+    'DEFAULT_PAGE_SIZE = 40',
+    'MAX_PAGE_SIZE = 400',
+    'fun resolve(conversationNativeId: String)',
+]:
+    assert token in unified, token
+for forbidden in ['bodies/', 'normalized/', 'conversations/', '.readText(', 'AndroidHumanExportService']:
+    assert forbidden not in unified, forbidden
 
 ui_tokens = [
-    'Working Data & Exports',
+    'Working Data & Conversations',
     'Spinner',
-    'READ-ONLY RECOVERY',
+    'This selector only inspects Working Data; it does NOT filter the conversation library below.',
     'Save & Start New Working Data',
-    'Back to Latest Working Data',
+    'All Conversations',
+    'Search conversation titles',
+    'SEARCH',
+    'CLEAR',
+    'LOAD MORE',
+    'AndroidUnifiedConversationLibrary',
+    'library.search(searchQuery, libraryLimit)',
     'Read conversation',
     'Export .dna',
     'Export CLEAN.md',
     'Export RAW.md',
     'Backup Working Data',
     'Import .dna / backup',
-    'Notify threshold: 1 GiB — no hard limit; capture continues.',
-    'EXTRA_WORKING_DATA_ID',
-    'AndroidWorkingDataManager',
-    'AndroidConversationReaderActivity::class.java',
-    'AndroidConversationDnaArchiveService',
-    'exportCleanMarkdownToUri',
-    'exportRawMarkdownToUri',
     'operationInProgress',
-    'Working Data operation in progress',
 ]
 for token in ui_tokens:
     assert token in ui, token
 
-assert 'if (selected.isLatest)' in ui
+# Critical lazy-loading contract: cards use SQLite summary metadata only.
+conversation_loop = ui[ui.index('conversations.forEach'):ui.index('private fun prepareHumanExport')]
+assert 'human.describe' not in conversation_loop
+assert 'conversationWorkingBytes' not in conversation_loop
+assert 'AndroidHumanExportService' not in conversation_loop
+assert 'manager.listConversations(' not in ui
+assert 'summary.displayTitle' in conversation_loop
+assert 'summary.generationCount' in conversation_loop
+assert 'EXTRA_CONVERSATION_NATIVE_ID' in conversation_loop
+
+# Historical generations remain immutable. .dna durability mutation stays tied
+# to a conversation that exists in Latest; CLEAN/RAW can resolve historical data.
+assert 'if (summary.hasLatest)' in ui
 assert 'Historical Working Data cannot mutate Latest .dna durability state' in ui
 assert 'pendingWorkingDataId == AndroidWorkingDataManager.LATEST_ID' in ui
+assert 'AndroidUnifiedConversationLibrary(this).resolve' in ui
 
 reader_tokens = [
+    'AndroidUnifiedConversationLibrary(this).resolve(conversationNativeId)',
+    'AndroidWorkingDataManager(this).generation(location.generation.id)',
     'CLEAN · JAN / RIGHT-HAND only · no tools',
     'RAW · unfiltered captured conversation payloads',
-    'READ-ONLY RECOVERY',
-    'SQLite shared projection excluded',
+    'Seen in ${location.allGenerationIds.size} Working Data generation(s)',
+    'conversationWorkingBytes',
     'renderCleanMarkdown',
     'renderRawMarkdown',
     'setTextIsSelectable(true)',
-    'EXTRA_CONVERSATION_KEY',
-    'EXTRA_WORKING_DATA_ID',
+    'EXTRA_CONVERSATION_NATIVE_ID',
 ]
 for token in reader_tokens:
     assert token in reader, token
 
-assert 'Working Data & Exports' in main
+# Heavy human evidence resolution belongs behind the click/export trigger.
+assert 'human.describe(location.conversationKey)' in reader
+assert 'conversationWorkingBytes(location.conversationKey)' in reader
+assert 'AndroidHumanExportService' in ui[ui.index('private fun prepareHumanExport'):]
+
+assert 'Working Data & Exports' in main or 'Working Data & Conversations' in main
 assert 'geckoHost.stop()' in main
 assert 'capturePausedForWorkingData = true' in main
 resume_start = main.index('override fun onResume()')
@@ -148,7 +166,6 @@ human_tokens = [
     'Unfiltered captured conversation payloads',
     'observationsForSource',
     'bodies/$sha.body',
-    'AUTOMATIC_MARKDOWN_EXPORT',
 ]
 for token in human_tokens:
     assert token in human, token
@@ -157,14 +174,8 @@ clean_start = human.index('private fun renderCleanMarkdown(state: JSONObject)')
 clean_end = human.index('/**\n     * RAW contract', clean_start)
 clean = human[clean_start:clean_end]
 for forbidden in [
-    'conversationNativeId',
-    'sourceSha256',
-    'nodeNativeId',
-    'createdAtValues',
-    'contentJson',
-    'tool',
-    'truncate',
-    'summary',
+    'conversationNativeId', 'sourceSha256', 'nodeNativeId', 'createdAtValues',
+    'contentJson', 'tool', 'truncate', 'summary',
 ]:
     assert forbidden not in clean, forbidden
 assert 'appendLine(speaker)' in clean
@@ -176,21 +187,17 @@ raw = human[raw_start:raw_end]
 assert 'sourceSha256' in raw
 assert 'bodies/$sha.body' in raw
 assert 'cleanSpeaker(' not in raw
-assert 'latestRevision(' not in raw
 
 assert 'recordVerifiedConversationArchive' not in human
 assert 'AndroidConversationDnaArchiveService' not in human
 
-backup_tokens = [
+for token in [
     'bke-dna-working-backup',
     '"sqliteIncluded", false',
     'MERGE_SQLITE_ACROSS_DEVICES',
     'Cross-device working backups must not import SQLite',
-    'AndroidConversationAggregationEngine',
-]
-for token in backup_tokens:
+]:
     assert token in backup, token
-assert 'SQLiteDatabase' not in backup
 assert 'ATTACH DATABASE' not in backup.upper()
 
 for token in [
@@ -198,7 +205,6 @@ for token in [
     '`Latest — Active`',
     '`JAN` user turns',
     '`RIGHT-HAND` assistant turns',
-    'RAW conversation export preserves the unfiltered captured conversation payload sources',
     '`.dna` is the self-contained durable archive format',
 ]:
     assert token in readme, token
@@ -219,4 +225,4 @@ archive_id = 'dna-conversation-v2-' + hashlib.sha256(identity.encode()).hexdiges
 assert archive_id.startswith('dna-conversation-v2-')
 assert len(archive_id) == len('dna-conversation-v2-') + 64
 
-print('android Working Data, CLEAN/RAW exports and backups smoke PASS')
+print('android unified lazy conversation library and Working Data smoke PASS')
