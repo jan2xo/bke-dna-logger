@@ -10,6 +10,8 @@ ui = (base / "AndroidExportsBackupsActivity.kt").read_text()
 reader = (base / "AndroidConversationReaderActivity.kt").read_text()
 main = (base / "MainActivity.kt").read_text()
 human = (base / "AndroidHumanExportService.kt").read_text()
+working_data = (base / "AndroidWorkingDataManager.kt").read_text()
+paths = (base / "AndroidDnaPaths.kt").read_text()
 backup = (base / "AndroidWorkingBackupService.kt").read_text()
 contract = (base / "DnaReconciliationContract.kt").read_text()
 manifest = (root / "android" / "app" / "src" / "main" / "AndroidManifest.xml").read_text()
@@ -51,70 +53,144 @@ for token in [
 ]:
     assert token in index, token
 
+working_data_tokens = [
+    'Latest — Active',
+    'read_only_recovery',
+    'working.sqlite',
+    'PRAGMA wal_checkpoint(TRUNCATE)',
+    'SQLiteDatabase.OPEN_READONLY',
+    'rawEvidenceIncluded',
+    'rawEvidenceSharedBySha',
+    'conversationStateIncluded',
+    'appContext.deleteDatabase(AndroidCaptureIndex.DATABASE_NAME)',
+    'ensureActiveDatabaseCreated()',
+    'savedWorkingDataBytes',
+    'GENERATION_ID_REGEX',
+    'snapshotDatabase.setReadOnly()',
+    'verifiedGeneration',
+    'if (!latestRetired) generationDirectory.deleteRecursively()',
+]
+for token in working_data_tokens:
+    assert token in working_data, token
+
+# A generation must be fully verified before Latest is retired. Once Latest has
+# been retired, a failure starting the fresh DB must not delete the saved copy.
+verify_pos = working_data.index('val verifiedGeneration = readGeneration(generationDirectory)')
+retire_pos = working_data.index('appContext.deleteDatabase(AndroidCaptureIndex.DATABASE_NAME)')
+assert verify_pos < retire_pos
+assert 'if (!latestRetired) generationDirectory.deleteRecursively()' in working_data
+
+# Saved generations are app-private and do not duplicate immutable raw bodies.
+assert 'dna/working-data' in paths
+assert '.put("rawEvidenceIncluded", false)' in working_data
+assert '.put("rawEvidenceSharedBySha", true)' in working_data
+assert 'bodies/' not in working_data
+
 ui_tokens = [
-    'Exports & Backups',
+    'Working Data & Exports',
+    'Spinner',
+    'Latest — Active',
+    'READ-ONLY RECOVERY',
+    'Save & Start New Working Data',
+    'Back to Latest Working Data',
     'Read conversation',
     'Export .dna',
     'Export CLEAN.md',
     'Export RAW.md',
-    'evidence',
-    'Backup working store',
+    'Backup Working Data',
     'Import .dna / backup',
     'Notify threshold: 1 GiB — no hard limit; capture continues.',
-    'ACTION_CREATE_DOCUMENT',
-    'ACTION_OPEN_DOCUMENT',
+    'EXTRA_WORKING_DATA_ID',
+    'AndroidWorkingDataManager',
     'AndroidConversationReaderActivity::class.java',
     'AndroidConversationDnaArchiveService',
     'exportCleanMarkdownToUri',
     'exportRawMarkdownToUri',
-    'AndroidWorkingBackupService',
 ]
 for token in ui_tokens:
     assert token in ui, token
 
+# Historical selection is recovery-only; it may render/export CLEAN/RAW but the
+# .dna durability mutation stays Latest-only.
+assert 'if (selected.isLatest)' in ui
+assert 'Historical Working Data cannot mutate Latest .dna durability state' in ui
+assert 'pendingWorkingDataId == AndroidWorkingDataManager.LATEST_ID' in ui
+
 reader_tokens = [
-    'CLEAN · token-efficient continuation view',
-    'RAW · all reconciled revisions / readable content',
-    'Attributed evidence storage:',
+    'CLEAN · JAN / RIGHT-HAND only · no tools',
+    'RAW · unfiltered captured conversation payloads',
+    'READ-ONLY RECOVERY',
     'SQLite shared projection excluded',
     'renderCleanMarkdown',
     'renderRawMarkdown',
     'setTextIsSelectable(true)',
     'EXTRA_CONVERSATION_KEY',
+    'EXTRA_WORKING_DATA_ID',
 ]
 for token in reader_tokens:
     assert token in reader, token
 
-assert 'Exports & Backups' in main
-assert 'AndroidExportsBackupsActivity::class.java' in main
+# Entering Working Data management pauses capture and returning creates a fresh
+# host/ingress rather than reusing the closed AndroidWireIngress.
+assert 'Working Data & Exports' in main
+assert 'geckoHost.stop()' in main
+assert 'capturePausedForWorkingData = true' in main
+resume_start = main.index('override fun onResume()')
+resume_end = main.index('override fun onDestroy()', resume_start)
+resume = main[resume_start:resume_end]
+assert 'geckoHost = GeckoViewHost(this, geckoView)' in resume
+assert 'geckoHost.start()' in resume
+
 assert 'AndroidExportsBackupsActivity' in manifest
 assert 'AndroidConversationReaderActivity' in manifest
 
 human_tokens = [
-    'Historical date',
-    'createdAtValues',
-    'title',
-    'CLEAN.md',
-    'RAW.md',
-    'token-efficient continuation derivative',
-    'all observed revisions',
-    'Structured tool/result payload collapsed for CLEAN',
+    'CLEAN_JAN = "JAN"',
+    'CLEAN_RIGHT_HAND = "RIGHT-HAND"',
+    'setOf("user") -> CLEAN_JAN',
+    'setOf("assistant") -> CLEAN_RIGHT_HAND',
     'conversationWorkingBytes',
-    'SQLite page allocation is intentionally excluded',
     'exportCleanMarkdownToUri',
     'exportRawMarkdownToUri',
-    'CLEAN_TOOL_TEXT_LIMIT = 1_200',
-    'CLEAN_MESSAGE_TEXT_LIMIT = 8_000',
+    'Unfiltered captured conversation payloads',
+    'observationsForSource',
+    'bodies/$sha.body',
     'AUTOMATIC_MARKDOWN_EXPORT',
 ]
 for token in human_tokens:
     assert token in human, token
 
-# CLEAN is an aggressively smaller derivative only; RAW must not call its
-# truncation/collapse path, and neither Markdown derivative can mark .dna durability.
+# CLEAN is not a summary. It contains only the latest readable turns from nodes
+# whose role set is exactly user or exactly assistant. No metadata/truncation or
+# tool-result fallback is allowed inside the CLEAN renderer.
+clean_start = human.index('private fun renderCleanMarkdown(state: JSONObject)')
+clean_end = human.index('/**\n     * RAW contract', clean_start)
+clean = human[clean_start:clean_end]
+for forbidden in [
+    'conversationNativeId',
+    'sourceSha256',
+    'nodeNativeId',
+    'createdAtValues',
+    'contentJson',
+    'tool',
+    'truncate',
+    'summary',
+]:
+    assert forbidden not in clean, forbidden
+assert 'appendLine(speaker)' in clean
+assert 'appendLine(text)' in clean
+
+# RAW is the opposite: it resolves the source payloads and exact observation
+# envelopes without passing through CLEAN role filtering.
 raw_start = human.index('private fun renderRawMarkdown')
-raw_end = human.index('private fun orderedNodes', raw_start)
-assert 'cleanContent(' not in human[raw_start:raw_end]
+raw_end = human.index('private fun observationsForSource', raw_start)
+raw = human[raw_start:raw_end]
+assert 'sourceSha256' in raw
+assert 'bodies/$sha.body' in raw
+assert 'cleanSpeaker(' not in raw
+assert 'latestRevision(' not in raw
+
+# Markdown exports cannot mark .dna durability.
 assert 'recordVerifiedConversationArchive' not in human
 assert 'AndroidConversationDnaArchiveService' not in human
 
@@ -148,4 +224,4 @@ archive_id = 'dna-conversation-v2-' + hashlib.sha256(identity.encode()).hexdiges
 assert archive_id.startswith('dna-conversation-v2-')
 assert len(archive_id) == len('dna-conversation-v2-') + 64
 
-print('android manual exports and backups smoke PASS')
+print('android Working Data, CLEAN/RAW exports and backups smoke PASS')
