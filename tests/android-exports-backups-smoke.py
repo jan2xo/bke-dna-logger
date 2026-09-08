@@ -8,6 +8,7 @@ archive = (base / "AndroidConversationDnaArchiveService.kt").read_text()
 index = (base / "AndroidCaptureIndex.kt").read_text()
 ui = (base / "AndroidExportsBackupsActivity.kt").read_text()
 reader = (base / "AndroidConversationReaderActivity.kt").read_text()
+pager = (base / "AndroidConversationReadPager.kt").read_text()
 unified = (base / "AndroidUnifiedConversationLibrary.kt").read_text()
 titles = (base / "AndroidConversationTitleCatalog.kt").read_text()
 main = (base / "MainActivity.kt").read_text()
@@ -20,7 +21,9 @@ backup = (base / "AndroidWorkingBackupService.kt").read_text()
 contract = (base / "DnaReconciliationContract.kt").read_text()
 manifest = (root / "android" / "app" / "src" / "main" / "AndroidManifest.xml").read_text()
 
-# Durable archive remains the only destructive-cleanup durability gate.
+# Durable archive remains the only destructive-cleanup durability gate in the
+# transitional alpha implementation. The README target architecture supersedes
+# this later, but PR3 does not change archive/purge semantics.
 for token in [
     '"formatVersion", 2', '"conversation/state.json"', '"SHA256SUMS"',
     '"sources/$sourceSha/raw.body"', 'AndroidConversationDnaV2Verifier.verify',
@@ -45,7 +48,7 @@ assert 'capturePausedForWorkingData' not in main
 assert 'override fun onResume()' not in main
 button = main[main.index('text = "Working Data & Exports"'):main.index('root.addView', main.index('text = "Working Data & Exports"'))]
 assert 'geckoHost.stop()' not in button
-assert 'geckoHost.stop()' in main  # final Activity destruction still closes Gecko cleanly
+assert 'geckoHost.stop()' in main
 for token in ['withStorageMutationPause', 'pauseForStorageMutation', 'resumeAfterStorageMutation', 'awaitBackgroundDerivationIdle']:
     assert token in runtime, token
 for token in ['storageMutation = true', 'AndroidCaptureRuntime.withStorageMutationPause(this)']:
@@ -86,8 +89,7 @@ assert 'conversationWorkingBytes' not in conversation_loop
 assert 'summary.displayTitle' in conversation_loop
 assert 'summary.generationCount' in conversation_loop
 
-# Guardrailed purge: exact JAN confirmation, verified .dna, per-source durability,
-# cross-generation source-reference proof, and only heavy SHA evidence deletion.
+# Guardrailed purge remains unchanged in this PR.
 for token in [
     'CONFIRMATION_TEXT = "jan2x"',
     'conversationArchived', 'sources.any { !it.archived }', 'archiveId', 'archiveSha256',
@@ -103,7 +105,6 @@ for token in [
     'setBackgroundColor(Color.rgb(183, 28, 28))', 'setTextColor(Color.WHITE)',
 ]:
     assert token in ui, token
-# Purge service must not delete the live database or logical conversation state.
 assert 'deleteDatabase' not in purge
 assert 'conversations/' not in purge
 
@@ -111,14 +112,60 @@ assert 'conversations/' not in purge
 assert 'Historical Working Data cannot mutate Latest .dna durability state' in ui
 assert 'pendingWorkingDataId == AndroidWorkingDataManager.LATEST_ID' in ui
 
-# Reader loads full evidence only after click; CLEAN stays JAN/RIGHT-HAND only.
+# Interactive reader is now strictly bounded. It resolves/open pagers on its
+# dedicated IO executor and never calls the giant full-conversation renderers.
 for token in [
-    'AndroidUnifiedConversationLibrary(this).resolve(conversationNativeId)',
+    'Executors.newSingleThreadExecutor',
+    '"bke-dna-reader-io"',
+    'AndroidUnifiedConversationLibrary(this)',
+    'AndroidCleanConversationPager(',
+    'AndroidRawConversationPager(',
+    'compactButton("CLEAN")',
+    'compactButton("RAW")',
+    'compactButton("PREV")',
+    'compactButton("NEXT")',
     'CLEAN · JAN / RIGHT-HAND only · no tools',
-    'RAW · unfiltered captured conversation payloads',
-    'renderCleanMarkdown', 'renderRawMarkdown', 'setTextIsSelectable(true)',
+    'RAW · full captured evidence in context · bounded stream',
+    'setTextIsSelectable(true)',
+    'loadCleanPage(',
+    'loadRawPage(',
 ]:
     assert token in reader, token
+for forbidden in [
+    'human.renderCleanMarkdown',
+    'human.renderRawMarkdown',
+    'AndroidHumanExportService(this',
+    'conversationWorkingBytes(',
+]:
+    assert forbidden not in reader, forbidden
+assert reader.index('ioExecutor.execute {') < reader.index('AndroidUnifiedConversationLibrary(this)')
+
+# CLEAN paging comes from SQLite normalized rows, 40 turns at a time. RAW paging
+# reads only a 64 KiB exact byte window at a time from the transitional body backend.
+for token in [
+    'class AndroidCleanConversationPager',
+    'class AndroidRawConversationPager',
+    'SQLiteDatabase.OPEN_READONLY',
+    'logical_message_node',
+    'logical_message_revision',
+    'conversation_source',
+    'const val DEFAULT_PAGE_SIZE = 40',
+    'const val RAW_PAGE_BYTES = 64 * 1024',
+    'RandomAccessFile(body, "r")',
+    'file.seek(cursor.byteOffset)',
+    'safeUtf8PrefixLength',
+    'setOf("user") -> AndroidHumanExportService.CLEAN_JAN',
+    'setOf("assistant") -> AndroidHumanExportService.CLEAN_RIGHT_HAND',
+]:
+    assert token in pager, token
+for forbidden in [
+    '.readText(Charsets.UTF_8)',
+    'buildString {\n        appendLine("#',
+]:
+    assert forbidden not in pager, forbidden
+
+# Export helpers preserve existing CLEAN/RAW semantics; they are no longer used
+# by the interactive reader but remain explicit owner export routes.
 for token in [
     'CLEAN_JAN = "JAN"', 'CLEAN_RIGHT_HAND = "RIGHT-HAND"',
     'setOf("user") -> CLEAN_JAN', 'setOf("assistant") -> CLEAN_RIGHT_HAND',
@@ -154,4 +201,4 @@ identity = '\n'.join(f'{p}\t{s}\t{n}\t{src}' for p, s, n, src in sorted(evidence
 archive_id = 'dna-conversation-v2-' + hashlib.sha256(identity.encode()).hexdigest()
 assert len(archive_id) == len('dna-conversation-v2-') + 64
 
-print('android session-preserving Working Data, verified purge and export smoke PASS')
+print('android bounded CLEAN/RAW reader, Working Data, purge and export smoke PASS')
