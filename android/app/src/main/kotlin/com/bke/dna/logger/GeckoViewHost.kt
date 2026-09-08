@@ -7,6 +7,7 @@ import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoView
 import org.mozilla.geckoview.WebExtension
+import java.net.URI
 import java.nio.charset.StandardCharsets
 
 /** Owns GeckoView and routes DNA WebExtension messages into native Android ingress. */
@@ -20,6 +21,12 @@ class GeckoViewHost(
         private const val EXTENSION_URI = "resource://android/assets/dna-extension/"
         private const val EXTENSION_ID = "bke-dna-logger@jl-bke.com"
         private const val NATIVE_APP = "bke.dna.logger"
+
+        private const val ROUTE_CONVERSATION = "capture_route_conversation"
+        private const val ROUTE_CONVERSATIONS_LIST = "capture_route_conversations_list"
+        private const val ROUTE_BACKEND_API = "capture_route_backend_api"
+        private const val ROUTE_PUBLIC_API = "capture_route_public_api"
+        private const val ROUTE_OTHER = "capture_route_other"
 
         private val DIAGNOSTIC_EVENTS = setOf(
             "interceptor_ready",
@@ -43,6 +50,27 @@ class GeckoViewHost(
             "interceptor_load_error",
         )
         private val DIAGNOSTIC_KEYS = setOf("type", "event")
+
+        private fun classifyCaptureRoute(requestUrl: String?): String {
+            if (requestUrl.isNullOrBlank()) return ROUTE_OTHER
+            val uri = runCatching { URI(requestUrl) }.getOrNull() ?: return ROUTE_OTHER
+            val host = uri.host?.lowercase() ?: return ROUTE_OTHER
+            val chatGptHost = host == "chatgpt.com" ||
+                host.endsWith(".chatgpt.com") ||
+                host == "chat.openai.com"
+            if (!chatGptHost) return ROUTE_OTHER
+
+            val path = uri.path.orEmpty()
+            return when {
+                path == "/backend-api/conversations" ||
+                    path.startsWith("/backend-api/conversations/") -> ROUTE_CONVERSATIONS_LIST
+                path == "/backend-api/conversation" ||
+                    path.startsWith("/backend-api/conversation/") -> ROUTE_CONVERSATION
+                path.startsWith("/backend-api/") -> ROUTE_BACKEND_API
+                path.startsWith("/public-api/") -> ROUTE_PUBLIC_API
+                else -> ROUTE_OTHER
+            }
+        }
     }
 
     private val runtime = GeckoRuntimeProvider.get(activity.applicationContext)
@@ -73,6 +101,14 @@ class GeckoViewHost(
 
             try {
                 val type = ingress.accept(message.toString().toByteArray(StandardCharsets.UTF_8))
+                if (type == "capture_start") {
+                    val requestUrl = if (message.has("requestUrl") && !message.isNull("requestUrl")) {
+                        message.optString("requestUrl")
+                    } else {
+                        null
+                    }
+                    Log.d(TAG, "DNA capture route: ${classifyCaptureRoute(requestUrl)}")
+                }
                 Log.d(TAG, "Persisted DNA wire message: $type")
             } catch (error: Exception) {
                 Log.e(TAG, "Rejected DNA wire message", error)
