@@ -49,14 +49,37 @@ for token in (
 
 for token in (
     'MAX_CLASSIFICATION_BYTES = 16L * 1024 * 1024',
+    'CANDIDATE_KIND = "conversation_payload_candidate"',
     'AndroidConversationPayloadClassifier.classify',
     'AndroidGraphNormalizationEngine(appContext)',
     'engine.aggregateConversation(normalized.conversationNativeId)',
     'classification_size_limit',
     'classifier_error',
+    'readClassificationKind(sourceSha256)',
     'Raw evidence and its immutable observation are already durable',
+    'Log.d(TAG, "BKE DNA derivation: started")',
+    'Log.d(TAG, "BKE DNA derivation: classification_candidate")',
+    'Log.d(TAG, "BKE DNA derivation: classification_other")',
+    'Log.d(TAG, "BKE DNA derivation: normalization_skipped")',
+    'Log.d(TAG, "BKE DNA derivation: normalization_complete")',
+    'Log.d(TAG, "BKE DNA derivation: reconciliation_complete")',
+    'Log.d(TAG, "BKE DNA derivation: derivative_failed")',
 ):
     assert token in pipeline, token
+
+# Derivation diagnostics are fixed, non-sensitive stage markers only.
+for forbidden in (
+    'Log.d(TAG, sourceSha256',
+    'Log.d(TAG, bodyFile',
+    'Log.d(TAG, contentType',
+    'Log.d(TAG, normalized.conversationNativeId',
+):
+    assert forbidden not in pipeline, forbidden
+
+assert pipeline.index('ensureClassification(') < pipeline.index('readClassificationKind(sourceSha256)')
+assert pipeline.index('readClassificationKind(sourceSha256)') < pipeline.index('normalizer.normalizeCandidate(sourceSha256)')
+assert pipeline.index('normalizer.normalizeCandidate(sourceSha256)') < pipeline.index('engine.aggregateConversation(normalized.conversationNativeId)')
+assert pipeline.index('engine.aggregateConversation(normalized.conversationNativeId)') < pipeline.index('Log.d(TAG, "BKE DNA derivation: reconciliation_complete")')
 
 assert 'engine.aggregateAll()' not in pipeline
 assert 'fun aggregateConversation(conversationNativeId: String)' in aggregation
