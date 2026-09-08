@@ -24,20 +24,22 @@ class AndroidWorkingDataManager(context: Context) {
     private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
     private val workingDataRoot = AndroidDnaPaths.workingDataRoot(appContext)
 
+    /** Lightweight enumeration for the unified library: no full-file SHA scan. */
     fun listWorkingData(): List<AndroidWorkingDataGeneration> = buildList {
         add(latestGeneration())
         workingDataRoot.listFiles().orEmpty()
             .filter { it.isDirectory && it.name.matches(GENERATION_ID_REGEX) }
-            .mapNotNull(::readGeneration)
+            .mapNotNull { readGeneration(it, verify = false) }
             .sortedByDescending { it.createdAt }
             .forEach(::add)
     }
 
+    /** Explicit generation access verifies the saved SQLite before recovery use. */
     fun generation(id: String): AndroidWorkingDataGeneration {
         if (id == LATEST_ID) return latestGeneration()
         require(id.matches(GENERATION_ID_REGEX)) { "Invalid Working Data generation id" }
-        return readGeneration(File(workingDataRoot, id))
-            ?: error("Working Data generation does not exist")
+        return readGeneration(File(workingDataRoot, id), verify = true)
+            ?: error("Working Data generation does not exist or failed verification")
     }
 
     fun savedWorkingDataBytes(): Long = workingDataRoot.walkTopDown()
@@ -96,7 +98,7 @@ class AndroidWorkingDataManager(context: Context) {
                 .put("rawEvidenceSharedBySha", true)
             writeDurably(File(generationDirectory, MANIFEST_NAME), manifest.toString(2))
 
-            val verifiedGeneration = readGeneration(generationDirectory)
+            val verifiedGeneration = readGeneration(generationDirectory, verify = true)
                 ?: error("Unable to verify saved Working Data generation")
 
             snapshotDatabase.setReadOnly()
@@ -146,7 +148,10 @@ class AndroidWorkingDataManager(context: Context) {
         )
     }
 
-    private fun readGeneration(directory: File): AndroidWorkingDataGeneration? = runCatching {
+    private fun readGeneration(
+        directory: File,
+        verify: Boolean,
+    ): AndroidWorkingDataGeneration? = runCatching {
         val manifestFile = File(directory, MANIFEST_NAME)
         val database = File(directory, SNAPSHOT_DATABASE_NAME)
         val states = File(directory, SNAPSHOT_CONVERSATIONS_DIRECTORY)
@@ -159,12 +164,16 @@ class AndroidWorkingDataManager(context: Context) {
         require(manifest.getBoolean("conversationStateIncluded"))
         require(!manifest.getBoolean("rawEvidenceIncluded"))
         require(manifest.getBoolean("rawEvidenceSharedBySha"))
-        require(sha256File(database) == manifest.getString("sqliteSha256"))
-        val summaries = listConversationsFromDatabase(database)
-        require(summaries.size == manifest.getInt("conversationCount"))
-        summaries.forEach { summary ->
-            require(File(states, "${summary.conversationKey}.json").isFile)
+
+        if (verify) {
+            require(sha256File(database) == manifest.getString("sqliteSha256"))
+            val summaries = listConversationsFromDatabase(database)
+            require(summaries.size == manifest.getInt("conversationCount"))
+            summaries.forEach { summary ->
+                require(File(states, "${summary.conversationKey}.json").isFile)
+            }
         }
+
         val createdAt = Instant.parse(manifest.getString("createdAt"))
         AndroidWorkingDataGeneration(
             id = directory.name,
@@ -174,7 +183,8 @@ class AndroidWorkingDataManager(context: Context) {
             isReadOnly = true,
             databaseFile = database,
             conversationStateDirectory = states,
-            snapshotBytes = directory.walkTopDown().filter { it.isFile }.sumOf { it.length() },
+            snapshotBytes = manifest.optLong("sqliteByteLength", database.length()) +
+                states.listFiles().orEmpty().filter { it.isFile }.sumOf { it.length() } + manifestFile.length(),
         )
     }.getOrNull()
 
@@ -207,11 +217,13 @@ class AndroidWorkingDataManager(context: Context) {
             SQLiteDatabase.OPEN_READONLY,
         )
         try {
+            val hasDisplayTitle = hasColumn(database, "logical_conversation", "display_title")
             val cursor = database.query(
                 "logical_conversation",
                 arrayOf(
                     "conversation_key",
                     "conversation_native_id",
+                    if (hasDisplayTitle) "display_title" else "NULL AS display_title",
                     "state_observed_through",
                     "coverage_status",
                     "source_count",
@@ -228,16 +240,18 @@ class AndroidWorkingDataManager(context: Context) {
             cursor.use {
                 return buildList {
                     while (it.moveToNext()) {
+                        val nativeId = it.getString(1)
                         add(
                             AndroidConversationSummary(
                                 conversationKey = it.getString(0),
-                                conversationNativeId = it.getString(1),
-                                stateObservedThrough = it.getString(2),
-                                coverageStatus = it.getString(3),
-                                sourceCount = it.getInt(4),
-                                nodeCount = it.getInt(5),
-                                dnaArchived = it.getInt(6) != 0,
-                                archivedAt = if (it.isNull(7)) null else it.getString(7),
+                                conversationNativeId = nativeId,
+                                displayTitle = if (it.isNull(2)) nativeId else it.getString(2),
+                                stateObservedThrough = it.getString(3),
+                                coverageStatus = it.getString(4),
+                                sourceCount = it.getInt(5),
+                                nodeCount = it.getInt(6),
+                                dnaArchived = it.getInt(7) != 0,
+                                archivedAt = if (it.isNull(8)) null else it.getString(8),
                             ),
                         )
                     }
@@ -246,6 +260,16 @@ class AndroidWorkingDataManager(context: Context) {
         } finally {
             database.close()
         }
+    }
+
+    private fun hasColumn(database: SQLiteDatabase, table: String, column: String): Boolean {
+        database.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+            val nameIndex = cursor.getColumnIndex("name")
+            while (cursor.moveToNext()) {
+                if (cursor.getString(nameIndex) == column) return true
+            }
+        }
+        return false
     }
 
     private fun copyDurably(source: File, destination: File) {
