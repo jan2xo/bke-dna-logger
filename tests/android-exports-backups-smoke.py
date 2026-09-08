@@ -79,6 +79,10 @@ for token in [
     'while (true)',
     'merged.size >= limit',
     'perGenerationLimit * 2',
+    'runCatching {',
+    '}.getOrDefault(emptyList())',
+    'runCatching { queryExact(generation, conversationNativeId) }.getOrNull()',
+    'any readable Working Data generation',
     'fun resolve(conversationNativeId: String)',
 ]:
     assert token in unified, token
