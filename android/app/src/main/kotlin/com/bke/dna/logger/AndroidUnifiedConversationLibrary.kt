@@ -20,20 +20,29 @@ class AndroidUnifiedConversationLibrary(context: Context) {
     ): List<AndroidUnifiedConversationSummary> {
         require(limit in 1..MAX_PAGE_SIZE) { "Unified conversation page size is out of range" }
         val normalizedQuery = query.trim()
-        val perGenerationLimit = maxOf(limit, MIN_PER_GENERATION_LIMIT)
-        val rows = workingData.listWorkingData().flatMap { generation ->
-            queryGeneration(generation, normalizedQuery, perGenerationLimit)
+        val generations = workingData.listWorkingData()
+        var perGenerationLimit = maxOf(limit, MIN_PER_GENERATION_LIMIT)
+        var merged = emptyList<AndroidUnifiedConversationSummary>()
+
+        while (true) {
+            val rows = generations.flatMap { generation ->
+                queryGeneration(generation, normalizedQuery, perGenerationLimit)
+            }
+            merged = rows
+                .groupBy { it.conversationNativeId }
+                .map { (_, copies) -> mergeCopies(copies) }
+                .sortedWith(
+                    compareByDescending<AndroidUnifiedConversationSummary> { it.stateObservedThrough }
+                        .thenBy { it.displayTitle.lowercase() }
+                        .thenBy { it.conversationNativeId },
+                )
+
+            if (merged.size >= limit || perGenerationLimit >= MAX_METADATA_ROWS_PER_GENERATION) break
+            perGenerationLimit = (perGenerationLimit * 2)
+                .coerceAtMost(MAX_METADATA_ROWS_PER_GENERATION)
         }
 
-        return rows
-            .groupBy { it.conversationNativeId }
-            .map { (_, copies) -> mergeCopies(copies) }
-            .sortedWith(
-                compareByDescending<AndroidUnifiedConversationSummary> { it.stateObservedThrough }
-                    .thenBy { it.displayTitle.lowercase() }
-                    .thenBy { it.conversationNativeId },
-            )
-            .take(limit)
+        return merged.take(limit)
     }
 
     fun resolve(conversationNativeId: String): AndroidUnifiedConversationLocation {
@@ -97,11 +106,11 @@ class AndroidUnifiedConversationLibrary(context: Context) {
             selectionArgs = null
         } else if (hasDisplayTitle) {
             selection = "display_title LIKE ? COLLATE NOCASE OR conversation_native_id LIKE ? COLLATE NOCASE"
-            val pattern = "%${escapeLikeLiteral(query)}%"
+            val pattern = "%$query%"
             selectionArgs = arrayOf(pattern, pattern)
         } else {
             selection = "conversation_native_id LIKE ? COLLATE NOCASE"
-            selectionArgs = arrayOf("%${escapeLikeLiteral(query)}%")
+            selectionArgs = arrayOf("%$query%")
         }
         queryRows(database, generation, selection, selectionArgs, limit)
     }
@@ -172,11 +181,6 @@ class AndroidUnifiedConversationLibrary(context: Context) {
         return false
     }
 
-    private fun escapeLikeLiteral(value: String): String = value
-        .replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
-
     private data class LibraryRow(
         val generation: AndroidWorkingDataGeneration,
         val conversationKey: String,
@@ -200,8 +204,9 @@ class AndroidUnifiedConversationLibrary(context: Context) {
 
     companion object {
         const val DEFAULT_PAGE_SIZE = 40
-        const val MAX_PAGE_SIZE = 400
+        const val MAX_PAGE_SIZE = 10_000
         private const val MIN_PER_GENERATION_LIMIT = 40
+        private const val MAX_METADATA_ROWS_PER_GENERATION = 10_000
     }
 }
 
