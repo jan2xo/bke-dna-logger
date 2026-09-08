@@ -1,0 +1,86 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+  pull_request:
+
+jobs:
+  dotnet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build native host
+        run: dotnet build src/BKE.Dna.Logger.Host/BKE.Dna.Logger.Host.csproj --configuration Release
+      - name: Smoke version
+        run: dotnet run --project src/BKE.Dna.Logger.Host/BKE.Dna.Logger.Host.csproj --configuration Release --no-build -- --version
+      - name: Native Messaging evidence-store smoke
+        run: python3 tests/native-host-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
+      - name: SQLite schema and durability-gate smoke
+        run: python3 tests/sqlite-schema-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
+      - name: SQLite live projection and replay smoke
+        run: python3 tests/sqlite-projection-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
+      - name: DNA archive build verify corruption and durability smoke
+        run: python3 tests/dna-archive-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
+      - name: Multi-snapshot conversation aggregation smoke
+        run: python3 tests/conversation-aggregation-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
+      - name: Logical conversation SQLite projection smoke
+        run: python3 tests/conversation-sqlite-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
+      - name: Conversation DNA archive durability smoke
+        run: python3 tests/conversation-dna-archive-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
+      - name: Cross-device DNA reconciliation contract smoke
+        run: python3 tests/cross-device-reconciliation-smoke.py
+      - name: Cross-device DNA import reconciliation smoke
+        run: python3 tests/cross-device-dna-import-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
+      - name: Android DNA reconciliation import smoke
+        run: python3 tests/android-dna-reconciliation-import-smoke.py
+      - name: Android logical conversation reconciliation smoke
+        run: python3 tests/android-conversation-reconciliation-smoke.py
+      - name: Android live classification and normalization smoke
+        run: python3 tests/android-live-normalization-smoke.py
+      - name: Android manual exports and backups smoke
+        run: python3 tests/android-exports-backups-smoke.py
+      - name: Android Kotlin contract smoke
+        run: python3 tests/android-foundation-smoke.py
+      - name: Android GeckoView runtime smoke
+        run: python3 tests/android-geckoview-runtime-smoke.py
+      - name: Android native ingress smoke
+        run: python3 tests/android-native-ingress-smoke.py
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK 37.1
+        run: sdkmanager "platforms;android-37.1" "build-tools;36.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+      - name: Build Kotlin Android APK with stable GeckoView
+        run: gradle -p android :app:assembleDebug --stacktrace
+      - name: Cross-device DNA reconciliation contract smoke
+        run: python3 tests/cross-device-reconciliation-smoke.py
+      - name: Android DNA reconciliation import smoke
+        run: python3 tests/android-dna-reconciliation-import-smoke.py
+      - name: Android logical conversation reconciliation smoke
+        run: python3 tests/android-conversation-reconciliation-smoke.py
+      - name: Android live classification and normalization smoke
+        run: python3 tests/android-live-normalization-smoke.py
+      - name: Android manual exports and backups smoke
+        run: python3 tests/android-exports-backups-smoke.py
+      - name: Android Kotlin contract smoke
+        run: python3 tests/android-foundation-smoke.py
+      - name: Android GeckoView runtime smoke
+        run: python3 tests/android-geckoview-runtime-smoke.py
+      - name: Android native ingress smoke
+        run: python3 tests/android-native-ingress-smoke.py

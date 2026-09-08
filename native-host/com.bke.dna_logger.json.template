@@ -1,0 +1,9 @@
+{
+  "name": "com.bke.dna_logger",
+  "description": "BKE DNA Logger POC-0 native evidence host",
+  "path": "__HOST_PATH__",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://__EXTENSION_ID__/"
+  ]
+}

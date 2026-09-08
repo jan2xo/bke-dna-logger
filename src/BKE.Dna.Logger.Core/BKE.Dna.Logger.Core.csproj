@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>BKE.Dna.Logger.Core</AssemblyName>
+    <RootNamespace>BKE.Dna.Logger.Core</RootNamespace>
+  </PropertyGroup>
+</Project>

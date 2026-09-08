@@ -1,0 +1,434 @@
+package com.bke.dna.logger
+
+import android.app.Activity
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import android.provider.OpenableColumns
+import android.view.ViewGroup
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.Spinner
+import android.widget.TextView
+import android.widget.Toast
+import java.io.File
+import java.io.FileOutputStream
+import java.util.Locale
+import java.util.UUID
+
+/** Owner-facing Working Data management plus one deduplicated lazy conversation library. */
+class AndroidExportsBackupsActivity : Activity() {
+    private var inspectedWorkingDataId: String = AndroidWorkingDataManager.LATEST_ID
+    private var searchQuery: String = ""
+    private var libraryLimit: Int = AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE
+    private var pendingWorkingDataId: String = AndroidWorkingDataManager.LATEST_ID
+    private var pendingConversationKey: String? = null
+    @Volatile private var operationInProgress = false
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        refreshUi()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (operationInProgress) {
+            showOperationInProgress()
+            return
+        }
+        super.onBackPressed()
+    }
+
+    private fun refreshUi() {
+        val manager = AndroidWorkingDataManager(this)
+        val generations = manager.listWorkingData()
+        if (generations.none { it.id == inspectedWorkingDataId }) {
+            inspectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+        }
+        val inspected = generations.first { it.id == inspectedWorkingDataId }
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 48)
+        }
+        val scroll = ScrollView(this)
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        scroll.addView(
+            content,
+            ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+        root.addView(
+            scroll,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f),
+        )
+        setContentView(root)
+
+        content.addView(TextView(this).apply {
+            text = "Working Data & Conversations"
+            textSize = 24f
+        })
+        content.addView(actionButton("Back to ChatGPT") { finish() })
+
+        content.addView(TextView(this).apply {
+            text = "Working Data"
+            textSize = 20f
+            setPadding(0, 24, 0, 8)
+        })
+
+        val spinner = Spinner(this)
+        spinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            generations.map { it.label },
+        )
+        spinner.setSelection(generations.indexOfFirst { it.id == inspectedWorkingDataId }, false)
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                if (operationInProgress) return
+                val chosen = generations[position].id
+                if (chosen != inspectedWorkingDataId) {
+                    inspectedWorkingDataId = chosen
+                    refreshUi()
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        content.addView(spinner)
+
+        content.addView(TextView(this).apply {
+            text = buildString {
+                if (inspected.isLatest) {
+                    append("LATEST — ACTIVE / WRITABLE")
+                    append("\nAll live ChatGPT capture writes to this SQLite generation.")
+                } else {
+                    append("READ-ONLY WORKING DATA")
+                    append("\n${inspected.label}")
+                }
+                append("\nThis selector only inspects Working Data; it does NOT filter the conversation library below.")
+            }
+            textSize = 14f
+            setPadding(0, 10, 0, 12)
+        })
+
+        if (inspected.isLatest) {
+            content.addView(actionButton("Save & Start New Working Data") {
+                runWork("Working Data saved; fresh Latest is now active") {
+                    AndroidWorkingDataManager(this).rotateLatest()
+                    inspectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                }
+            })
+            content.addView(TextView(this).apply {
+                text = "Use this when Latest becomes heavy or laggy. SQLite/state are timestamped and verified; shared SHA-addressed raw evidence is not duplicated."
+                textSize = 13f
+                setPadding(0, 4, 0, 10)
+            })
+
+            content.addView(actionButton("Backup Working Data") {
+                pendingConversationKey = null
+                pendingWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                createDocument(
+                    REQUEST_BACKUP,
+                    "BKE-DNA-working-${System.currentTimeMillis()}.dna-backup.zip",
+                    "application/zip",
+                )
+            })
+            content.addView(actionButton("Import .dna / backup") {
+                startActivityForResult(
+                    Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "*/*"
+                    },
+                    REQUEST_IMPORT,
+                )
+            })
+        } else {
+            content.addView(actionButton("Inspect Latest Working Data") {
+                inspectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                refreshUi()
+            })
+        }
+
+        val totalWorkingBytes = AndroidWorkingStorage.workingBytes(this) + manager.savedWorkingDataBytes()
+        val warning = DnaReconciliationContract.shouldNotifyStorage(totalWorkingBytes)
+        content.addView(TextView(this).apply {
+            text = buildString {
+                append("Total local Working Data: ${formatBytes(totalWorkingBytes)}")
+                append("\nInspected generation SQLite/state: ${formatBytes(inspected.snapshotBytes)}")
+                append("\nWorking Data generations: ${generations.size}")
+                append("\nNotify threshold: 1 GiB — no hard limit; capture continues.")
+                if (warning) append("\n⚠ Consider verified .dna archives and owner-directed cleanup.")
+            }
+            textSize = 14f
+            setPadding(0, 14, 0, 18)
+        })
+
+        content.addView(TextView(this).apply {
+            text = "All Conversations"
+            textSize = 20f
+            setPadding(0, 20, 0, 8)
+        })
+        content.addView(TextView(this).apply {
+            text = "One deduplicated library across Latest + every saved SQLite. Only lightweight summary rows are read here; full conversation data loads after you open/export a conversation."
+            textSize = 13f
+            setPadding(0, 0, 0, 8)
+        })
+
+        val searchInput = EditText(this).apply {
+            hint = "Search conversation titles"
+            setSingleLine(true)
+            setText(searchQuery)
+        }
+        content.addView(searchInput)
+        val searchActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        searchActions.addView(actionButton("SEARCH") {
+            searchQuery = searchInput.text.toString().trim()
+            libraryLimit = AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE
+            refreshUi()
+        })
+        searchActions.addView(actionButton("CLEAR") {
+            searchQuery = ""
+            libraryLimit = AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE
+            refreshUi()
+        })
+        content.addView(searchActions)
+
+        val library = AndroidUnifiedConversationLibrary(this)
+        val conversations = runCatching { library.search(searchQuery, libraryLimit) }
+            .getOrElse {
+                content.addView(TextView(this).apply { text = "Unable to read unified library: ${it.message}" })
+                emptyList()
+            }
+
+        if (conversations.isEmpty()) {
+            content.addView(TextView(this).apply {
+                text = if (searchQuery.isBlank()) {
+                    "No normalized conversations yet."
+                } else {
+                    "No conversations matched ‘$searchQuery’."
+                }
+                setPadding(0, 12, 0, 12)
+            })
+        }
+
+        conversations.forEach { summary ->
+            val panel = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, 16, 0, 24)
+            }
+            panel.addView(TextView(this).apply {
+                text = summary.displayTitle
+                textSize = 18f
+            })
+            panel.addView(TextView(this).apply {
+                text = buildString {
+                    append(summary.stateObservedThrough)
+                    append(" · ${summary.nodeCount} nodes · ${summary.sourceCount} sources")
+                    append(" · ${summary.generationCount} Working Data")
+                    append(" · ${summary.coverageStatus}")
+                    if (summary.dnaArchived) append(" · .dna verified")
+                }
+                textSize = 13f
+            })
+
+            panel.addView(actionButton("Read conversation") {
+                startActivity(
+                    Intent(this, AndroidConversationReaderActivity::class.java)
+                        .putExtra(
+                            AndroidConversationReaderActivity.EXTRA_CONVERSATION_NATIVE_ID,
+                            summary.conversationNativeId,
+                        ),
+                )
+            })
+
+            val cleanAndRaw = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            cleanAndRaw.addView(actionButton("Export CLEAN.md") {
+                prepareHumanExport(summary, clean = true)
+            })
+            cleanAndRaw.addView(actionButton("Export RAW.md") {
+                prepareHumanExport(summary, clean = false)
+            })
+            panel.addView(cleanAndRaw)
+
+            if (summary.hasLatest) {
+                panel.addView(actionButton("Export .dna") {
+                    pendingConversationKey = summary.conversationKey
+                    pendingWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                    createDocument(
+                        REQUEST_EXPORT_DNA,
+                        "${safeFileBase(summary.displayTitle)}.dna",
+                        "application/zip",
+                    )
+                })
+            }
+            content.addView(panel)
+        }
+
+        if (conversations.size >= libraryLimit && libraryLimit < AndroidUnifiedConversationLibrary.MAX_PAGE_SIZE) {
+            content.addView(actionButton("LOAD MORE") {
+                libraryLimit = (libraryLimit + AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE)
+                    .coerceAtMost(AndroidUnifiedConversationLibrary.MAX_PAGE_SIZE)
+                refreshUi()
+            })
+        }
+    }
+
+    private fun prepareHumanExport(summary: AndroidUnifiedConversationSummary, clean: Boolean) {
+        val location = AndroidUnifiedConversationLibrary(this).resolve(summary.conversationNativeId)
+        val verifiedGeneration = AndroidWorkingDataManager(this).generation(location.generation.id)
+        val human = AndroidHumanExportService(this, verifiedGeneration.conversationStateDirectory)
+        val descriptor = human.describe(location.conversationKey)
+        pendingConversationKey = location.conversationKey
+        pendingWorkingDataId = verifiedGeneration.id
+        createDocument(
+            if (clean) REQUEST_EXPORT_CLEAN_MD else REQUEST_EXPORT_RAW_MD,
+            "${descriptor.fileBase} - ${if (clean) "CLEAN" else "RAW"}.md",
+            "text/markdown",
+        )
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+
+        when (requestCode) {
+            REQUEST_EXPORT_DNA -> {
+                val conversationKey = pendingConversationKey ?: return
+                require(pendingWorkingDataId == AndroidWorkingDataManager.LATEST_ID) {
+                    "Historical Working Data cannot mutate Latest .dna durability state"
+                }
+                runWork("Conversation .dna exported and verified") {
+                    AndroidConversationDnaArchiveService(this).use { service ->
+                        service.exportToUri(conversationKey, contentResolver, uri)
+                    }
+                }
+            }
+            REQUEST_EXPORT_CLEAN_MD -> exportHuman(uri, clean = true)
+            REQUEST_EXPORT_RAW_MD -> exportHuman(uri, clean = false)
+            REQUEST_BACKUP -> runWork("Working Data backup exported") {
+                AndroidWorkingBackupService(this).backupToUri(contentResolver, uri)
+            }
+            REQUEST_IMPORT -> runWork("Import reconciled into Latest Working Data") {
+                importSelected(uri)
+            }
+        }
+    }
+
+    private fun exportHuman(uri: Uri, clean: Boolean) {
+        val conversationKey = pendingConversationKey ?: return
+        val generation = AndroidWorkingDataManager(this).generation(pendingWorkingDataId)
+        runWork(if (clean) "CLEAN Markdown exported" else "RAW Markdown exported") {
+            val human = AndroidHumanExportService(this, generation.conversationStateDirectory)
+            if (clean) {
+                human.exportCleanMarkdownToUri(conversationKey, contentResolver, uri)
+            } else {
+                human.exportRawMarkdownToUri(conversationKey, contentResolver, uri)
+            }
+        }
+    }
+
+    private fun importSelected(uri: Uri) {
+        val name = displayName(uri).lowercase(Locale.ROOT)
+        if (name.endsWith(".dna")) {
+            val temp = File(cacheDir, "conversation-import-${UUID.randomUUID()}.dna")
+            try {
+                contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(temp, false).use { output ->
+                        input.copyTo(output, 128 * 1024)
+                        output.flush()
+                        output.fd.sync()
+                    }
+                } ?: error("Unable to open selected conversation .dna")
+                AndroidConversationDnaImportService(this).importVerified(listOf(temp))
+            } finally {
+                temp.delete()
+            }
+        } else {
+            AndroidWorkingBackupService(this).importFromUri(contentResolver, uri)
+        }
+    }
+
+    private fun displayName(uri: Uri): String {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) return cursor.getString(0) ?: ""
+        }
+        return uri.lastPathSegment.orEmpty()
+    }
+
+    private fun createDocument(requestCode: Int, fileName: String, mimeType: String) {
+        startActivityForResult(
+            Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = mimeType
+                putExtra(Intent.EXTRA_TITLE, fileName)
+            },
+            requestCode,
+        )
+    }
+
+    private fun runWork(successMessage: String, work: () -> Unit) {
+        if (operationInProgress) {
+            showOperationInProgress()
+            return
+        }
+        operationInProgress = true
+        Thread {
+            val result = runCatching(work)
+            runOnUiThread {
+                operationInProgress = false
+                Toast.makeText(
+                    this,
+                    result.fold(
+                        onSuccess = { successMessage },
+                        onFailure = { "BKE DNA operation failed: ${it.message}" },
+                    ),
+                    Toast.LENGTH_LONG,
+                ).show()
+                pendingConversationKey = null
+                pendingWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                refreshUi()
+            }
+        }.start()
+    }
+
+    private fun actionButton(label: String, action: () -> Unit): Button =
+        Button(this).apply {
+            text = label
+            setOnClickListener {
+                if (operationInProgress) showOperationInProgress() else action()
+            }
+        }
+
+    private fun showOperationInProgress() {
+        Toast.makeText(this, "Working Data operation in progress", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun safeFileBase(value: String): String = value
+        .replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+        .take(100)
+        .ifBlank { "conversation" }
+
+    private fun formatBytes(bytes: Long): String {
+        if (bytes < 1024L) return "$bytes B"
+        val kib = bytes / 1024.0
+        if (kib < 1024.0) return String.format(Locale.US, "%.1f KiB", kib)
+        val mib = kib / 1024.0
+        if (mib < 1024.0) return String.format(Locale.US, "%.1f MiB", mib)
+        return String.format(Locale.US, "%.2f GiB", mib / 1024.0)
+    }
+
+    companion object {
+        private const val REQUEST_EXPORT_DNA = 1101
+        private const val REQUEST_EXPORT_CLEAN_MD = 1102
+        private const val REQUEST_BACKUP = 1103
+        private const val REQUEST_IMPORT = 1104
+        private const val REQUEST_EXPORT_RAW_MD = 1105
+    }
+}

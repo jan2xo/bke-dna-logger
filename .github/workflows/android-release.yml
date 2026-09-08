@@ -1,0 +1,120 @@
+name: android-release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-owner-preview-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: android-v0.1.0-alpha.1
+      APK_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.1.apk
+      CHECKSUM_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.1.apk.sha256
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 37.1
+        run: sdkmanager "platforms;android-37.1" "build-tools;36.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Build installable Android owner-preview APK
+        run: gradle -p android :app:assembleDebug --stacktrace
+
+      - name: Certify Android contracts
+        run: |
+          python3 tests/cross-device-reconciliation-smoke.py
+          python3 tests/android-dna-reconciliation-import-smoke.py
+          python3 tests/android-conversation-reconciliation-smoke.py
+          python3 tests/android-live-normalization-smoke.py
+          python3 tests/android-exports-backups-smoke.py
+          python3 tests/android-foundation-smoke.py
+          python3 tests/android-geckoview-runtime-smoke.py
+          python3 tests/android-native-ingress-smoke.py
+
+      - name: Stage APK and checksum
+        run: |
+          mkdir -p release
+          cp android/app/build/outputs/apk/debug/app-debug.apk "release/${APK_NAME}"
+          (
+            cd release
+            sha256sum "${APK_NAME}" > "${CHECKSUM_NAME}"
+          )
+
+      - name: Preserve workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bke-dna-logger-android-0.1.0-alpha.1
+          path: |
+            release/${{ env.APK_NAME }}
+            release/${{ env.CHECKSUM_NAME }}
+          if-no-files-found: error
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} already exists; leaving the immutable preview release unchanged."
+            exit 0
+          fi
+
+          cat > release/RELEASE_NOTES.md <<'EOF'
+          # BKE DNA Logger Android 0.1.0-alpha.1
+
+          First owner/internal Android preview of the runtime-proven BKE DNA Logger architecture.
+
+          ## Included
+
+          - Native Kotlin + stable GeckoView ChatGPT host.
+          - Passive ChatGPT network-response capture into immutable app-private evidence.
+          - Modern `messages-array-v0` classification, normalization, and logical reconciliation.
+          - SQLite Working Data generations with one unified deduplicated lazy conversation library.
+          - Conversation title recovery from exact captured ChatGPT title evidence.
+          - Search across Working Data generations.
+          - In-app conversation reader.
+          - `CLEAN.md` export containing JAN / RIGHT-HAND conversation turns only.
+          - `RAW.md` forensic export.
+          - Verified conversation-scoped `.dna` export/import and cross-device reconciliation contracts.
+          - Dark owner UI.
+
+          ## Device target
+
+          - Android API 26+.
+          - arm64-v8a.
+
+          ## Signing status
+
+          This alpha is an owner/internal preview built with Android's debug signing path so it is immediately installable for physical-device certification. It is not the long-term production signing identity. Establish a persistent private release key before public/stable distribution.
+
+          ## Evidence safety
+
+          The logger does not capture Authorization values, cookies, request-header collections, or response-header collections. `.dna` verification remains the durability gate for destructive evidence cleanup.
+          EOF
+
+          gh release create "${RELEASE_TAG}" \
+            "release/${APK_NAME}" \
+            "release/${CHECKSUM_NAME}" \
+            --target "${GITHUB_SHA}" \
+            --title "BKE DNA Logger Android 0.1.0-alpha.1" \
+            --notes-file release/RELEASE_NOTES.md \
+            --prerelease
