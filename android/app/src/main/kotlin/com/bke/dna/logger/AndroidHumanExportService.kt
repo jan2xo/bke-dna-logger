@@ -3,9 +3,7 @@ package com.bke.dna.logger
 import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
-import org.json.JSONArray
 import org.json.JSONObject
-import org.json.JSONTokener
 import java.io.File
 import java.math.BigDecimal
 import java.time.Instant
@@ -13,15 +11,23 @@ import java.time.LocalDate
 import java.time.ZoneOffset
 
 /**
- * Owner-facing human derivatives for one logical conversation.
+ * Human derivatives for one logical conversation.
  *
- * CLEAN.md is intentionally token-efficient for continuation tools such as
- * Codex/Claude. RAW.md preserves every reconciled revision and full readable
- * content exposed by normalization. Neither derivative replaces SQLite or the
- * durable `.dna` archive, which retains the source evidence/provenance.
+ * CLEAN is deliberately strict: only actual user and assistant conversational
+ * text survives, labelled JAN and RIGHT-HAND. Tool calls/results, system or
+ * developer messages, diagnostics and archaeology metadata are excluded.
+ *
+ * RAW is the unfiltered captured conversation source payload stream. SQLite is
+ * the live/recovery projection and `.dna` remains the self-contained durable
+ * evidence archive.
  */
-class AndroidHumanExportService(context: Context) {
-    private val captureRoot = AndroidDnaPaths.capturesRoot(context.applicationContext)
+class AndroidHumanExportService(
+    context: Context,
+    conversationStateDirectory: File? = null,
+) {
+    private val appContext = context.applicationContext
+    private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
+    private val stateDirectory = conversationStateDirectory ?: File(captureRoot, "conversations")
 
     fun describe(conversationKey: String): AndroidConversationExportDescriptor {
         val state = readState(conversationKey)
@@ -62,9 +68,8 @@ class AndroidHumanExportService(context: Context) {
     }
 
     /**
-     * Bytes attributable to this conversation in the working evidence store.
-     * SQLite page allocation is intentionally excluded because SQLite is a shared
-     * rebuildable projection and cannot be honestly assigned per conversation.
+     * Bytes attributable to this conversation in the shared working evidence.
+     * SQLite page allocation is shared and therefore deliberately excluded.
      */
     fun conversationWorkingBytes(conversationKey: String): Long {
         val state = readState(conversationKey)
@@ -96,7 +101,7 @@ class AndroidHumanExportService(context: Context) {
     }
 
     fun renderCleanMarkdown(conversationKey: String): String =
-        renderCleanMarkdown(readState(conversationKey), describe(conversationKey))
+        renderCleanMarkdown(readState(conversationKey))
 
     fun renderRawMarkdown(conversationKey: String): String =
         renderRawMarkdown(readState(conversationKey), describe(conversationKey))
@@ -113,7 +118,7 @@ class AndroidHumanExportService(context: Context) {
         destinationUri: Uri,
     ) = exportMarkdown(destinationUri, resolver, renderRawMarkdown(conversationKey))
 
-    /** Backward-compatible alias: the former single Markdown export is now CLEAN.md. */
+    /** Backward-compatible alias: the former single Markdown export is CLEAN. */
     fun exportMarkdownToUri(
         conversationKey: String,
         resolver: ContentResolver,
@@ -130,11 +135,11 @@ class AndroidHumanExportService(context: Context) {
         } ?: error("Unable to open owner-selected Markdown export destination")
     }
 
-    private fun statePath(conversationKey: String) = File(captureRoot, "conversations/$conversationKey.json")
+    private fun statePath(conversationKey: String) = File(stateDirectory, "$conversationKey.json")
 
     private fun readState(conversationKey: String): JSONObject {
         val path = statePath(conversationKey)
-        require(path.isFile) { "Logical conversation state does not exist" }
+        require(path.isFile) { "Logical conversation state does not exist in selected Working Data" }
         return JSONObject(path.readText())
     }
 
@@ -144,7 +149,7 @@ class AndroidHumanExportService(context: Context) {
 
     private fun deriveTitleFromState(state: JSONObject): String? {
         for (node in orderedNodes(state)) {
-            if (primaryRole(node) != "user") continue
+            if (cleanSpeaker(node) != CLEAN_JAN) continue
             val latest = latestRevision(node) ?: continue
             val text = revisionText(latest).trim()
             if (text.isNotBlank()) return text.take(80)
@@ -152,97 +157,82 @@ class AndroidHumanExportService(context: Context) {
         return null
     }
 
-    private fun renderCleanMarkdown(
-        state: JSONObject,
-        descriptor: AndroidConversationExportDescriptor,
-    ): String = buildString {
-        appendLine("# ${descriptor.title}")
-        appendLine()
-        appendLine("- Conversation ID: `${descriptor.conversationNativeId}`")
-        appendLine("- Historical date: ${descriptor.historicalDate?.toString() ?: "not exposed"}")
-        appendLine("- Coverage: ${state.getString("coverageStatus")} (${state.getString("coverageBasis")})")
-        appendLine("- Working state observed through: ${state.getString("stateObservedThrough")}")
-        appendLine()
-        appendLine("> CLEAN.md — token-efficient continuation derivative. Large structured tool/result payloads are collapsed deterministically. Use RAW.md or `.dna` when exact evidence is required.")
-        appendLine()
-
+    /**
+     * CLEAN contract: exactly JAN / RIGHT-HAND conversational turns.
+     * No title, timestamp, IDs, tool summaries, system/developer content or
+     * forensic metadata are emitted here.
+     */
+    private fun renderCleanMarkdown(state: JSONObject): String = buildString {
+        var wroteTurn = false
         orderedNodes(state).forEach { node ->
+            val speaker = cleanSpeaker(node) ?: return@forEach
             val latest = latestRevision(node) ?: return@forEach
-            val role = primaryRole(node)
-            val timestamp = primaryTimestamp(node)
-            val rawText = revisionText(latest).trim().ifBlank {
-                latest.optNullableString("contentJson").orEmpty().trim()
-            }
-            if (rawText.isBlank()) return@forEach
+            val text = revisionText(latest).trim()
+            if (text.isBlank()) return@forEach
 
-            val cleaned = cleanContent(rawText, role, node.getString("nodeNativeId"))
-            appendLine("## ${role.replaceFirstChar { it.uppercase() }} — $timestamp")
+            if (wroteTurn) appendLine()
+            appendLine(speaker)
             appendLine()
-            appendLine(cleaned)
-            appendLine()
-
-            val revisions = node.optJSONArray("revisions")
-            if ((revisions?.length() ?: 0) > 1) {
-                appendLine("_Observed revisions: ${revisions!!.length()}; CLEAN shows the latest. RAW.md and `.dna` preserve the revision history._")
-                appendLine()
-            }
+            appendLine(text)
+            wroteTurn = true
         }
-    }
+    }.trimEnd() + "\n"
 
+    /**
+     * RAW contract: preserve every unfiltered raw conversation payload source
+     * represented by this logical conversation, plus its exact capture
+     * observation envelopes. No tool/system/content filtering is performed.
+     */
     private fun renderRawMarkdown(
         state: JSONObject,
         descriptor: AndroidConversationExportDescriptor,
     ): String = buildString {
         appendLine("# ${descriptor.title} — RAW")
         appendLine()
-        appendLine("- Conversation ID: `${descriptor.conversationNativeId}`")
-        appendLine("- Historical date: ${descriptor.historicalDate?.toString() ?: "not exposed"}")
-        appendLine("- Coverage: ${state.getString("coverageStatus")} (${state.getString("coverageBasis")})")
-        appendLine("- Working state observed through: ${state.getString("stateObservedThrough")}")
-        appendLine()
-        appendLine("> RAW.md — human-readable reconciled chronology with all observed revisions. Network bodies and full provenance remain canonical in `.dna` / working evidence.")
+        appendLine("Unfiltered captured conversation payloads. Nothing below is CLEAN-filtered.")
         appendLine()
 
-        orderedNodes(state).forEach { node ->
-            val role = primaryRole(node)
-            val timestamp = primaryTimestamp(node)
-            val nodeId = node.getString("nodeNativeId")
-            val revisions = node.optJSONArray("revisions") ?: return@forEach
-            if (revisions.length() == 0) return@forEach
-            val revisionList = (0 until revisions.length())
-                .map { revisions.getJSONObject(it) }
-                .sortedWith(compareBy<JSONObject> { it.optString("firstObservedAt") }.thenBy { it.optString("revisionSha256") })
+        val sources = state.getJSONArray("sources").let { array ->
+            (0 until array.length()).map { array.getJSONObject(it) }
+        }.sortedWith(
+            compareBy<JSONObject> { it.optString("observedAt") }
+                .thenBy { it.getString("sourceSha256") },
+        )
 
-            appendLine("## ${role.replaceFirstChar { it.uppercase() }} — $timestamp")
+        sources.forEachIndexed { index, source ->
+            val sha = source.getString("sourceSha256")
+            appendLine("## SOURCE ${index + 1} — $sha")
             appendLine()
-            appendLine("Node: `$nodeId`")
+            appendLine("Observed at: ${source.optString("observedAt", "not exposed")}")
             appendLine()
 
-            revisionList.forEachIndexed { index, revision ->
-                if (revisionList.size > 1) {
-                    appendLine("### Revision ${index + 1}/${revisionList.size}")
-                    appendLine()
-                    appendLine("- First observed: ${revision.optString("firstObservedAt", "not exposed")}")
-                    appendLine("- Last observed: ${revision.optString("lastObservedAt", "not exposed")}")
-                    appendLine("- Revision SHA-256: `${revision.optString("revisionSha256", "not exposed")}`")
-                    appendLine()
-                }
-
-                val text = revisionText(revision).trim()
-                val contentJson = revision.optNullableString("contentJson").orEmpty().trim()
-                when {
-                    text.isNotBlank() -> appendLine(text)
-                    contentJson.isNotBlank() -> appendLine(contentJson)
-                    else -> appendLine("_[No readable content exposed by this normalized revision.]_")
-                }
+            observationsForSource(sha).forEach { observation ->
+                appendLine("### CAPTURE OBSERVATION — ${observation.name}")
+                appendLine()
+                appendLine(observation.readText(Charsets.UTF_8))
                 appendLine()
             }
 
-            if ((node.optJSONArray("childNativeIds")?.length() ?: 0) > 1) {
-                appendLine("_Branch point: `$nodeId`._")
-                appendLine()
-            }
+            val body = File(captureRoot, "bodies/$sha.body")
+            require(body.isFile) { "RAW source body '$sha' is missing" }
+            appendLine("### RAW BODY")
+            appendLine()
+            append(body.readText(Charsets.UTF_8))
+            if (!endsWith("\n")) appendLine()
+            appendLine()
         }
+    }
+
+    private fun observationsForSource(sourceSha256: String): List<File> {
+        val directory = File(captureRoot, "observations")
+        if (!directory.isDirectory) return emptyList()
+        return directory.listFiles().orEmpty()
+            .filter { it.isFile && it.extension == "json" }
+            .filter { file ->
+                runCatching { JSONObject(file.readText()).optString("sha256") == sourceSha256 }
+                    .getOrDefault(false)
+            }
+            .sortedBy { it.name }
     }
 
     private fun orderedNodes(state: JSONObject): List<JSONObject> = state.getJSONArray("nodes").let { array ->
@@ -267,60 +257,15 @@ class AndroidHumanExportService(context: Context) {
         return (0 until parts.length()).joinToString("\n\n") { parts.optString(it) }
     }
 
-    private fun primaryRole(node: JSONObject): String {
-        val roles = node.optJSONArray("roles")
-        return if (roles != null && roles.length() > 0) roles.optString(0, "unknown") else "unknown"
-    }
-
-    private fun primaryTimestamp(node: JSONObject): String {
-        val created = node.optJSONArray("createdAtValues")
-        return if (created != null && created.length() > 0) created.optString(0) else "not exposed"
-    }
-
-    private fun cleanContent(text: String, role: String, nodeId: String): String {
-        val limit = if (role == "tool") CLEAN_TOOL_TEXT_LIMIT else CLEAN_MESSAGE_TEXT_LIMIT
-        if (text.length <= limit) return text
-
-        summarizeStructuredPayload(text, nodeId)?.let { return it }
-        val retained = text.take(limit)
-        return buildString {
-            append(retained)
-            appendLine()
-            appendLine()
-            append("_[CLEAN truncated ${text.length - retained.length} characters; full content: RAW.md / `.dna`; node `$nodeId`.]_")
-        }
-    }
-
-    private fun summarizeStructuredPayload(text: String, nodeId: String): String? {
-        val value = runCatching {
-            val tokener = JSONTokener(text)
-            val parsed = tokener.nextValue()
-            if (tokener.nextClean() != '\u0000') null else parsed
-        }.getOrNull() ?: return null
-
-        return when (value) {
-            is JSONObject -> {
-                val keys = value.keys().asSequence().toList().sorted()
-                val scalars = IMPORTANT_TOOL_SCALARS.mapNotNull { key ->
-                    if (!value.has(key) || value.isNull(key)) return@mapNotNull null
-                    val raw = value.opt(key)
-                    if (raw is JSONObject || raw is JSONArray) return@mapNotNull null
-                    "$key=${raw.toString().take(CLEAN_SCALAR_LIMIT)}"
-                }
-                buildString {
-                    append("[Structured tool/result payload collapsed for CLEAN")
-                    append(" · ${text.length} chars")
-                    if (keys.isNotEmpty()) append(" · keys: ${keys.take(CLEAN_KEY_LIMIT).joinToString(", ")}")
-                    appendLine("]")
-                    if (scalars.isNotEmpty()) appendLine(scalars.joinToString(" · "))
-                    append("Raw evidence: RAW.md / `.dna` · node `$nodeId`")
-                }
-            }
-            is JSONArray -> buildString {
-                append("[Structured tool/result array collapsed for CLEAN · ${text.length} chars · ${value.length()} items]")
-                appendLine()
-                append("Raw evidence: RAW.md / `.dna` · node `$nodeId`")
-            }
+    private fun cleanSpeaker(node: JSONObject): String? {
+        val roles = node.optJSONArray("roles") ?: return null
+        val normalized = (0 until roles.length())
+            .map { roles.optString(it).lowercase() }
+            .filter { it.isNotBlank() }
+            .toSet()
+        return when (normalized) {
+            setOf("user") -> CLEAN_JAN
+            setOf("assistant") -> CLEAN_RIGHT_HAND
             else -> null
         }
     }
@@ -347,27 +292,10 @@ class AndroidHumanExportService(context: Context) {
         .take(100)
 
     companion object {
-        private const val CLEAN_TOOL_TEXT_LIMIT = 1_200
-        private const val CLEAN_MESSAGE_TEXT_LIMIT = 8_000
-        private const val CLEAN_SCALAR_LIMIT = 240
-        private const val CLEAN_KEY_LIMIT = 16
+        const val CLEAN_JAN = "JAN"
+        const val CLEAN_RIGHT_HAND = "RIGHT-HAND"
         private const val MAX_REFERENCE_SCAN_BYTES = 2L * 1024 * 1024
         private val SOURCE_REFERENCING_DIRECTORIES = listOf("observations", "witnesses", "reconciliations")
-        private val IMPORTANT_TOOL_SCALARS = listOf(
-            "title",
-            "name",
-            "status",
-            "conclusion",
-            "state",
-            "number",
-            "sha",
-            "head_sha",
-            "message",
-            "merged",
-            "mergeable",
-            "url",
-            "html_url",
-        )
     }
 }
 
@@ -378,6 +306,3 @@ data class AndroidConversationExportDescriptor(
     val historicalDate: LocalDate?,
     val fileBase: String,
 )
-
-private fun JSONObject.optNullableString(key: String): String? =
-    if (has(key) && !isNull(key)) optString(key, null) else null
