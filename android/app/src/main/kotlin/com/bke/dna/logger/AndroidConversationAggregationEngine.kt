@@ -27,27 +27,33 @@ class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
     }
     private val index = AndroidCaptureIndex(context.applicationContext)
 
-    fun aggregateAll(): List<AndroidLogicalConversation> {
-        if (!normalizedDirectory.isDirectory) return emptyList()
+    fun aggregateAll(): List<AndroidLogicalConversation> = readSnapshots()
+        .groupBy { it.conversationNativeId }
+        .toSortedMap()
+        .mapNotNull { (conversationNativeId, group) ->
+            if (group.isEmpty()) null else aggregateConversationState(conversationNativeId, group)
+        }
 
+    /** Rebuild only the logical conversation touched by a live normalized capture. */
+    fun aggregateConversation(conversationNativeId: String): AndroidLogicalConversation? {
+        require(conversationNativeId.isNotBlank())
+        val snapshots = readSnapshots().filter { it.conversationNativeId == conversationNativeId }
+        return if (snapshots.isEmpty()) null else aggregateConversationState(conversationNativeId, snapshots)
+    }
+
+    override fun close() = index.close()
+
+    private fun readSnapshots(): List<Snapshot> {
+        if (!normalizedDirectory.isDirectory) return emptyList()
         val observedAtBySource = readObservationTimes()
-        val snapshots = normalizedDirectory.listFiles()
+        return normalizedDirectory.listFiles()
             .orEmpty()
             .filter { it.isFile && it.extension == "json" }
             .sortedBy { it.name }
             .mapNotNull { path ->
                 runCatching { readSnapshot(path, observedAtBySource) }.getOrNull()
             }
-
-        return snapshots
-            .groupBy { it.conversationNativeId }
-            .toSortedMap()
-            .mapNotNull { (conversationNativeId, group) ->
-                if (group.isEmpty()) null else aggregateConversation(conversationNativeId, group)
-            }
     }
-
-    override fun close() = index.close()
 
     private fun readObservationTimes(): Map<String, String> {
         if (!observationsDirectory.isDirectory) return emptyMap()
@@ -110,7 +116,7 @@ class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
         )
     }
 
-    private fun aggregateConversation(
+    private fun aggregateConversationState(
         conversationNativeId: String,
         inputSnapshots: List<Snapshot>,
     ): AndroidLogicalConversation {
@@ -199,10 +205,11 @@ class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
             .distinct()
             .sorted()
         val rootFound = nodes.any { it.parentNativeIds.isEmpty() }
-        val currentFound = currentNodeNativeId != null && currentNodeNativeId in byId
-        val currentLeaf = currentFound && byId.getValue(currentNodeNativeId!!).childNativeIds.isEmpty()
+        val currentNode = currentNodeNativeId
+        val currentFound = currentNode != null && currentNode in byId
+        val currentLeaf = currentNode != null && currentFound && byId.getValue(currentNode).childNativeIds.isEmpty()
         val cycleDetected = hasCycle(nodes, byId)
-        val parentChainComplete = currentFound && canReachRoot(currentNodeNativeId!!, byId, linkedSetOf())
+        val parentChainComplete = currentNode != null && currentFound && canReachRoot(currentNode, byId, linkedSetOf())
 
         val status = when {
             unresolvedParents.isNotEmpty() ||

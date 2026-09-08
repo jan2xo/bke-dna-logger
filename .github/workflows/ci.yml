@@ -41,6 +41,8 @@ jobs:
         run: python3 tests/android-dna-reconciliation-import-smoke.py
       - name: Android logical conversation reconciliation smoke
         run: python3 tests/android-conversation-reconciliation-smoke.py
+      - name: Android live classification and normalization smoke
+        run: python3 tests/android-live-normalization-smoke.py
       - name: Android manual exports and backups smoke
         run: python3 tests/android-exports-backups-smoke.py
       - name: Android Kotlin contract smoke
@@ -72,6 +74,8 @@ jobs:
         run: python3 tests/android-dna-reconciliation-import-smoke.py
       - name: Android logical conversation reconciliation smoke
         run: python3 tests/android-conversation-reconciliation-smoke.py
+      - name: Android live classification and normalization smoke
+        run: python3 tests/android-live-normalization-smoke.py
       - name: Android manual exports and backups smoke
         run: python3 tests/android-exports-backups-smoke.py
       - name: Android Kotlin contract smoke

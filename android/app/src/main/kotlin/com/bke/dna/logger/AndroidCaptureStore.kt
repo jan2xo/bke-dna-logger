@@ -12,7 +12,8 @@ import java.util.UUID
 /**
  * Android counterpart of the desktop CaptureStore.
  * Streams into app-private partial files, hashes raw bytes, deduplicates bodies,
- * persists immutable observations, then projects the observation into SQLite.
+ * persists immutable observations, projects the observation into SQLite, then
+ * runs classification/normalization as a best-effort derivative pipeline.
  */
 class AndroidCaptureStore(context: Context) : AutoCloseable {
     private val root = AndroidDnaPaths.capturesRoot(context)
@@ -21,6 +22,7 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
     private val partial = File(root, "partial").also { it.mkdirs() }
     private val sessions = mutableMapOf<String, Session>()
     private val index = AndroidCaptureIndex(context.applicationContext)
+    private val derivation = AndroidLiveDerivationPipeline(context.applicationContext)
 
     fun accept(json: JSONObject): String {
         return when (json.getString("type")) {
@@ -104,6 +106,13 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
                 fidelity = session.start.optNullableString("fidelity"),
                 storedAt = storedAt,
             ),
+        )
+
+        derivation.processCompletedCapture(
+            bodyFile = body,
+            sourceSha256 = result.sha256,
+            byteLength = result.byteLength,
+            contentType = session.start.optNullableString("contentType"),
         )
         return "capture_end"
     }
