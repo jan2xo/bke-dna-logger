@@ -1,6 +1,7 @@
 package com.bke.dna.logger
 
 import android.content.Context
+import android.util.Log
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -28,14 +29,28 @@ class AndroidLiveDerivationPipeline(context: Context) {
         contentType: String?,
     ) {
         try {
+            Log.d(TAG, "BKE DNA derivation: started")
             ensureClassification(bodyFile, sourceSha256, byteLength, contentType)
-            val normalized = normalizer.normalizeCandidate(sourceSha256) ?: return
+            when (readClassificationKind(sourceSha256)) {
+                CANDIDATE_KIND -> Log.d(TAG, "BKE DNA derivation: classification_candidate")
+                else -> Log.d(TAG, "BKE DNA derivation: classification_other")
+            }
+
+            val normalized = normalizer.normalizeCandidate(sourceSha256)
+            if (normalized == null) {
+                Log.d(TAG, "BKE DNA derivation: normalization_skipped")
+                return
+            }
+            Log.d(TAG, "BKE DNA derivation: normalization_complete")
+
             AndroidConversationAggregationEngine(appContext).use { engine ->
                 engine.aggregateConversation(normalized.conversationNativeId)
             }
+            Log.d(TAG, "BKE DNA derivation: reconciliation_complete")
         } catch (_: Exception) {
             // Classification, normalization, and aggregation are derivatives.
             // Raw evidence and its immutable observation are already durable.
+            Log.d(TAG, "BKE DNA derivation: derivative_failed")
         }
     }
 
@@ -70,6 +85,13 @@ class AndroidLiveDerivationPipeline(context: Context) {
         writeDerivativeAtomically(target, envelope.toString(2))
     }
 
+    private fun readClassificationKind(sourceSha256: String): String {
+        val target = File(classificationsDirectory, "$sourceSha256.json")
+        return JSONObject(target.readText())
+            .getJSONObject("classification")
+            .getString("kind")
+    }
+
     private fun writeDerivativeAtomically(target: File, text: String) {
         val temp = File(target.parentFile, ".${target.name}.${System.nanoTime()}.tmp")
         try {
@@ -94,6 +116,8 @@ class AndroidLiveDerivationPipeline(context: Context) {
     }
 
     companion object {
+        private const val TAG = "BkeDnaDerivation"
+        private const val CANDIDATE_KIND = "conversation_payload_candidate"
         private const val MAX_CLASSIFICATION_BYTES = 16L * 1024 * 1024
     }
 }
