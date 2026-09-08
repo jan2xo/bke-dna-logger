@@ -39,7 +39,7 @@ internal sealed class CaptureStore : IDisposable
     {
         ValidateCaptureId(message.CaptureId);
 
-        if (message.ByteLength < 0)
+        if (message.ByteLength is < 0)
         {
             throw new InvalidDataException("Capture byte length cannot be negative.");
         }
@@ -81,10 +81,16 @@ internal sealed class CaptureStore : IDisposable
         _sessions.Remove(message.CaptureId);
 
         var result = session.FinalizeCapture();
-        if (result.ByteLength != session.Start.ByteLength)
+        var expectedLength = message.ByteLength ?? session.Start.ByteLength;
+        if (expectedLength is null)
         {
             throw new InvalidDataException(
-                $"Capture '{message.CaptureId}' declared {session.Start.ByteLength} bytes but received {result.ByteLength}.");
+                $"Capture '{message.CaptureId}' did not declare a final byte length.");
+        }
+        if (expectedLength < 0 || result.ByteLength != expectedLength.Value)
+        {
+            throw new InvalidDataException(
+                $"Capture '{message.CaptureId}' declared {expectedLength} bytes but received {result.ByteLength}.");
         }
 
         var bodyFileName = $"{result.Sha256}.body";
