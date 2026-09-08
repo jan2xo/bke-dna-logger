@@ -10,8 +10,7 @@ assets = app / "src" / "main" / "assets" / "dna-extension"
 host = repo / "src" / "BKE.Dna.Logger.Host"
 core = repo / "src" / "BKE.Dna.Logger.Core"
 
-# Android is Kotlin-native. The retired .NET Android and GeckoView binding
-# projects must not creep back into the active tree.
+# Android is Kotlin-native. Retired managed Android/binding projects stay out.
 for retired in (
     repo / "src" / "BKE.Dna.Logger.Platform.Android" / "BKE.Dna.Logger.Platform.Android.csproj",
     repo / "src" / "BKE.Dna.Logger.GeckoView.Bindings" / "BKE.Dna.Logger.GeckoView.Bindings.csproj",
@@ -27,26 +26,15 @@ if 'id("com.android.application") version "9.3.2"' not in root_build:
     raise SystemExit("Android Gradle Plugin 9.3.2 pin is missing")
 if 'classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.10")' not in root_build:
     raise SystemExit("built-in Kotlin compiler override KGP 2.4.10 is missing")
-
-# AGP 9+ provides built-in Kotlin support. Applying the standalone Kotlin
-# Android plugin is an error. KGP is upgraded only through the top-level
-# buildscript classpath so the built-in compiler matches GeckoView's stdlib.
-for build_name, build_text in {
-    "root build": root_build,
-    "app build": app_build,
-}.items():
+for build_name, build_text in {"root build": root_build, "app build": app_build}.items():
     if "org.jetbrains.kotlin.android" in build_text:
         raise SystemExit(f"{build_name} reintroduces retired standalone Kotlin Android plugin")
 
 for token in (
     'maven("https://maven.mozilla.org/maven2/")',
     'org.mozilla.geckoview:geckoview-arm64-v8a:154.0.20260824154132',
-    'version = release(37)',
-    'minorApiLevel = 1',
-    'minSdk = 26',
-    'targetSdk = 36',
-    'abiFilters += "arm64-v8a"',
-    '../extension/main-interceptor.js',
+    'version = release(37)', 'minorApiLevel = 1', 'minSdk = 26', 'targetSdk = 36',
+    'abiFilters += "arm64-v8a"', '../extension/main-interceptor.js',
 ):
     source = settings if token.startswith('maven(') else app_build
     if token not in source:
@@ -55,52 +43,45 @@ for token in (
 manifest_path = assets / "manifest.json"
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 if manifest.get("manifest_version") != 2:
-    raise SystemExit("Android GeckoView extension must use the certified MV2 built-in extension contract")
-
+    raise SystemExit("Android GeckoView extension must use certified MV2 built-in extension contract")
 gecko_id = manifest.get("browser_specific_settings", {}).get("gecko", {}).get("id")
 if gecko_id != "bke-dna-logger@jl-bke.com":
     raise SystemExit(f"unexpected GeckoView extension id: {gecko_id}")
-
 permissions = set(manifest.get("permissions", []))
 required_permissions = {"nativeMessaging", "nativeMessagingFromContent", "geckoViewAddons"}
 if not required_permissions.issubset(permissions):
     raise SystemExit(f"Android extension missing permissions: {sorted(required_permissions - permissions)}")
-
-scripts = manifest.get("content_scripts", [])
-matched_hosts = {match for script in scripts for match in script.get("matches", [])}
+matched_hosts = {match for script in manifest.get("content_scripts", []) for match in script.get("matches", [])}
 for required_host in ("https://chatgpt.com/*", "https://chat.openai.com/*"):
     if required_host not in matched_hosts:
         raise SystemExit(f"Android extension missing ChatGPT host match {required_host}")
-
 if "main-interceptor.js" not in set(manifest.get("web_accessible_resources", [])):
-    raise SystemExit("shared MAIN-world interceptor is not web-accessible to the Android bridge")
+    raise SystemExit("shared MAIN-world interceptor is not web-accessible to Android bridge")
 
 bridge = (assets / "bridge.js").read_text(encoding="utf-8")
 dom_witness = (assets / "dom-witness.js").read_text(encoding="utf-8")
 main_interceptor = (repo / "extension" / "main-interceptor.js").read_text(encoding="utf-8")
-
 for token in (
-    'sendNativeMessage(NATIVE_APP',
-    'type: "capture_start"',
-    'type: "capture_chunk"',
-    'type: "capture_end"',
-    '192 * 1024',
-    'browser.runtime.getURL("main-interceptor.js")',
+    'sendNativeMessage(NATIVE_APP', 'type: "capture_start"', 'type: "capture_chunk"',
+    'type: "capture_end"', '192 * 1024', 'browser.runtime.getURL("main-interceptor.js")',
+    'kind: "capture_ack"', 'forwardStreamChunk',
 ):
     if token not in bridge:
         raise SystemExit(f"Android bridge contract missing {token!r}")
-
 for token in ('type: "dom_witness"', 'sendNativeMessage(NATIVE_APP'):
     if token not in dom_witness:
         raise SystemExit(f"Android DOM witness bridge missing {token!r}")
 
+# Response-fidelity is preserved while the cloned body is now streamed rather
+# than materialized as one ArrayBuffer.
 for token in (
-    "response.clone()",
-    "clone.arrayBuffer()",
-    'fidelity: "browser-application-response-body"',
+    "response.clone()", "clone.body?.getReader()", "await reader.read()",
+    'fidelity: "browser-application-response-body"', 'STREAM_CHUNK_BYTES = 128 * 1024',
 ):
     if token not in main_interceptor:
-        raise SystemExit(f"shared interceptor lost response-fidelity marker {token!r}")
+        raise SystemExit(f"shared interceptor lost streamed response-fidelity marker {token!r}")
+if "clone.arrayBuffer()" in main_interceptor:
+    raise SystemExit("shared interceptor regressed to whole-response arrayBuffer capture")
 
 for name, content in {
     "android bridge": bridge,
@@ -132,10 +113,7 @@ if "../BKE.Dna.Logger.Core/BKE.Dna.Logger.Core.csproj" not in host_xml:
 
 android_manifest = ET.parse(app / "src" / "main" / "AndroidManifest.xml").getroot()
 android_ns = "{http://schemas.android.com/apk/res/android}"
-manifest_permissions = {
-    node.attrib.get(android_ns + "name")
-    for node in android_manifest.findall("uses-permission")
-}
+manifest_permissions = {node.attrib.get(android_ns + "name") for node in android_manifest.findall("uses-permission")}
 if "android.permission.INTERNET" not in manifest_permissions:
     raise SystemExit("Android app lacks INTERNET permission required for ordinary ChatGPT browsing")
 
@@ -145,10 +123,9 @@ for forbidden in ("dotnet workload install android", "BKE.Dna.Logger.GeckoView.B
         raise SystemExit(f"CI still contains retired managed Android path {forbidden!r}")
 for required in (
     'sdkmanager "platforms;android-37.1" "build-tools;36.0.0"',
-    "gradle-version: '9.5.0'",
-    "gradle -p android :app:assembleDebug",
+    "gradle-version: '9.5.0'", "gradle -p android :app:assembleDebug",
 ):
     if required not in ci:
         raise SystemExit(f"CI is missing Kotlin Android build gate {required!r}")
 
-print("android Kotlin foundation smoke PASS")
+print("android Kotlin streamed-capture foundation smoke PASS")
