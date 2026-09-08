@@ -7,6 +7,7 @@ base = root / "android" / "app" / "src" / "main" / "kotlin" / "com" / "bke" / "d
 archive = (base / "AndroidConversationDnaArchiveService.kt").read_text()
 index = (base / "AndroidCaptureIndex.kt").read_text()
 ui = (base / "AndroidExportsBackupsActivity.kt").read_text()
+reader = (base / "AndroidConversationReaderActivity.kt").read_text()
 main = (base / "MainActivity.kt").read_text()
 human = (base / "AndroidHumanExportService.kt").read_text()
 backup = (base / "AndroidWorkingBackupService.kt").read_text()
@@ -52,31 +53,70 @@ for token in [
 
 ui_tokens = [
     'Exports & Backups',
+    'Read conversation',
     'Export .dna',
-    'Export .md',
+    'Export CLEAN.md',
+    'Export RAW.md',
+    'evidence',
     'Backup working store',
     'Import .dna / backup',
     'Notify threshold: 1 GiB — no hard limit; capture continues.',
     'ACTION_CREATE_DOCUMENT',
     'ACTION_OPEN_DOCUMENT',
+    'AndroidConversationReaderActivity::class.java',
     'AndroidConversationDnaArchiveService',
+    'exportCleanMarkdownToUri',
+    'exportRawMarkdownToUri',
     'AndroidWorkingBackupService',
 ]
 for token in ui_tokens:
     assert token in ui, token
 
+reader_tokens = [
+    'CLEAN · token-efficient continuation view',
+    'RAW · all reconciled revisions / readable content',
+    'Attributed evidence storage:',
+    'SQLite shared projection excluded',
+    'renderCleanMarkdown',
+    'renderRawMarkdown',
+    'setTextIsSelectable(true)',
+    'EXTRA_CONVERSATION_KEY',
+]
+for token in reader_tokens:
+    assert token in reader, token
+
 assert 'Exports & Backups' in main
 assert 'AndroidExportsBackupsActivity::class.java' in main
 assert 'AndroidExportsBackupsActivity' in manifest
+assert 'AndroidConversationReaderActivity' in manifest
 
-for token in [
+human_tokens = [
     'Historical date',
     'createdAtValues',
     'title',
-    'Human-readable derivative',
+    'CLEAN.md',
+    'RAW.md',
+    'token-efficient continuation derivative',
+    'all observed revisions',
+    'Structured tool/result payload collapsed for CLEAN',
+    'conversationWorkingBytes',
+    'SQLite page allocation is intentionally excluded',
+    'exportCleanMarkdownToUri',
+    'exportRawMarkdownToUri',
+    'CLEAN_TOOL_TEXT_LIMIT = 1_200',
+    'CLEAN_MESSAGE_TEXT_LIMIT = 8_000',
     'AUTOMATIC_MARKDOWN_EXPORT',
-]:
+]
+for token in human_tokens:
     assert token in human, token
+
+# CLEAN is an aggressively smaller derivative only; RAW must not call its
+# truncation/collapse path, and neither Markdown derivative can mark .dna durability.
+raw_start = human.index('private fun renderRawMarkdown')
+raw_end = human.index('private fun orderedNodes', raw_start)
+assert 'cleanContent(' not in human[raw_start:raw_end]
+assert 'recordVerifiedConversationArchive' not in human
+assert 'AndroidConversationDnaArchiveService' not in human
 
 backup_tokens = [
     'bke-dna-working-backup',
