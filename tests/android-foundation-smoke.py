@@ -141,7 +141,7 @@ for forbidden in ("dotnet workload install android", "BKE.Dna.Logger.GeckoView.B
     if forbidden in ci:
         raise SystemExit(f"CI still contains retired managed Android path {forbidden!r}")
 for required in (
-    'sdkmanager "platforms;android-37" "build-tools;36.0.0"',
+    'sdkmanager "platforms;android-37.0" "build-tools;36.0.0"',
     "gradle-version: '9.4.1'",
     "gradle -p android :app:assembleDebug",
 ):
