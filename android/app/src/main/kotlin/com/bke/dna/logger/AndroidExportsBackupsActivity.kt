@@ -6,9 +6,12 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.ViewGroup
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import java.io.File
@@ -16,8 +19,10 @@ import java.io.FileOutputStream
 import java.util.Locale
 import java.util.UUID
 
-/** Owner-facing manual archive/export/backup surface. */
+/** Owner-facing Working Data, recovery, archive and export surface. */
 class AndroidExportsBackupsActivity : Activity() {
+    private var selectedWorkingDataId: String = AndroidWorkingDataManager.LATEST_ID
+    private var pendingWorkingDataId: String = AndroidWorkingDataManager.LATEST_ID
     private var pendingConversationKey: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -26,6 +31,13 @@ class AndroidExportsBackupsActivity : Activity() {
     }
 
     private fun refreshUi() {
+        val manager = AndroidWorkingDataManager(this)
+        val generations = manager.listWorkingData()
+        if (generations.none { it.id == selectedWorkingDataId }) {
+            selectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+        }
+        val selected = generations.first { it.id == selectedWorkingDataId }
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 32, 32, 48)
@@ -45,45 +57,117 @@ class AndroidExportsBackupsActivity : Activity() {
         setContentView(root)
 
         content.addView(TextView(this).apply {
-            text = "Exports & Backups"
+            text = "Working Data & Exports"
             textSize = 24f
         })
         content.addView(actionButton("Back to ChatGPT") { finish() })
 
-        val workingBytes = AndroidWorkingStorage.workingBytes(this)
-        val warning = DnaReconciliationContract.shouldNotifyStorage(workingBytes)
         content.addView(TextView(this).apply {
-            text = buildString {
-                append("Working storage: ${formatBytes(workingBytes)}")
-                append("\nNotify threshold: 1 GiB — no hard limit; capture continues.")
-                if (warning) {
-                    append("\n⚠ Working storage reached 1 GiB. Consider manual .dna exports or a backup.")
+            text = "Working Data"
+            textSize = 20f
+            setPadding(0, 24, 0, 8)
+        })
+
+        val spinner = Spinner(this)
+        spinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            generations.map { it.label },
+        )
+        spinner.setSelection(generations.indexOfFirst { it.id == selectedWorkingDataId }, false)
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                val chosen = generations[position].id
+                if (chosen != selectedWorkingDataId) {
+                    selectedWorkingDataId = chosen
+                    refreshUi()
                 }
             }
-            textSize = 16f
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        content.addView(spinner)
+
+        content.addView(TextView(this).apply {
+            text = if (selected.isLatest) {
+                "LATEST — ACTIVE / WRITABLE\nAll live ChatGPT capture writes only to this SQLite generation."
+            } else {
+                "READ-ONLY RECOVERY\n${selected.label}\nHistorical Working Data can be read and exported as CLEAN/RAW, but is never made writable by selecting it."
+            }
+            textSize = 15f
+            setPadding(0, 10, 0, 12)
+        })
+
+        if (selected.isLatest) {
+            content.addView(actionButton("Save & Start New Working Data") {
+                runWork("Working Data saved; fresh Latest is now active") {
+                    AndroidWorkingDataManager(this).rotateLatest()
+                    selectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                }
+            })
+            content.addView(TextView(this).apply {
+                text = "Use this when the live SQLite becomes heavy or laggy. The current generation is timestamped and verified, then a fresh Latest SQLite is created. Raw evidence is not duplicated."
+                textSize = 13f
+                setPadding(0, 4, 0, 12)
+            })
+
+            content.addView(actionButton("Backup Working Data") {
+                pendingConversationKey = null
+                pendingWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                createDocument(
+                    REQUEST_BACKUP,
+                    "BKE-DNA-working-${System.currentTimeMillis()}.dna-backup.zip",
+                    "application/zip",
+                )
+            })
+            content.addView(TextView(this).apply {
+                text = "External Working Data backup keeps rebuildable shared evidence and still forbids cross-device SQLite merging. Timestamped SQLite generations remain app-private recovery data."
+                textSize = 13f
+                setPadding(0, 4, 0, 10)
+            })
+
+            content.addView(actionButton("Import .dna / backup") {
+                startActivityForResult(
+                    Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "*/*"
+                    },
+                    REQUEST_IMPORT,
+                )
+            })
+        } else {
+            content.addView(actionButton("Back to Latest Working Data") {
+                selectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                refreshUi()
+            })
+            content.addView(TextView(this).apply {
+                text = "Historical `.dna` export is intentionally not allowed to mutate or impersonate Latest. A future explicit restore-as-new operation can promote historical recovery into a new writable generation without changing this snapshot."
+                textSize = 13f
+                setPadding(0, 6, 0, 12)
+            })
+        }
+
+        val totalWorkingBytes = AndroidWorkingStorage.workingBytes(this) + manager.savedWorkingDataBytes()
+        val warning = DnaReconciliationContract.shouldNotifyStorage(totalWorkingBytes)
+        content.addView(TextView(this).apply {
+            text = buildString {
+                append("Total local working data: ${formatBytes(totalWorkingBytes)}")
+                append("\nSelected generation SQLite/state: ${formatBytes(selected.snapshotBytes)}")
+                append("\nNotify threshold: 1 GiB — no hard limit; capture continues.")
+                if (warning) {
+                    append("\n⚠ Local Working Data reached 1 GiB. Consider verified .dna archives and owner-directed cleanup.")
+                }
+            }
+            textSize = 15f
             setPadding(0, 16, 0, 16)
         })
         if (warning) {
             Toast.makeText(
                 this,
-                "BKE DNA working storage reached 1 GiB. Capture continues.",
+                "BKE DNA Working Data reached 1 GiB. Capture continues.",
                 Toast.LENGTH_LONG,
             ).show()
         }
-
-        content.addView(actionButton("Backup working store") {
-            pendingConversationKey = null
-            createDocument(REQUEST_BACKUP, "BKE-DNA-working-${System.currentTimeMillis()}.dna-backup.zip", "application/zip")
-        })
-        content.addView(actionButton("Import .dna / backup") {
-            startActivityForResult(
-                Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "*/*"
-                },
-                REQUEST_IMPORT,
-            )
-        })
 
         content.addView(TextView(this).apply {
             text = "Conversations"
@@ -91,17 +175,16 @@ class AndroidExportsBackupsActivity : Activity() {
             setPadding(0, 28, 0, 12)
         })
 
-        val index = AndroidCaptureIndex(this)
-        val conversations = try {
-            index.listLogicalConversations()
-        } finally {
-            index.close()
-        }
-        val human = AndroidHumanExportService(this)
+        val conversations = runCatching { manager.listConversations(selected) }.getOrDefault(emptyList())
+        val human = AndroidHumanExportService(this, selected.conversationStateDirectory)
 
         if (conversations.isEmpty()) {
             content.addView(TextView(this).apply {
-                text = "No normalized logical conversations yet. Capture remains active in ChatGPT."
+                text = if (selected.isLatest) {
+                    "No normalized logical conversations in Latest yet. Capture remains active when you return to ChatGPT."
+                } else {
+                    "No logical conversations were indexed in this saved Working Data generation."
+                }
             })
         }
 
@@ -129,28 +212,34 @@ class AndroidExportsBackupsActivity : Activity() {
             panel.addView(actionButton("Read conversation") {
                 startActivity(
                     Intent(this, AndroidConversationReaderActivity::class.java)
-                        .putExtra(AndroidConversationReaderActivity.EXTRA_CONVERSATION_KEY, summary.conversationKey),
+                        .putExtra(AndroidConversationReaderActivity.EXTRA_CONVERSATION_KEY, summary.conversationKey)
+                        .putExtra(AndroidConversationReaderActivity.EXTRA_WORKING_DATA_ID, selected.id),
                 )
             })
 
-            val archiveAndClean = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            archiveAndClean.addView(actionButton("Export .dna") {
+            val cleanAndRaw = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            cleanAndRaw.addView(actionButton("Export CLEAN.md") {
                 pendingConversationKey = summary.conversationKey
-                val fileBase = descriptor?.fileBase ?: summary.conversationKey
-                createDocument(REQUEST_EXPORT_DNA, "$fileBase.dna", "application/zip")
-            })
-            archiveAndClean.addView(actionButton("Export CLEAN.md") {
-                pendingConversationKey = summary.conversationKey
+                pendingWorkingDataId = selected.id
                 val fileBase = descriptor?.fileBase ?: summary.conversationKey
                 createDocument(REQUEST_EXPORT_CLEAN_MD, "$fileBase - CLEAN.md", "text/markdown")
             })
-            panel.addView(archiveAndClean)
-
-            panel.addView(actionButton("Export RAW.md") {
+            cleanAndRaw.addView(actionButton("Export RAW.md") {
                 pendingConversationKey = summary.conversationKey
+                pendingWorkingDataId = selected.id
                 val fileBase = descriptor?.fileBase ?: summary.conversationKey
                 createDocument(REQUEST_EXPORT_RAW_MD, "$fileBase - RAW.md", "text/markdown")
             })
+            panel.addView(cleanAndRaw)
+
+            if (selected.isLatest) {
+                panel.addView(actionButton("Export .dna") {
+                    pendingConversationKey = summary.conversationKey
+                    pendingWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                    val fileBase = descriptor?.fileBase ?: summary.conversationKey
+                    createDocument(REQUEST_EXPORT_DNA, "$fileBase.dna", "application/zip")
+                })
+            }
             content.addView(panel)
         }
     }
@@ -163,6 +252,9 @@ class AndroidExportsBackupsActivity : Activity() {
         when (requestCode) {
             REQUEST_EXPORT_DNA -> {
                 val conversationKey = pendingConversationKey ?: return
+                require(pendingWorkingDataId == AndroidWorkingDataManager.LATEST_ID) {
+                    "Historical Working Data cannot mutate Latest .dna durability state"
+                }
                 runWork("Conversation .dna exported and verified") {
                     AndroidConversationDnaArchiveService(this).use { service ->
                         service.exportToUri(conversationKey, contentResolver, uri)
@@ -171,28 +263,24 @@ class AndroidExportsBackupsActivity : Activity() {
             }
             REQUEST_EXPORT_CLEAN_MD -> {
                 val conversationKey = pendingConversationKey ?: return
+                val generation = AndroidWorkingDataManager(this).generation(pendingWorkingDataId)
                 runWork("CLEAN Markdown exported") {
-                    AndroidHumanExportService(this).exportCleanMarkdownToUri(
-                        conversationKey,
-                        contentResolver,
-                        uri,
-                    )
+                    AndroidHumanExportService(this, generation.conversationStateDirectory)
+                        .exportCleanMarkdownToUri(conversationKey, contentResolver, uri)
                 }
             }
             REQUEST_EXPORT_RAW_MD -> {
                 val conversationKey = pendingConversationKey ?: return
+                val generation = AndroidWorkingDataManager(this).generation(pendingWorkingDataId)
                 runWork("RAW Markdown exported") {
-                    AndroidHumanExportService(this).exportRawMarkdownToUri(
-                        conversationKey,
-                        contentResolver,
-                        uri,
-                    )
+                    AndroidHumanExportService(this, generation.conversationStateDirectory)
+                        .exportRawMarkdownToUri(conversationKey, contentResolver, uri)
                 }
             }
-            REQUEST_BACKUP -> runWork("Working evidence backup exported") {
+            REQUEST_BACKUP -> runWork("Working Data backup exported") {
                 AndroidWorkingBackupService(this).backupToUri(contentResolver, uri)
             }
-            REQUEST_IMPORT -> runWork("Import reconciled into local working state") {
+            REQUEST_IMPORT -> runWork("Import reconciled into Latest Working Data") {
                 importSelected(uri)
             }
         }
@@ -250,6 +338,7 @@ class AndroidExportsBackupsActivity : Activity() {
                     Toast.LENGTH_LONG,
                 ).show()
                 pendingConversationKey = null
+                pendingWorkingDataId = selectedWorkingDataId
                 refreshUi()
             }
         }.start()
