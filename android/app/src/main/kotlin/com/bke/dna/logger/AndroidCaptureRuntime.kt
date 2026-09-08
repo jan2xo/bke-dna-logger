@@ -7,8 +7,8 @@ import android.content.Context
  *
  * GeckoView/GeckoSession owns browsing state and may remain alive while the
  * capture writer is paused for a short storage mutation. Pausing closes SQLite
- * and incomplete capture sessions, drains already-scheduled derivative work,
- * and prevents new native messages from touching Working Data until resumed.
+ * and incomplete capture sessions, drains queued derivative work, and prevents
+ * new native messages from touching Working Data until resumed.
  */
 object AndroidCaptureRuntime {
     private val lock = Any()
@@ -17,6 +17,7 @@ object AndroidCaptureRuntime {
 
     fun start(context: Context) {
         val appContext = context.applicationContext
+        AndroidDerivationScheduler.start(appContext)
         synchronized(lock) {
             if (pauseDepth == 0 && ingress == null) {
                 ingress = AndroidWireIngress(appContext)
@@ -34,7 +35,7 @@ object AndroidCaptureRuntime {
     }
 
     fun pauseForStorageMutation(context: Context) {
-        context.applicationContext // Resolve before entering the process lock.
+        val appContext = context.applicationContext
         var firstPause = false
         synchronized(lock) {
             pauseDepth += 1
@@ -45,7 +46,7 @@ object AndroidCaptureRuntime {
             }
         }
         if (firstPause) {
-            AndroidCaptureStore.awaitBackgroundDerivationIdle()
+            AndroidCaptureStore.awaitBackgroundDerivationIdle(appContext)
         }
     }
 
@@ -55,6 +56,7 @@ object AndroidCaptureRuntime {
             check(pauseDepth > 0) { "Capture runtime resume without a matching pause" }
             pauseDepth -= 1
             if (pauseDepth == 0 && ingress == null) {
+                AndroidDerivationScheduler.start(appContext)
                 ingress = AndroidWireIngress(appContext)
             }
         }
