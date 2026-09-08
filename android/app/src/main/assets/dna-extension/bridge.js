@@ -71,6 +71,21 @@
     return btoa(binary);
   }
 
+  function toCaptureBytes(body, expectedByteLength) {
+    if (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0) {
+      return null;
+    }
+
+    try {
+      // Brand-check using the ArrayBuffer internal slot rather than realm-sensitive instanceof.
+      ArrayBuffer.prototype.slice.call(body, 0, 0);
+      const bytes = new Uint8Array(body);
+      return bytes.byteLength === expectedByteLength ? bytes : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   async function forwardCapture(packet) {
     await forwardDiagnostic("capture_received");
 
@@ -80,13 +95,13 @@
       return;
     }
 
-    if (!(packet.body instanceof ArrayBuffer)) {
+    const bytes = toCaptureBytes(packet.body, metadata.byteLength);
+    if (bytes === null) {
       await forwardDiagnostic("capture_body_rejected");
       return;
     }
 
     await forwardDiagnostic("capture_body_accepted");
-    const bytes = new Uint8Array(packet.body);
 
     try {
       await sendNative({

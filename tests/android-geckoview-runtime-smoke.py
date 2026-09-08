@@ -106,7 +106,10 @@ if interceptor.index('kind: "capture"') > interceptor.index('emitDiagnostic("cap
 for token in (
     'await forwardDiagnostic("capture_received")',
     'await forwardDiagnostic("capture_metadata_rejected")',
-    'packet.body instanceof ArrayBuffer',
+    "function toCaptureBytes(body, expectedByteLength)",
+    "ArrayBuffer.prototype.slice.call(body, 0, 0)",
+    "new Uint8Array(body)",
+    "bytes.byteLength === expectedByteLength",
     'await forwardDiagnostic("capture_body_rejected")',
     'await forwardDiagnostic("capture_body_accepted")',
     'type: "capture_start"',
@@ -114,12 +117,15 @@ for token in (
     'await forwardDiagnostic("capture_forward_failed")',
 ):
     if token not in bridge:
-        raise SystemExit(f"Android extension bridge is missing capture-boundary diagnostic contract {token!r}")
+        raise SystemExit(f"Android extension bridge is missing capture-boundary contract {token!r}")
+
+if "packet.body instanceof ArrayBuffer" in bridge:
+    raise SystemExit("Android extension bridge must not use realm-sensitive ArrayBuffer instanceof validation")
 
 if bridge.index('await forwardDiagnostic("capture_received")') > bridge.index("const metadata = packet.metadata"):
     raise SystemExit("capture_received must be emitted before capture packet validation")
-if bridge.index('packet.body instanceof ArrayBuffer') > bridge.index('await forwardDiagnostic("capture_body_accepted")'):
-    raise SystemExit("capture_body_accepted must be emitted only after the ArrayBuffer realm/type gate")
+if bridge.index("const bytes = toCaptureBytes(packet.body, metadata.byteLength)") > bridge.index('await forwardDiagnostic("capture_body_accepted")'):
+    raise SystemExit("capture_body_accepted must be emitted only after realm-safe body conversion succeeds")
 if bridge.index('type: "capture_start"') > bridge.index('await forwardDiagnostic("capture_start_sent")'):
     raise SystemExit("capture_start_sent must be emitted only after native capture_start is sent")
 
