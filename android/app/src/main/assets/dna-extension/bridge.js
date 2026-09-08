@@ -9,6 +9,11 @@
     "interceptor_ready",
     "fetch_seen",
     "capture_candidate",
+    "capture_body_read",
+    "capture_packet_posted",
+    "capture_packet_seen",
+    "capture_body_rejected",
+    "capture_forward_start",
     "interceptor_load_error"
   ]);
   const forwardedDiagnostics = new Set();
@@ -61,13 +66,36 @@
     return btoa(binary);
   }
 
+  function toCaptureBytes(body, expectedByteLength) {
+    if (!body || typeof body.byteLength !== "number" || !Number.isSafeInteger(expectedByteLength)) {
+      return null;
+    }
+
+    try {
+      const bytes = new Uint8Array(body);
+      if (bytes.byteLength !== body.byteLength || bytes.byteLength !== expectedByteLength) {
+        return null;
+      }
+      return bytes;
+    } catch (_) {
+      return null;
+    }
+  }
+
   async function forwardCapture(packet) {
     const metadata = packet.metadata;
-    if (!metadata || typeof metadata.captureId !== "string" || !(packet.body instanceof ArrayBuffer)) {
+    if (!metadata || typeof metadata.captureId !== "string") {
+      await forwardDiagnostic("capture_body_rejected");
       return;
     }
 
-    const bytes = new Uint8Array(packet.body);
+    const bytes = toCaptureBytes(packet.body, metadata.byteLength);
+    if (!bytes) {
+      await forwardDiagnostic("capture_body_rejected");
+      return;
+    }
+
+    await forwardDiagnostic("capture_forward_start");
     await sendNative({
       type: "capture_start",
       captureId: metadata.captureId,
@@ -118,6 +146,7 @@
     }
 
     forwarding = forwarding
+      .then(() => forwardDiagnostic("capture_packet_seen"))
       .then(() => forwardCapture(packet))
       .catch(error => console.debug("[BKE DNA Android] native capture skipped", error));
   });
