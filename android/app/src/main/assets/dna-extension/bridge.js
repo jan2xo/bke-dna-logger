@@ -5,14 +5,41 @@
   const NATIVE_APP = "bke.dna.logger";
   const CHUNK_BYTES = 192 * 1024;
   const BINARY_STRING_SLICE = 32 * 1024;
+  const DIAGNOSTIC_EVENTS = new Set([
+    "interceptor_ready",
+    "fetch_seen",
+    "capture_candidate",
+    "interceptor_load_error"
+  ]);
+  const forwardedDiagnostics = new Set();
   let forwarding = Promise.resolve();
+
+  async function sendNative(message) {
+    await browser.runtime.sendNativeMessage(NATIVE_APP, message);
+  }
+
+  async function forwardDiagnostic(event) {
+    if (!DIAGNOSTIC_EVENTS.has(event) || forwardedDiagnostics.has(event)) {
+      return;
+    }
+
+    forwardedDiagnostics.add(event);
+    await sendNative({
+      type: "diagnostic",
+      event
+    });
+  }
 
   function injectMainInterceptor() {
     const script = document.createElement("script");
     script.src = browser.runtime.getURL("main-interceptor.js");
     script.async = false;
     script.addEventListener("load", () => script.remove(), { once: true });
-    script.addEventListener("error", () => script.remove(), { once: true });
+    script.addEventListener("error", () => {
+      forwardDiagnostic("interceptor_load_error")
+        .catch(error => console.debug("[BKE DNA Android] diagnostic forwarding failed", error));
+      script.remove();
+    }, { once: true });
 
     const parent = document.documentElement || document.head;
     if (parent) {
@@ -32,10 +59,6 @@
       binary += String.fromCharCode.apply(null, slice);
     }
     return btoa(binary);
-  }
-
-  async function sendNative(message) {
-    await browser.runtime.sendNativeMessage(NATIVE_APP, message);
   }
 
   async function forwardCapture(packet) {
@@ -79,7 +102,18 @@
 
   window.addEventListener("message", event => {
     const packet = event.data;
-    if (event.source !== window || !packet || packet.source !== SOURCE || packet.kind !== "capture") {
+    if (event.source !== window || !packet || packet.source !== SOURCE) {
+      return;
+    }
+
+    if (packet.kind === "diagnostic") {
+      forwarding = forwarding
+        .then(() => forwardDiagnostic(packet.event))
+        .catch(error => console.debug("[BKE DNA Android] diagnostic forwarding failed", error));
+      return;
+    }
+
+    if (packet.kind !== "capture") {
       return;
     }
 
