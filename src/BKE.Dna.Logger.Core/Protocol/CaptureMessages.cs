@@ -10,7 +10,7 @@ public sealed record CaptureStart(
     string? ContentType,
     string Initiator,
     string CapturedAt,
-    long ByteLength,
+    long? ByteLength,
     string Fidelity);
 
 public sealed record CaptureChunk(
@@ -21,4 +21,5 @@ public sealed record CaptureChunk(
 
 public sealed record CaptureEnd(
     string Type,
-    string CaptureId);
+    string CaptureId,
+    long? ByteLength);

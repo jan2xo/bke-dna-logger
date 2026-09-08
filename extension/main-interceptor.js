@@ -2,6 +2,9 @@
   "use strict";
 
   const SOURCE = "bke-dna-logger";
+  const EXTENSION_SOURCE = "bke-dna-logger-extension";
+  const STREAM_CHUNK_BYTES = 128 * 1024;
+  const ACK_TIMEOUT_MS = 60 * 1000;
   const DIAGNOSTIC_EVENTS = new Set([
     "interceptor_ready",
     "fetch_seen",
@@ -25,6 +28,43 @@
       kind: "diagnostic",
       event
     }, "*");
+  }
+
+  function waitForAck(captureId, phase, sequence = null) {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", onMessage);
+        reject(new Error(`BKE DNA ${phase} ACK timed out`));
+      }, ACK_TIMEOUT_MS);
+
+      function onMessage(event) {
+        if (event.source !== window) {
+          return;
+        }
+        const data = event.data;
+        if (!data || data.source !== EXTENSION_SOURCE || data.kind !== "capture_ack") {
+          return;
+        }
+        if (data.captureId !== captureId || data.phase !== phase) {
+          return;
+        }
+        if (phase === "chunk" && data.sequence !== sequence) {
+          return;
+        }
+
+        clearTimeout(timeout);
+        window.removeEventListener("message", onMessage);
+        resolve();
+      }
+
+      window.addEventListener("message", onMessage);
+    });
+  }
+
+  async function postWithAck(packet, transfer, phase, sequence = null) {
+    const ack = waitForAck(packet.captureId || packet.metadata?.captureId, phase, sequence);
+    window.postMessage(packet, "*", transfer);
+    await ack;
   }
 
   try {
@@ -67,36 +107,79 @@
       emitDiagnostic("capture_candidate");
       emitDiagnostic("body_read_started");
 
-      let body;
+      const captureId = crypto.randomUUID();
+      const clone = response.clone();
+      const reader = clone.body?.getReader();
+      if (!reader) {
+        emitDiagnostic("body_read_failed");
+        return;
+      }
+
+      const metadata = {
+        captureId,
+        pageUrl: window.location.href,
+        requestUrl: request.url,
+        method: request.method,
+        status: response.status,
+        contentType: response.headers.get("content-type"),
+        initiator: "fetch",
+        capturedAt: new Date().toISOString(),
+        fidelity: "browser-application-response-body"
+      };
+
+      let sequence = 0;
+      let byteLength = 0;
+
       try {
-        const clone = response.clone();
-        body = await clone.arrayBuffer();
+        await postWithAck({
+          source: SOURCE,
+          kind: "capture_start",
+          metadata
+        }, [], "start");
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) {
+            break;
+          }
+          if (!value || value.byteLength === 0) {
+            continue;
+          }
+
+          for (let offset = 0; offset < value.byteLength; offset += STREAM_CHUNK_BYTES) {
+            const sourceChunk = value.subarray(offset, Math.min(offset + STREAM_CHUNK_BYTES, value.byteLength));
+            const chunk = new Uint8Array(sourceChunk.byteLength);
+            chunk.set(sourceChunk);
+            byteLength += chunk.byteLength;
+
+            await postWithAck({
+              source: SOURCE,
+              kind: "capture_chunk",
+              captureId,
+              sequence,
+              body: chunk.buffer
+            }, [chunk.buffer], "chunk", sequence);
+            sequence += 1;
+          }
+        }
+
+        await postWithAck({
+          source: SOURCE,
+          kind: "capture_end",
+          captureId,
+          byteLength
+        }, [], "end");
       } catch (error) {
         emitDiagnostic("body_read_failed");
+        try {
+          await reader.cancel(error);
+        } catch (_) {
+          // The cloned stream may already be closed after a forwarding failure.
+        }
         throw error;
       }
 
       emitDiagnostic("body_read_complete");
-      const captureId = crypto.randomUUID();
-
-      window.postMessage({
-        source: SOURCE,
-        kind: "capture",
-        metadata: {
-          captureId,
-          pageUrl: window.location.href,
-          requestUrl: request.url,
-          method: request.method,
-          status: response.status,
-          contentType: response.headers.get("content-type"),
-          initiator: "fetch",
-          capturedAt: new Date().toISOString(),
-          byteLength: body.byteLength,
-          fidelity: "browser-application-response-body"
-        },
-        body
-      }, "*", [body]);
-
       emitDiagnostic("capture_posted");
     }
 

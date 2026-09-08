@@ -17,9 +17,9 @@ jobs:
   release:
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: android-v0.1.0-alpha.1
-      APK_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.1.apk
-      CHECKSUM_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.1.apk.sha256
+      RELEASE_TAG: android-v0.1.0-alpha.2
+      APK_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.2.apk
+      CHECKSUM_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.2.apk.sha256
     steps:
       - uses: actions/checkout@v4
 
@@ -63,7 +63,7 @@ jobs:
       - name: Preserve workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bke-dna-logger-android-0.1.0-alpha.1
+          name: bke-dna-logger-android-0.1.0-alpha.2
           path: |
             release/${{ env.APK_NAME }}
             release/${{ env.CHECKSUM_NAME }}
@@ -79,23 +79,25 @@ jobs:
           fi
 
           cat > release/RELEASE_NOTES.md <<'EOF'
-          # BKE DNA Logger Android 0.1.0-alpha.1
+          # BKE DNA Logger Android 0.1.0-alpha.2
 
-          First owner/internal Android preview of the runtime-proven BKE DNA Logger architecture.
+          Owner/internal Android performance and storage preview.
 
-          ## Included
+          ## What changed since alpha.1
 
-          - Native Kotlin + stable GeckoView ChatGPT host.
-          - Passive ChatGPT network-response capture into immutable app-private evidence.
-          - Modern `messages-array-v0` classification, normalization, and logical reconciliation.
-          - SQLite Working Data generations with one unified deduplicated lazy conversation library.
-          - Conversation title recovery from exact captured ChatGPT title evidence.
-          - Search across Working Data generations.
-          - In-app conversation reader.
-          - `CLEAN.md` export containing JAN / RIGHT-HAND conversation turns only.
-          - `RAW.md` forensic export.
-          - Verified conversation-scoped `.dna` export/import and cross-device reconciliation contracts.
-          - Dark owner UI.
+          - ChatGPT's GeckoSession stays alive while Working Data & Conversations is open; Back returns to the existing browser session instead of explicitly loading ChatGPT again.
+          - Captured response clones stream from `ReadableStream` in bounded 128 KiB pieces instead of first materializing the entire response with `arrayBuffer()`.
+          - Every streamed chunk waits for the Android native-message path before the next chunk is read, providing bounded backpressure.
+          - Raw evidence still streams to app-private partial files with incremental SHA-256, fsync, content-addressed promotion and deduplication.
+          - Classification/normalization/reconciliation run on a background single-thread derivative lane after raw evidence + observation + capture index are durable, so capture-end acknowledgement no longer waits for semantic processing.
+          - Working Data rotation/import/archive mutations pause only the capture writer and drain queued derivatives; they do not intentionally destroy the Gecko browser session.
+          - Adds red `PURGE VERIFIED RAW` and `PURGE ALL VERIFIED RAW` actions guarded by the exact confirmation `jan2x`.
+          - Purge is fail-closed: a conversation and every source must already be covered by the same verified `.dna`, and source evidence referenced by another Working Data conversation is retained.
+          - Purge removes only local heavy SHA-addressed raw/normalized/classification/observation files. SQLite and logical conversation state remain resident so the library/CLEAN reader does not disappear.
+
+          ## Current semantic-processing boundary
+
+          Large-response transport is now streamed and capture processing is backgrounded. The existing deep JSON classifier/normalizer still keeps its conservative 16 MiB semantic parsing limit in this alpha; payloads above that limit remain preserved as immutable RAW evidence rather than risking an unbounded JSON object graph. Streaming semantic normalization is a separate follow-up gate.
 
           ## Device target
 
@@ -104,17 +106,17 @@ jobs:
 
           ## Signing status
 
-          This alpha is an owner/internal preview built with Android's debug signing path so it is immediately installable for physical-device certification. It is not the long-term production signing identity. Establish a persistent private release key before public/stable distribution.
+          This owner/internal alpha uses Android debug signing for immediate physical-device testing. It is not the long-term production signing identity.
 
           ## Evidence safety
 
-          The logger does not capture Authorization values, cookies, request-header collections, or response-header collections. `.dna` verification remains the durability gate for destructive evidence cleanup.
+          The logger does not capture Authorization values, cookies, request-header collections, or response-header collections. Verified conversation `.dna` remains the only durability authority for destructive local evidence cleanup.
           EOF
 
           gh release create "${RELEASE_TAG}" \
             "release/${APK_NAME}" \
             "release/${CHECKSUM_NAME}" \
             --target "${GITHUB_SHA}" \
-            --title "BKE DNA Logger Android 0.1.0-alpha.1" \
+            --title "BKE DNA Logger Android 0.1.0-alpha.2" \
             --notes-file release/RELEASE_NOTES.md \
             --prerelease

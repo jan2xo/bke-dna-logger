@@ -5,54 +5,84 @@ repo = Path(__file__).resolve().parents[1]
 kotlin = repo / "android" / "app" / "src" / "main" / "kotlin" / "com" / "bke" / "dna" / "logger"
 contract = (kotlin / "DnaWireContract.kt").read_text(encoding="utf-8")
 ingress = (kotlin / "AndroidWireIngress.kt").read_text(encoding="utf-8")
+runtime = (kotlin / "AndroidCaptureRuntime.kt").read_text(encoding="utf-8")
 store = (kotlin / "AndroidCaptureStore.kt").read_text(encoding="utf-8")
 index = (kotlin / "AndroidCaptureIndex.kt").read_text(encoding="utf-8")
 host = (kotlin / "GeckoViewHost.kt").read_text(encoding="utf-8")
 bridge = (repo / "android" / "app" / "src" / "main" / "assets" / "dna-extension" / "bridge.js").read_text(encoding="utf-8")
+interceptor = (repo / "extension" / "main-interceptor.js").read_text(encoding="utf-8")
 
 for token in ("capture_start", "capture_chunk", "capture_end", "MAX_MESSAGE_BYTES"):
-    if token not in contract:
-        raise SystemExit(f"wire contract missing {token!r}")
+    assert token in contract, token
 
 for forbidden in ("authorization", "cookie", "requestHeaders", "responseHeaders", "headers"):
-    if f'"{forbidden}"' not in contract:
-        raise SystemExit(f"wire contract must explicitly reject sensitive field {forbidden!r}")
+    assert f'"{forbidden}"' in contract, forbidden
 
 for token in (
     "AndroidCaptureStore(context.applicationContext)",
     "DnaWireContract.parse(rawMessage)",
     "store.accept(json)",
 ):
-    if token not in ingress:
-        raise SystemExit(f"native ingress missing {token!r}")
+    assert token in ingress, token
 
 for token in (
-    "MessageDigest.getInstance(\"SHA-256\")",
+    "AndroidWireIngress(appContext)",
+    "pauseForStorageMutation",
+    "resumeAfterStorageMutation",
+    "withStorageMutationPause",
+    "AndroidCaptureStore.awaitBackgroundDerivationIdle()",
+):
+    assert token in runtime, token
+
+for token in (
+    'MessageDigest.getInstance("SHA-256")',
     "output.fd.sync()",
     "expected sequence",
-    "declaredLength",
+    "declaredLength: Long?",
+    "finalDeclaredLength",
     "bodies/$bodyName",
     "observations",
+    "DERIVATION_EXECUTOR.execute",
+    "awaitBackgroundDerivationIdle",
     "insertOrThrow",
 ):
-    haystack = store + index
-    if token not in haystack:
-        raise SystemExit(f"durable Android capture contract missing {token!r}")
+    assert token in store + index, token
 
-if 'dna_archived INTEGER NOT NULL DEFAULT 0' not in index:
-    raise SystemExit("SQLite projection must default captures to not archived / not clearable")
+assert 'dna_archived INTEGER NOT NULL DEFAULT 0' in index
 
 for token in (
-    "AndroidWireIngress(activity.applicationContext)",
+    "AndroidCaptureRuntime.start(appContext)",
+    "AndroidCaptureRuntime.accept(",
     "message !is JSONObject",
-    "ingress.accept(message.toString().toByteArray",
-    "ingress.close()",
+    "message.toString().toByteArray",
+    "AndroidCaptureRuntime.stop()",
 ):
-    if token not in host:
-        raise SystemExit(f"GeckoView native-message ingress wiring missing {token!r}")
+    assert token in host, token
+
+for token in (
+    "clone.body?.getReader()",
+    "await reader.read()",
+    'kind: "capture_start"',
+    'kind: "capture_chunk"',
+    'kind: "capture_end"',
+    "waitForAck",
+):
+    assert token in interceptor, token
+assert "clone.arrayBuffer()" not in interceptor
+
+for token in (
+    "forwardStreamStart",
+    "forwardStreamChunk",
+    "forwardStreamEnd",
+    'kind: "capture_ack"',
+    'type: "capture_start"',
+    'type: "capture_chunk"',
+    'type: "capture_end"',
+    "byteLength: packet.byteLength",
+):
+    assert token in bridge, token
 
 for forbidden in ("Authorization", "Cookie", "requestHeaders", "responseHeaders"):
-    if forbidden in bridge:
-        raise SystemExit(f"Android bridge must not capture sensitive metadata {forbidden!r}")
+    assert forbidden not in bridge, forbidden
 
-print("android native ingress smoke PASS")
+print("android streamed native ingress/background derivation smoke PASS")

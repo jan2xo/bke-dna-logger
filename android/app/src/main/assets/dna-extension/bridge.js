@@ -2,6 +2,7 @@
   "use strict";
 
   const SOURCE = "bke-dna-logger";
+  const EXTENSION_SOURCE = "bke-dna-logger-extension";
   const NATIVE_APP = "bke.dna.logger";
   const CHUNK_BYTES = 192 * 1024;
   const BINARY_STRING_SLICE = 32 * 1024;
@@ -31,6 +32,16 @@
 
   async function sendNative(message) {
     await browser.runtime.sendNativeMessage(NATIVE_APP, message);
+  }
+
+  function acknowledge(captureId, phase, sequence = null) {
+    window.postMessage({
+      source: EXTENSION_SOURCE,
+      kind: "capture_ack",
+      captureId,
+      phase,
+      sequence
+    }, "*");
   }
 
   async function forwardDiagnostic(event) {
@@ -76,27 +87,111 @@
     return btoa(binary);
   }
 
-  function toCaptureBytes(body, expectedByteLength) {
-    if (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0) {
+  function toCaptureBytes(body, expectedByteLength = null) {
+    if (expectedByteLength !== null && (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0)) {
       return null;
     }
 
     try {
-      // Brand-check the transferred ArrayBuffer without realm-sensitive instanceof.
       ArrayBuffer.prototype.slice.call(body, 0, 0);
-
-      // Copy foreign/page-owned bytes into a typed array owned by this extension realm.
-      // Gecko content-script sandboxes can reject methods such as subarray() on views
-      // that remain backed directly by cross-compartment ArrayBuffers.
       const foreignBytes = new Uint8Array(body);
       const bytes = new Uint8Array(foreignBytes.byteLength);
       bytes.set(foreignBytes);
-      return bytes.byteLength === expectedByteLength ? bytes : null;
+      if (expectedByteLength !== null && bytes.byteLength !== expectedByteLength) {
+        return null;
+      }
+      return bytes;
     } catch (_) {
       return null;
     }
   }
 
+  async function forwardStreamStart(packet) {
+    await forwardDiagnostic("capture_received");
+    const metadata = packet.metadata;
+    if (!metadata || typeof metadata.captureId !== "string") {
+      await forwardDiagnostic("capture_metadata_rejected");
+      return;
+    }
+
+    try {
+      await sendNative({
+        type: "capture_start",
+        captureId: metadata.captureId,
+        pageUrl: metadata.pageUrl,
+        requestUrl: metadata.requestUrl,
+        method: metadata.method,
+        status: metadata.status,
+        contentType: metadata.contentType,
+        initiator: metadata.initiator,
+        capturedAt: metadata.capturedAt,
+        fidelity: metadata.fidelity
+      });
+      await forwardDiagnostic("capture_start_sent");
+      acknowledge(metadata.captureId, "start");
+    } catch (error) {
+      try { await forwardDiagnostic("capture_forward_failed"); } catch (_) {}
+      throw error;
+    }
+  }
+
+  async function forwardStreamChunk(packet) {
+    if (typeof packet.captureId !== "string" || !Number.isSafeInteger(packet.sequence) || packet.sequence < 0) {
+      await forwardDiagnostic("capture_metadata_rejected");
+      return;
+    }
+
+    const bytes = toCaptureBytes(packet.body);
+    if (bytes === null) {
+      await forwardDiagnostic("capture_body_rejected");
+      return;
+    }
+    await forwardDiagnostic("capture_body_accepted");
+
+    try {
+      await forwardDiagnostic("chunk_encode_started");
+      const base64 = bytesToBase64(bytes);
+      await forwardDiagnostic("chunk_encode_complete");
+      await forwardDiagnostic("chunk_send_started");
+      await sendNative({
+        type: "capture_chunk",
+        captureId: packet.captureId,
+        sequence: packet.sequence,
+        base64
+      });
+      await forwardDiagnostic("chunk_send_complete");
+      acknowledge(packet.captureId, "chunk", packet.sequence);
+    } catch (error) {
+      try { await forwardDiagnostic("capture_forward_failed"); } catch (_) {}
+      throw error;
+    }
+  }
+
+  async function forwardStreamEnd(packet) {
+    if (
+      typeof packet.captureId !== "string" ||
+      !Number.isSafeInteger(packet.byteLength) ||
+      packet.byteLength < 0
+    ) {
+      await forwardDiagnostic("capture_metadata_rejected");
+      return;
+    }
+
+    try {
+      await sendNative({
+        type: "capture_end",
+        captureId: packet.captureId,
+        byteLength: packet.byteLength
+      });
+      await forwardDiagnostic("capture_end_sent");
+      acknowledge(packet.captureId, "end");
+    } catch (error) {
+      try { await forwardDiagnostic("capture_forward_failed"); } catch (_) {}
+      throw error;
+    }
+  }
+
+  // Backward-compatible full-buffer path for older injected interceptors.
   async function forwardCapture(packet) {
     await forwardDiagnostic("capture_received");
 
@@ -149,15 +244,12 @@
 
       await sendNative({
         type: "capture_end",
-        captureId: metadata.captureId
+        captureId: metadata.captureId,
+        byteLength: metadata.byteLength
       });
       await forwardDiagnostic("capture_end_sent");
     } catch (error) {
-      try {
-        await forwardDiagnostic("capture_forward_failed");
-      } catch (_) {
-        // The native channel itself may be the failing boundary.
-      }
+      try { await forwardDiagnostic("capture_forward_failed"); } catch (_) {}
       throw error;
     }
   }
@@ -175,13 +267,21 @@
       return;
     }
 
-    if (packet.kind !== "capture") {
+    if (packet.kind === "capture_start") {
+      forwarding = forwarding.then(() => forwardStreamStart(packet));
+    } else if (packet.kind === "capture_chunk") {
+      forwarding = forwarding.then(() => forwardStreamChunk(packet));
+    } else if (packet.kind === "capture_end") {
+      forwarding = forwarding.then(() => forwardStreamEnd(packet));
+    } else if (packet.kind === "capture") {
+      forwarding = forwarding.then(() => forwardCapture(packet));
+    } else {
       return;
     }
 
-    forwarding = forwarding
-      .then(() => forwardCapture(packet))
-      .catch(error => console.debug("[BKE DNA Android] native capture skipped", error));
+    forwarding = forwarding.catch(error => {
+      console.debug("[BKE DNA Android] native capture skipped", error);
+    });
   });
 
   injectMainInterceptor();
