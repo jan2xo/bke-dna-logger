@@ -1,7 +1,9 @@
 package com.bke.dna.logger
 
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.file.AtomicMoveNotSupportedException
@@ -30,18 +32,46 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
 
         val outputPath = File(normalizedDirectory, "$sourceSha256.json")
         if (outputPath.isFile) {
-            return readExistingResult(outputPath, sourceSha256)
+            val existing = readExistingResult(outputPath, sourceSha256)
+            if (existing == null) {
+                Log.d(TAG, "BKE DNA normalization: normalization_skip_existing_result_unusable")
+            }
+            return existing
         }
 
         val bodyPath = File(bodiesDirectory, "$sourceSha256.body")
-        if (!bodyPath.isFile || bodyPath.length() > MAX_BODY_BYTES) return null
-
-        val root = try {
-            JSONObject(bodyPath.readText(Charsets.UTF_8))
-        } catch (_: Exception) {
+        if (!bodyPath.isFile) {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_body_missing")
             return null
         }
-        val mapping = root.optJSONObject("mapping") ?: return null
+        if (bodyPath.length() > MAX_BODY_BYTES) {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_body_oversize")
+            return null
+        }
+
+        val rootValue = try {
+            val tokener = JSONTokener(bodyPath.readText(Charsets.UTF_8))
+            val value = tokener.nextValue()
+            if (tokener.nextClean() != '\u0000') {
+                Log.d(TAG, "BKE DNA normalization: normalization_skip_invalid_json")
+                return null
+            }
+            value
+        } catch (_: Exception) {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_invalid_json")
+            return null
+        }
+
+        logCandidateStructure(rootValue)
+
+        val root = rootValue as? JSONObject ?: run {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_not_object")
+            return null
+        }
+        val mapping = root.optJSONObject("mapping") ?: run {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_no_root_mapping")
+            return null
+        }
 
         val knownNodeIds = linkedSetOf<String>()
         val mappingKeys = mapping.keys()
@@ -98,8 +128,79 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
             .put("normalizedAt", normalizedAt)
 
         writeDerivativeAtomically(outputPath, normalized.toString(2))
-        return conversationNativeId?.takeIf { it.isNotBlank() }?.let {
-            AndroidNormalizationResult(sourceSha256, it, outputPath)
+        if (conversationNativeId.isNullOrBlank()) {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_missing_conversation_id")
+            return null
+        }
+        return AndroidNormalizationResult(sourceSha256, conversationNativeId, outputPath)
+    }
+
+    private fun logCandidateStructure(rootValue: Any?) {
+        when (rootValue) {
+            is JSONObject -> Log.d(TAG, "BKE DNA normalization: candidate_root_object")
+            is JSONArray -> Log.d(TAG, "BKE DNA normalization: candidate_root_array")
+            else -> Log.d(TAG, "BKE DNA normalization: candidate_root_other")
+        }
+
+        val root = rootValue as? JSONObject
+        if (root?.optJSONObject("mapping") != null) {
+            Log.d(TAG, "BKE DNA normalization: candidate_root_mapping")
+        }
+        if (root?.has("conversation_id") == true) {
+            Log.d(TAG, "BKE DNA normalization: candidate_root_conversation_id")
+        }
+        if (root?.has("current_node") == true) {
+            Log.d(TAG, "BKE DNA normalization: candidate_root_current_node")
+        }
+
+        val nested = findNestedCandidateStructure(rootValue)
+        if (nested.mapping) {
+            Log.d(TAG, "BKE DNA normalization: candidate_nested_mapping")
+        }
+        if (nested.conversationId) {
+            Log.d(TAG, "BKE DNA normalization: candidate_nested_conversation_id")
+        }
+        if (nested.currentNode) {
+            Log.d(TAG, "BKE DNA normalization: candidate_nested_current_node")
+        }
+    }
+
+    private fun findNestedCandidateStructure(rootValue: Any?): CandidateStructurePresence {
+        val stack = ArrayDeque<Any>()
+        addChildren(rootValue, stack)
+
+        var mapping = false
+        var conversationId = false
+        var currentNode = false
+        while (stack.isNotEmpty() && !(mapping && conversationId && currentNode)) {
+            when (val current = stack.removeLast()) {
+                is JSONObject -> {
+                    if (current.optJSONObject("mapping") != null) mapping = true
+                    if (current.has("conversation_id")) conversationId = true
+                    if (current.has("current_node")) currentNode = true
+                    addChildren(current, stack)
+                }
+                is JSONArray -> addChildren(current, stack)
+            }
+        }
+        return CandidateStructurePresence(mapping, conversationId, currentNode)
+    }
+
+    private fun addChildren(value: Any?, stack: ArrayDeque<Any>) {
+        when (value) {
+            is JSONObject -> {
+                val keys = value.keys()
+                while (keys.hasNext()) {
+                    val child = value.opt(keys.next())
+                    if (child is JSONObject || child is JSONArray) stack.addLast(child)
+                }
+            }
+            is JSONArray -> {
+                for (index in 0 until value.length()) {
+                    val child = value.opt(index)
+                    if (child is JSONObject || child is JSONArray) stack.addLast(child)
+                }
+            }
         }
     }
 
@@ -218,6 +319,12 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
         else -> JSONObject.quote(value.toString())
     }
 
+    private data class CandidateStructurePresence(
+        val mapping: Boolean,
+        val conversationId: Boolean,
+        val currentNode: Boolean,
+    )
+
     private data class ParentChainResult(val complete: Boolean, val cycleDetected: Boolean)
 
     private data class NormalizedNode(
@@ -242,6 +349,7 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
     }
 
     companion object {
+        private const val TAG = "BkeDnaNormalizer"
         private const val MAX_BODY_BYTES = 16L * 1024 * 1024
         private const val CANDIDATE_KIND = "conversation_payload_candidate"
         private const val PARSER = "generic-mapping-graph-v0"
