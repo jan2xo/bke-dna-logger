@@ -35,8 +35,6 @@ aggregation_tokens = [
 for token in aggregation_tokens:
     assert token in aggregation, token
 
-# Messages-only evidence has no graph topology and must never be upgraded to a
-# complete structural graph merely because its normalized nodes have empty edge lists.
 for token in (
     'status = "indeterminate"',
     "rootFound = false",
@@ -46,8 +44,10 @@ for token in (
     assert token in aggregation, token
 
 schema_tokens = [
-    "DATABASE_VERSION = 3",
+    "DATABASE_VERSION = 4",
     "logical_conversation",
+    "display_title",
+    "upgradeLibrarySchemaV4",
     "conversation_source",
     "logical_message_node",
     "logical_message_edge",
@@ -75,8 +75,6 @@ assert "AUTOMATIC_DNA_EXPORT = false" in contract
 assert "AUTOMATIC_MARKDOWN_EXPORT = false" in contract
 assert "MERGE_SQLITE_ACROSS_DEVICES = false" in contract
 
-# Contract fixture: two independent graph-backed device snapshots for one native
-# conversation must preserve both branches, one prompt identity, and both sources.
 source_a = "a" * 64
 source_b = "b" * 64
 snapshots = [
@@ -110,8 +108,6 @@ assert union["user-root"]["children"] == {"assistant-a", "assistant-b"}
 assert union["user-root"]["messages"] == {"message-user"}
 assert set().union(*(node["sources"] for node in union.values())) == {source_a, source_b}
 
-# A messages-array snapshot can contribute message evidence, but without parent
-# or child fields it cannot independently establish graph completeness.
 messages_snapshot = {
     "coverage_basis": "messages_array_no_graph_edges",
     "nodes": [
