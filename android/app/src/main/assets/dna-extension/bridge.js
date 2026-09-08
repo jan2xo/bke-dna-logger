@@ -9,6 +9,10 @@
     "interceptor_ready",
     "fetch_seen",
     "capture_candidate",
+    "body_read_started",
+    "body_read_complete",
+    "body_read_failed",
+    "capture_posted",
     "interceptor_load_error"
   ]);
   const forwardedDiagnostics = new Set();

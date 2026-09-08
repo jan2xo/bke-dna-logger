@@ -6,6 +6,10 @@
     "interceptor_ready",
     "fetch_seen",
     "capture_candidate",
+    "body_read_started",
+    "body_read_complete",
+    "body_read_failed",
+    "capture_posted",
     "interceptor_load_error"
   ]);
   const emittedDiagnostics = new Set();
@@ -61,9 +65,18 @@
       }
 
       emitDiagnostic("capture_candidate");
+      emitDiagnostic("body_read_started");
 
-      const clone = response.clone();
-      const body = await clone.arrayBuffer();
+      let body;
+      try {
+        const clone = response.clone();
+        body = await clone.arrayBuffer();
+      } catch (error) {
+        emitDiagnostic("body_read_failed");
+        throw error;
+      }
+
+      emitDiagnostic("body_read_complete");
       const captureId = crypto.randomUUID();
 
       window.postMessage({
@@ -83,6 +96,8 @@
         },
         body
       }, "*", [body]);
+
+      emitDiagnostic("capture_posted");
     }
 
     window.fetch = async function bkeDnaFetch(...args) {

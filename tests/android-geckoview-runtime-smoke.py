@@ -7,6 +7,10 @@ manifest = (repo / "android" / "app" / "src" / "main" / "AndroidManifest.xml").r
 main = (kotlin / "MainActivity.kt").read_text(encoding="utf-8")
 provider = (kotlin / "GeckoRuntimeProvider.kt").read_text(encoding="utf-8")
 host = (kotlin / "GeckoViewHost.kt").read_text(encoding="utf-8")
+interceptor = (repo / "extension" / "main-interceptor.js").read_text(encoding="utf-8")
+bridge = (
+    repo / "android" / "app" / "src" / "main" / "assets" / "dna-extension" / "bridge.js"
+).read_text(encoding="utf-8")
 
 for token in (
     "GeckoView(this)",
@@ -44,6 +48,48 @@ for token in (
 ):
     if token not in host:
         raise SystemExit(f"GeckoView host contract missing {token!r}")
+
+diagnostic_events = (
+    "interceptor_ready",
+    "fetch_seen",
+    "capture_candidate",
+    "body_read_started",
+    "body_read_complete",
+    "body_read_failed",
+    "capture_posted",
+    "interceptor_load_error",
+)
+for event in diagnostic_events:
+    quoted = f'"{event}"'
+    for name, source in (
+        ("main interceptor", interceptor),
+        ("Android extension bridge", bridge),
+        ("GeckoView host", host),
+    ):
+        if quoted not in source:
+            raise SystemExit(f"{name} is missing runtime diagnostic {event!r}")
+
+for token in (
+    'emitDiagnostic("body_read_started")',
+    "body = await clone.arrayBuffer()",
+    'emitDiagnostic("body_read_failed")',
+    'emitDiagnostic("body_read_complete")',
+    'emitDiagnostic("capture_posted")',
+):
+    if token not in interceptor:
+        raise SystemExit(f"main interceptor is missing body-read diagnostic contract {token!r}")
+
+if interceptor.index('emitDiagnostic("body_read_started")') > interceptor.index("body = await clone.arrayBuffer()"):
+    raise SystemExit("body_read_started must be emitted before the response clone is fully buffered")
+if interceptor.index("body = await clone.arrayBuffer()") > interceptor.index('emitDiagnostic("body_read_complete")'):
+    raise SystemExit("body_read_complete must be emitted only after the response clone is fully buffered")
+if interceptor.index('kind: "capture"') > interceptor.index('emitDiagnostic("capture_posted")'):
+    raise SystemExit("capture_posted must be emitted only after the capture packet is posted")
+
+if 'private val DIAGNOSTIC_KEYS = setOf("type", "event")' not in host:
+    raise SystemExit("runtime diagnostics must remain restricted to type + event only")
+if 'type: "diagnostic"' not in bridge:
+    raise SystemExit("runtime diagnostics must remain separate from capture evidence messages")
 
 if host.index("ensureBuiltIn(EXTENSION_URI, EXTENSION_ID)") > host.index("session.loadUri(CHATGPT_URL)"):
     raise SystemExit("ChatGPT navigation must not begin before built-in DNA extension registration")
