@@ -33,6 +33,8 @@ jobs:
         run: python3 tests/conversation-sqlite-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
       - name: Conversation DNA archive durability smoke
         run: python3 tests/conversation-dna-archive-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
+      - name: Cross-device DNA reconciliation contract smoke
+        run: python3 tests/cross-device-reconciliation-smoke.py
       - name: Android Kotlin contract smoke
         run: python3 tests/android-foundation-smoke.py
       - name: Android GeckoView runtime smoke
@@ -56,6 +58,8 @@ jobs:
           gradle-version: '9.5.0'
       - name: Build Kotlin Android APK with stable GeckoView
         run: gradle -p android :app:assembleDebug --stacktrace
+      - name: Cross-device DNA reconciliation contract smoke
+        run: python3 tests/cross-device-reconciliation-smoke.py
       - name: Android Kotlin contract smoke
         run: python3 tests/android-foundation-smoke.py
       - name: Android GeckoView runtime smoke
