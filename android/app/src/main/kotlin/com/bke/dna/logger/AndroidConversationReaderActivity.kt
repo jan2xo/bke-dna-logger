@@ -15,7 +15,8 @@ import java.util.concurrent.Executors
  *
  * Interactive reading must never materialize a whole large conversation into
  * one String/TextView. CLEAN pages come from SQLite message/revision rows; RAW
- * pages stream bounded windows from the current exact-evidence backend.
+ * pages stream bounded windows from the current exact-evidence backend. All
+ * database resolution, pager construction and page IO stay off the UI thread.
  */
 class AndroidConversationReaderActivity : Activity() {
     private lateinit var conversationNativeId: String
@@ -128,18 +129,43 @@ class AndroidConversationReaderActivity : Activity() {
         val request = ++loadGeneration
         ioExecutor.execute {
             val resolved = runCatching {
-                val resolvedLocation = AndroidUnifiedConversationLibrary(this).resolve(conversationNativeId)
-                val generation = AndroidWorkingDataManager(this).generation(resolvedLocation.generation.id)
-                ReaderResolution(resolvedLocation, generation)
+                val resolvedLocation = AndroidUnifiedConversationLibrary(this)
+                    .resolve(conversationNativeId)
+                val generation = AndroidWorkingDataManager(this)
+                    .generation(resolvedLocation.generation.id)
+                val clean = AndroidCleanConversationPager(
+                    generation = generation,
+                    conversationKey = resolvedLocation.conversationKey,
+                )
+                val raw = try {
+                    AndroidRawConversationPager(
+                        generation = generation,
+                        conversationKey = resolvedLocation.conversationKey,
+                        captureRoot = AndroidDnaPaths.capturesRoot(this),
+                    )
+                } catch (error: Throwable) {
+                    clean.close()
+                    throw error
+                }
+                ReaderResolution(resolvedLocation, generation, clean, raw)
             }
             runOnUiThread {
-                if (request != loadGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                if (request != loadGeneration || isFinishing || isDestroyed) {
+                    resolved.getOrNull()?.close()
+                    return@runOnUiThread
+                }
                 resolved.fold(
                     onSuccess = { resolution ->
+                        closePagers()
                         location = resolution.location
                         workingData = resolution.generation
+                        cleanPager = resolution.cleanPager
+                        rawPager = resolution.rawPager
+                        cleanOffset = 0
+                        cleanHistory.clear()
+                        rawCursor = rawPager?.firstCursor()
+                        rawHistory.clear()
                         titleLabel.text = location.displayTitle
-                        openPagers()
                         switchMode(ReaderMode.CLEAN, force = true)
                     },
                     onFailure = {
@@ -151,23 +177,6 @@ class AndroidConversationReaderActivity : Activity() {
         }
     }
 
-    private fun openPagers() {
-        closePagers()
-        cleanPager = AndroidCleanConversationPager(
-            generation = workingData,
-            conversationKey = location.conversationKey,
-        )
-        rawPager = AndroidRawConversationPager(
-            generation = workingData,
-            conversationKey = location.conversationKey,
-            captureRoot = AndroidDnaPaths.capturesRoot(this),
-        )
-        cleanOffset = 0
-        cleanHistory.clear()
-        rawCursor = rawPager?.firstCursor()
-        rawHistory.clear()
-    }
-
     private fun switchMode(newMode: ReaderMode, force: Boolean = false) {
         if (!::workingData.isInitialized) return
         if (!force && mode == newMode) return
@@ -176,7 +185,7 @@ class AndroidConversationReaderActivity : Activity() {
             ReaderMode.CLEAN -> {
                 cleanOffset = 0
                 cleanHistory.clear()
-                loadCleanPage(cleanOffset, pushHistory = false)
+                loadCleanPage(cleanOffset)
             }
             ReaderMode.RAW -> {
                 rawCursor = rawPager?.firstCursor()
@@ -189,7 +198,7 @@ class AndroidConversationReaderActivity : Activity() {
                     previousButton.isEnabled = false
                     nextButton.isEnabled = false
                 } else {
-                    loadRawPage(cursor, pushHistory = false)
+                    loadRawPage(cursor)
                 }
             }
         }
@@ -200,12 +209,12 @@ class AndroidConversationReaderActivity : Activity() {
             ReaderMode.CLEAN -> {
                 val next = nextButton.tag as? Int ?: return
                 cleanHistory.addLast(cleanOffset)
-                loadCleanPage(next, pushHistory = false)
+                loadCleanPage(next)
             }
             ReaderMode.RAW -> {
                 val next = nextButton.tag as? AndroidRawCursor ?: return
                 rawCursor?.let(rawHistory::addLast)
-                loadRawPage(next, pushHistory = false)
+                loadRawPage(next)
             }
         }
     }
@@ -214,18 +223,17 @@ class AndroidConversationReaderActivity : Activity() {
         when (mode) {
             ReaderMode.CLEAN -> {
                 val previous = cleanHistory.removeLastOrNull() ?: return
-                loadCleanPage(previous, pushHistory = false)
+                loadCleanPage(previous)
             }
             ReaderMode.RAW -> {
                 val previous = rawHistory.removeLastOrNull() ?: return
-                loadRawPage(previous, pushHistory = false)
+                loadRawPage(previous)
             }
         }
     }
 
-    private fun loadCleanPage(offset: Int, pushHistory: Boolean) {
+    private fun loadCleanPage(offset: Int) {
         val pager = cleanPager ?: return
-        if (pushHistory) cleanHistory.addLast(cleanOffset)
         val request = ++loadGeneration
         setLoading("CLEAN · JAN / RIGHT-HAND only · no tools")
         ioExecutor.execute {
@@ -256,9 +264,8 @@ class AndroidConversationReaderActivity : Activity() {
         }
     }
 
-    private fun loadRawPage(cursor: AndroidRawCursor, pushHistory: Boolean) {
+    private fun loadRawPage(cursor: AndroidRawCursor) {
         val pager = rawPager ?: return
-        if (pushHistory) rawCursor?.let(rawHistory::addLast)
         val request = ++loadGeneration
         setLoading("RAW · full captured evidence in context · bounded stream")
         ioExecutor.execute {
@@ -338,8 +345,15 @@ class AndroidConversationReaderActivity : Activity() {
 
     override fun onDestroy() {
         loadGeneration += 1
-        closePagers()
-        ioExecutor.shutdownNow()
+        val clean = cleanPager
+        val raw = rawPager
+        cleanPager = null
+        rawPager = null
+        ioExecutor.execute {
+            clean?.close()
+            raw?.close()
+        }
+        ioExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -348,7 +362,14 @@ class AndroidConversationReaderActivity : Activity() {
     private data class ReaderResolution(
         val location: AndroidUnifiedConversationLocation,
         val generation: AndroidWorkingDataGeneration,
-    )
+        val cleanPager: AndroidCleanConversationPager,
+        val rawPager: AndroidRawConversationPager,
+    ) {
+        fun close() {
+            cleanPager.close()
+            rawPager.close()
+        }
+    }
 
     companion object {
         const val EXTRA_CONVERSATION_NATIVE_ID = "conversationNativeId"
