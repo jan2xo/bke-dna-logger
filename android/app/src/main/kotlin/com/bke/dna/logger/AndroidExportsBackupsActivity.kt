@@ -107,6 +107,7 @@ class AndroidExportsBackupsActivity : Activity() {
 
         conversations.forEach { summary ->
             val descriptor = runCatching { human.describe(summary.conversationKey) }.getOrNull()
+            val attributedBytes = runCatching { human.conversationWorkingBytes(summary.conversationKey) }.getOrDefault(0L)
             val panel = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(0, 16, 0, 24)
@@ -119,23 +120,37 @@ class AndroidExportsBackupsActivity : Activity() {
                 text = buildString {
                     append(descriptor?.historicalDate?.toString() ?: "Historical date not exposed")
                     append(" · ${summary.nodeCount} nodes · ${summary.sourceCount} sources")
+                    append(" · ${formatBytes(attributedBytes)} evidence")
                     append(" · ${summary.coverageStatus}")
                     append(if (summary.dnaArchived) " · .dna verified" else " · not archived")
                 }
             })
 
-            val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            actions.addView(actionButton("Export .dna") {
+            panel.addView(actionButton("Read conversation") {
+                startActivity(
+                    Intent(this, AndroidConversationReaderActivity::class.java)
+                        .putExtra(AndroidConversationReaderActivity.EXTRA_CONVERSATION_KEY, summary.conversationKey),
+                )
+            })
+
+            val archiveAndClean = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            archiveAndClean.addView(actionButton("Export .dna") {
                 pendingConversationKey = summary.conversationKey
                 val fileBase = descriptor?.fileBase ?: summary.conversationKey
                 createDocument(REQUEST_EXPORT_DNA, "$fileBase.dna", "application/zip")
             })
-            actions.addView(actionButton("Export .md") {
+            archiveAndClean.addView(actionButton("Export CLEAN.md") {
                 pendingConversationKey = summary.conversationKey
                 val fileBase = descriptor?.fileBase ?: summary.conversationKey
-                createDocument(REQUEST_EXPORT_MD, "$fileBase.md", "text/markdown")
+                createDocument(REQUEST_EXPORT_CLEAN_MD, "$fileBase - CLEAN.md", "text/markdown")
             })
-            panel.addView(actions)
+            panel.addView(archiveAndClean)
+
+            panel.addView(actionButton("Export RAW.md") {
+                pendingConversationKey = summary.conversationKey
+                val fileBase = descriptor?.fileBase ?: summary.conversationKey
+                createDocument(REQUEST_EXPORT_RAW_MD, "$fileBase - RAW.md", "text/markdown")
+            })
             content.addView(panel)
         }
     }
@@ -154,10 +169,20 @@ class AndroidExportsBackupsActivity : Activity() {
                     }
                 }
             }
-            REQUEST_EXPORT_MD -> {
+            REQUEST_EXPORT_CLEAN_MD -> {
                 val conversationKey = pendingConversationKey ?: return
-                runWork("Markdown exported") {
-                    AndroidHumanExportService(this).exportMarkdownToUri(
+                runWork("CLEAN Markdown exported") {
+                    AndroidHumanExportService(this).exportCleanMarkdownToUri(
+                        conversationKey,
+                        contentResolver,
+                        uri,
+                    )
+                }
+            }
+            REQUEST_EXPORT_RAW_MD -> {
+                val conversationKey = pendingConversationKey ?: return
+                runWork("RAW Markdown exported") {
+                    AndroidHumanExportService(this).exportRawMarkdownToUri(
                         conversationKey,
                         contentResolver,
                         uri,
@@ -237,15 +262,19 @@ class AndroidExportsBackupsActivity : Activity() {
         }
 
     private fun formatBytes(bytes: Long): String {
-        val gib = bytes.toDouble() / DnaReconciliationContract.STORAGE_WARNING_BYTES.toDouble()
-        return if (gib >= 0.1) String.format(Locale.US, "%.2f GiB", gib)
-        else String.format(Locale.US, "%.1f MiB", bytes / 1024.0 / 1024.0)
+        if (bytes < 1024L) return "$bytes B"
+        val kib = bytes / 1024.0
+        if (kib < 1024.0) return String.format(Locale.US, "%.1f KiB", kib)
+        val mib = kib / 1024.0
+        if (mib < 1024.0) return String.format(Locale.US, "%.1f MiB", mib)
+        return String.format(Locale.US, "%.2f GiB", mib / 1024.0)
     }
 
     companion object {
         private const val REQUEST_EXPORT_DNA = 1101
-        private const val REQUEST_EXPORT_MD = 1102
+        private const val REQUEST_EXPORT_CLEAN_MD = 1102
         private const val REQUEST_BACKUP = 1103
         private const val REQUEST_IMPORT = 1104
+        private const val REQUEST_EXPORT_RAW_MD = 1105
     }
 }
