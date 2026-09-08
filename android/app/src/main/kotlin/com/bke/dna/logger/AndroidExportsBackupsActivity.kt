@@ -1,7 +1,9 @@
 package com.bke.dna.logger
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -28,6 +30,7 @@ class AndroidExportsBackupsActivity : Activity() {
     private var pendingWorkingDataId: String = AndroidWorkingDataManager.LATEST_ID
     private var pendingConversationKey: String? = null
     @Volatile private var operationInProgress = false
+    private val purgeService by lazy { AndroidPurgeService(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -117,13 +120,16 @@ class AndroidExportsBackupsActivity : Activity() {
 
         if (inspected.isLatest) {
             content.addView(actionButton("Save & Start New Working Data") {
-                runWork("Working Data saved; fresh Latest is now active") {
+                runWork(
+                    successMessage = "Working Data saved; fresh Latest is now active",
+                    storageMutation = true,
+                ) {
                     AndroidWorkingDataManager(this).rotateLatest()
                     inspectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
                 }
             })
             content.addView(TextView(this).apply {
-                text = "Use this when Latest becomes heavy or laggy. SQLite/state are timestamped and verified; shared SHA-addressed raw evidence is not duplicated."
+                text = "Use this when Latest becomes heavy or laggy. SQLite/state are timestamped and verified; shared SHA-addressed raw evidence is not duplicated. ChatGPT's GeckoSession stays alive while the capture writer is briefly paused."
                 textSize = 13f
                 setPadding(0, 4, 0, 10)
             })
@@ -160,11 +166,17 @@ class AndroidExportsBackupsActivity : Activity() {
                 append("Total local Working Data: ${formatBytes(totalWorkingBytes)}")
                 append("\nInspected generation SQLite/state: ${formatBytes(inspected.snapshotBytes)}")
                 append("\nWorking Data generations: ${generations.size}")
-                append("\nNotify threshold: 1 GiB — no hard limit; capture continues.")
-                if (warning) append("\n⚠ Consider verified .dna archives and owner-directed cleanup.")
+                append("\nNotify threshold: 1 GiB — capture continues until Jan explicitly purges verified evidence.")
+                if (warning) append("\n⚠ Storage is above the warning threshold.")
             }
             textSize = 14f
-            setPadding(0, 14, 0, 18)
+            setPadding(0, 14, 0, 10)
+        })
+        content.addView(dangerButton("PURGE ALL VERIFIED RAW") { confirmPurgeAll() })
+        content.addView(TextView(this).apply {
+            text = "Red purge deletes only local SHA-addressed raw/normalized/classification/observation files already covered by verified .dna. Shared sources used by another conversation stay. SQLite and logical reader state stay. Exact confirmation: jan2x"
+            textSize = 12f
+            setPadding(0, 4, 0, 18)
         })
 
         content.addView(TextView(this).apply {
@@ -216,6 +228,7 @@ class AndroidExportsBackupsActivity : Activity() {
         }
 
         conversations.forEach { summary ->
+            val locallyPurged = purgeService.isLocallyPurged(summary.conversationKey)
             val panel = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(0, 16, 0, 24)
@@ -231,6 +244,7 @@ class AndroidExportsBackupsActivity : Activity() {
                     append(" · ${summary.generationCount} Working Data")
                     append(" · ${summary.coverageStatus}")
                     if (summary.dnaArchived) append(" · .dna verified")
+                    if (locallyPurged) append(" · LOCAL RAW PURGED")
                 }
                 textSize = 13f
             })
@@ -254,7 +268,7 @@ class AndroidExportsBackupsActivity : Activity() {
             })
             panel.addView(cleanAndRaw)
 
-            if (summary.hasLatest) {
+            if (summary.hasLatest && !locallyPurged) {
                 panel.addView(actionButton("Export .dna") {
                     pendingConversationKey = summary.conversationKey
                     pendingWorkingDataId = AndroidWorkingDataManager.LATEST_ID
@@ -263,6 +277,15 @@ class AndroidExportsBackupsActivity : Activity() {
                         "${safeFileBase(summary.displayTitle)}.dna",
                         "application/zip",
                     )
+                })
+            }
+            if (summary.hasLatest) {
+                panel.addView(dangerButton("PURGE VERIFIED RAW") { preparePurge(summary) })
+            }
+            if (locallyPurged) {
+                panel.addView(TextView(this).apply {
+                    text = "Heavy local evidence was purged after verified .dna. Import that .dna to restore RAW evidence before re-archiving. CLEAN/logical state remains locally readable."
+                    textSize = 12f
                 })
             }
             content.addView(panel)
@@ -275,6 +298,97 @@ class AndroidExportsBackupsActivity : Activity() {
                 refreshUi()
             })
         }
+    }
+
+    private fun preparePurge(summary: AndroidUnifiedConversationSummary) {
+        if (operationInProgress) {
+            showOperationInProgress()
+            return
+        }
+        operationInProgress = true
+        Thread {
+            val plan = runCatching { purgeService.plan(summary.conversationNativeId) }
+            runOnUiThread {
+                operationInProgress = false
+                plan.fold(
+                    onSuccess = { ready ->
+                        when {
+                            ready.blockedReason != null -> Toast.makeText(
+                                this,
+                                "PURGE BLOCKED: ${ready.blockedReason}",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                            ready.bytesReclaimable <= 0L -> Toast.makeText(
+                                this,
+                                "Nothing purgeable remains for this conversation.",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                            else -> showPurgeDialog(summary, ready)
+                        }
+                    },
+                    onFailure = {
+                        Toast.makeText(this, "Unable to prepare purge: ${it.message}", Toast.LENGTH_LONG).show()
+                    },
+                )
+            }
+        }.start()
+    }
+
+    private fun showPurgeDialog(summary: AndroidUnifiedConversationSummary, plan: AndroidPurgePlan) {
+        showJan2xConfirmation(
+            title = "DELETE VERIFIED RAW?",
+            message = buildString {
+                append(summary.displayTitle)
+                append("\n\nReclaim approximately ${formatBytes(plan.bytesReclaimable)}.")
+                append("\n${plan.purgeableSourceSha256s.size} exclusive source payloads are eligible.")
+                append("\n\nVerified .dna is the durability gate. Shared evidence remains untouched.")
+            },
+        ) {
+            runResultWork(storageMutation = true) {
+                val result = purgeService.purge(summary.conversationNativeId, AndroidPurgeService.CONFIRMATION_TEXT)
+                "Purged ${formatBytes(result.bytesReclaimed)} from ${result.sourcesPurged} verified sources"
+            }
+        }
+    }
+
+    private fun confirmPurgeAll() {
+        showJan2xConfirmation(
+            title = "PURGE ALL VERIFIED RAW?",
+            message = "Delete every currently purgeable local raw source already protected by verified .dna. Unarchived evidence and shared sources are never deleted.",
+        ) {
+            runResultWork(storageMutation = true) {
+                val result = purgeService.purgeAllVerified(AndroidPurgeService.CONFIRMATION_TEXT)
+                "Purged ${formatBytes(result.bytesReclaimed)} across ${result.conversationsPurged} conversations"
+            }
+        }
+    }
+
+    private fun showJan2xConfirmation(title: String, message: String, confirmed: () -> Unit) {
+        val input = EditText(this).apply {
+            hint = "Type jan2x"
+            setSingleLine(true)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage("$message\n\nType exact confirmation: jan2x")
+            .setView(input)
+            .setNegativeButton("CANCEL", null)
+            .setPositiveButton("DELETE", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).apply {
+                setTextColor(Color.RED)
+                setOnClickListener {
+                    if (input.text.toString() != AndroidPurgeService.CONFIRMATION_TEXT) {
+                        input.error = "Type exactly jan2x"
+                        return@setOnClickListener
+                    }
+                    dialog.dismiss()
+                    confirmed()
+                }
+            }
+        }
+        dialog.show()
     }
 
     private fun prepareHumanExport(summary: AndroidUnifiedConversationSummary, clean: Boolean) {
@@ -302,7 +416,10 @@ class AndroidExportsBackupsActivity : Activity() {
                 require(pendingWorkingDataId == AndroidWorkingDataManager.LATEST_ID) {
                     "Historical Working Data cannot mutate Latest .dna durability state"
                 }
-                runWork("Conversation .dna exported and verified") {
+                runWork(
+                    successMessage = "Conversation .dna exported and verified",
+                    storageMutation = true,
+                ) {
                     AndroidConversationDnaArchiveService(this).use { service ->
                         service.exportToUri(conversationKey, contentResolver, uri)
                     }
@@ -313,7 +430,10 @@ class AndroidExportsBackupsActivity : Activity() {
             REQUEST_BACKUP -> runWork("Working Data backup exported") {
                 AndroidWorkingBackupService(this).backupToUri(contentResolver, uri)
             }
-            REQUEST_IMPORT -> runWork("Import reconciled into Latest Working Data") {
+            REQUEST_IMPORT -> runWork(
+                successMessage = "Import reconciled into Latest Working Data",
+                storageMutation = true,
+            ) {
                 importSelected(uri)
             }
         }
@@ -371,20 +491,37 @@ class AndroidExportsBackupsActivity : Activity() {
         )
     }
 
-    private fun runWork(successMessage: String, work: () -> Unit) {
+    private fun runWork(
+        successMessage: String,
+        storageMutation: Boolean = false,
+        work: () -> Unit,
+    ) {
+        runResultWork(storageMutation) {
+            work()
+            successMessage
+        }
+    }
+
+    private fun runResultWork(storageMutation: Boolean, work: () -> String) {
         if (operationInProgress) {
             showOperationInProgress()
             return
         }
         operationInProgress = true
         Thread {
-            val result = runCatching(work)
+            val result = runCatching {
+                if (storageMutation) {
+                    AndroidCaptureRuntime.withStorageMutationPause(this) { work() }
+                } else {
+                    work()
+                }
+            }
             runOnUiThread {
                 operationInProgress = false
                 Toast.makeText(
                     this,
                     result.fold(
-                        onSuccess = { successMessage },
+                        onSuccess = { it },
                         onFailure = { "BKE DNA operation failed: ${it.message}" },
                     ),
                     Toast.LENGTH_LONG,
@@ -402,6 +539,12 @@ class AndroidExportsBackupsActivity : Activity() {
             setOnClickListener {
                 if (operationInProgress) showOperationInProgress() else action()
             }
+        }
+
+    private fun dangerButton(label: String, action: () -> Unit): Button =
+        actionButton(label, action).apply {
+            setBackgroundColor(Color.rgb(183, 28, 28))
+            setTextColor(Color.WHITE)
         }
 
     private fun showOperationInProgress() {
