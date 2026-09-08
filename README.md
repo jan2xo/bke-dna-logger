@@ -15,6 +15,13 @@ BKE DNA Logger is a local-first conversation archaeology system.
 - Only successful durable `.dna` persistence may eventually make live records eligible for cleanup.
 - Authentication secrets, cookies, and authorization headers are outside the capture scope.
 
+## Platform ownership
+
+- Windows and macOS are implemented in .NET.
+- Android is implemented natively in Kotlin.
+- Cross-platform compatibility is defined by the DNA wire/evidence/archive contracts, identifiers, hashing rules, and archaeology semantics — not by forcing every platform to share one implementation language.
+- GeckoView is consumed directly from Kotlin on Android. BKE does not generate a managed C# binding for the full Mozilla API surface.
+
 ## First gate: POC-0
 
 Manual ChatGPT browsing -> MAIN-world response interception -> extension bridge -> Chrome Native Messaging -> .NET 10 host -> exact captured application body on disk + metadata + SHA-256.

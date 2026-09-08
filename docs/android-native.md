@@ -2,45 +2,62 @@
 
 Android is a first-class capture runtime, not a secondary export target.
 
-## Locked direction
+## Locked platform ownership
 
 ```text
-BKE DNA Android app
+Windows / macOS                         Android
+      .NET                               Kotlin
+       |                                   |
+ browser/native adapters                 GeckoView
+       |                                   |
+       +----------- DNA CONTRACT ----------+
+                   |
+          evidence / graph / SQLite
+                   |
+             verified .dna
+```
+
+Windows and macOS remain .NET implementations. Android is a native Kotlin implementation. Cross-platform compatibility is defined by the DNA wire protocol, evidence semantics, identifiers, hashing rules, graph semantics, SQLite meaning, and `.dna` formats — not by requiring shared source code or a shared runtime.
+
+GeckoView is therefore consumed directly from Kotlin. The project deliberately does not generate a managed C# binding for Mozilla's full Java/Kotlin API surface.
+
+## Android runtime direction
+
+```text
+BKE DNA Android app (Kotlin)
   -> GeckoView
   -> bundled privileged WebExtension
   -> shared MAIN-world response interceptor
   -> GeckoView native messaging
-  -> Android native ingress
-  -> BKE DNA core/storage pipeline
+  -> Kotlin native ingress
+  -> Kotlin DNA evidence/storage implementation
   -> SQLite
   -> verified .dna
 ```
 
-The Android and desktop runtimes must produce the same wire messages, normalized graph semantics, coverage semantics, SQLite meaning, and `.dna` formats. Platform code is limited to browser lifecycle, message transport, and platform storage paths.
-
-## Current foundation gate
+## Current Kotlin foundation gate
 
 This stack establishes:
 
-- `BKE.Dna.Logger.Core` as the shared wire-protocol owner.
-- The desktop native host consuming the shared protocol.
-- A `net10.0-android` application shell with private app-local DNA storage.
-- A GeckoView-compatible built-in WebExtension manifest.
-- The desktop `extension/main-interceptor.js` linked into the Android APK as an asset, so the browser-response capture logic is not forked.
-- An Android WebExtension bridge that converts captured `ArrayBuffer` bodies into the same `capture_start` / ordered `capture_chunk` / `capture_end` protocol used by desktop.
-- Android DOM witness messages using the same `dom_witness` wire type.
-- An `AndroidWireIngress` seam that validates incoming messages through `BKE.Dna.Logger.Core` before the later GeckoView delegate hands them to the storage pipeline.
+- a native Gradle/Kotlin Android application shell;
+- the exact stable Mozilla artifact `org.mozilla.geckoview:geckoview-arm64-v8a:154.0.20260824154132` consumed directly from Kotlin;
+- compile-time references to `GeckoRuntime`, `GeckoSession`, `GeckoView`, and `WebExtension` without a C# binding generator;
+- private app-local DNA storage under `FilesDir/dna/captures`;
+- a Kotlin wire ingress that accepts the same `capture_start`, `capture_chunk`, `capture_end`, and `dom_witness` message types as desktop;
+- the existing GeckoView-compatible built-in WebExtension assets;
+- the canonical desktop `extension/main-interceptor.js` copied into the Android APK at build time rather than forked;
+- CI that builds the Android APK with the pinned Gradle/AGP/Kotlin toolchain.
 
-## GeckoView gate immediately after this one
+## GeckoView runtime gate immediately after this one
 
-The next stacked gate must bind a verified published GeckoView artifact and implement:
+The next stacked gate must implement:
 
 1. one `GeckoRuntime` per Android process;
 2. a `GeckoSession` hosted by the launcher activity;
 3. `ensureBuiltIn("resource://android/assets/dna-extension/", "bke-dna-logger@jl-bke.com")`;
 4. a message delegate registered for native app id `bke.dna.logger`;
 5. sender/session validation before accepting extension messages;
-6. transfer of the JSON message into `AndroidWireIngress` and then the shared capture/storage pipeline;
+6. transfer of the JSON message into the Kotlin ingress and then the Android evidence/storage pipeline;
 7. ordinary manual ChatGPT browsing inside GeckoView;
 8. device proof that a visible conversation phrase exists in captured raw response evidence.
 

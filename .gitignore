@@ -1,5 +1,8 @@
 **/bin/
 **/obj/
+**/build/
+.gradle/
+local.properties
 .vs/
 .idea/
 .DS_Store

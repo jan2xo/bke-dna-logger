@@ -33,7 +33,7 @@ jobs:
         run: python3 tests/conversation-sqlite-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
       - name: Conversation DNA archive durability smoke
         run: python3 tests/conversation-dna-archive-smoke.py src/BKE.Dna.Logger.Host/bin/Release/net10.0/BKE.Dna.Logger.Host.dll
-      - name: Android extension and shared protocol contract smoke
+      - name: Android Kotlin contract smoke
         run: python3 tests/android-foundation-smoke.py
 
   android:
@@ -44,14 +44,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: actions/setup-dotnet@v4
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK 36
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - uses: gradle/actions/setup-gradle@v4
         with:
-          dotnet-version: '10.0.x'
-      - name: Install .NET Android workload
-        run: dotnet workload install android --skip-manifest-update
-      - name: Build stable GeckoView binding
-        run: dotnet build src/BKE.Dna.Logger.GeckoView.Bindings/BKE.Dna.Logger.GeckoView.Bindings.csproj --configuration Release -r android-arm64
-      - name: Build Android APK foundation
-        run: dotnet build src/BKE.Dna.Logger.Platform.Android/BKE.Dna.Logger.Platform.Android.csproj --configuration Release -r android-arm64
-      - name: Android extension and shared protocol contract smoke
+          gradle-version: '9.3.1'
+      - name: Build Kotlin Android APK with stable GeckoView
+        run: gradle -p android :app:assembleDebug --stacktrace
+      - name: Android Kotlin contract smoke
         run: python3 tests/android-foundation-smoke.py
