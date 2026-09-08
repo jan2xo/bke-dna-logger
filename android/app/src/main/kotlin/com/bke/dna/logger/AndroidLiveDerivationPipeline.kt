@@ -20,7 +20,7 @@ class AndroidLiveDerivationPipeline(context: Context) {
     private val classificationsDirectory = File(captureRoot, "classifications").also {
         check(it.exists() || it.mkdirs()) { "Unable to create Android classification directory" }
     }
-    private val normalizer = AndroidGraphNormalizationEngine(appContext)
+    private val normalizer = AndroidConversationNormalizationDispatcher(appContext)
 
     fun processCompletedCapture(
         bodyFile: File,
