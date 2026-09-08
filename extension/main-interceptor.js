@@ -6,6 +6,8 @@
     "interceptor_ready",
     "fetch_seen",
     "capture_candidate",
+    "capture_body_read",
+    "capture_packet_posted",
     "interceptor_load_error"
   ]);
   const emittedDiagnostics = new Set();
@@ -64,6 +66,8 @@
 
       const clone = response.clone();
       const body = await clone.arrayBuffer();
+      emitDiagnostic("capture_body_read");
+
       const captureId = crypto.randomUUID();
 
       window.postMessage({
@@ -83,6 +87,8 @@
         },
         body
       }, "*", [body]);
+
+      emitDiagnostic("capture_packet_posted");
     }
 
     window.fetch = async function bkeDnaFetch(...args) {
