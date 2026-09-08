@@ -8,6 +8,7 @@ import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 
 /**
@@ -191,6 +192,12 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
     companion object {
         private val DERIVATION_EXECUTOR = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "bke-dna-derivation").apply { isDaemon = true }
+        }
+
+        fun awaitBackgroundDerivationIdle() {
+            val barrier = CountDownLatch(1)
+            DERIVATION_EXECUTOR.execute { barrier.countDown() }
+            barrier.await()
         }
     }
 }
