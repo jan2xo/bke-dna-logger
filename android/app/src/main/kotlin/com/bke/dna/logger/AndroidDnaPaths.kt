@@ -10,4 +10,11 @@ object AndroidDnaPaths {
                 "Unable to create app-private DNA capture root"
             }
         }
+
+    fun workingDataRoot(context: Context): File =
+        File(context.filesDir, "dna/working-data").also { root ->
+            check(root.exists() || root.mkdirs()) {
+                "Unable to create app-private Working Data root"
+            }
+        }
 }
