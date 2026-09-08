@@ -119,8 +119,9 @@ class AndroidLiveDerivationPipeline(context: Context) {
                 "classification_other_low_score"
         }
         Log.d(TAG, "BKE DNA derivation: $event")
-        if (event == "classification_other_low_score") {
-            logLowScoreClassifierShape(outcome)
+        when {
+            event == "classification_other_low_score" -> logLowScoreClassifierShape(outcome)
+            outcome.kind == CANDIDATE_KIND -> logCandidateClassifierShape(outcome)
         }
     }
 
@@ -131,7 +132,14 @@ class AndroidLiveDerivationPipeline(context: Context) {
             in 20..27 -> Log.d(TAG, "BKE DNA derivation: classifier_score_20_27")
             else -> Log.d(TAG, "BKE DNA derivation: classifier_score_unexpected")
         }
+        logClassifierSignals(outcome)
+    }
 
+    private fun logCandidateClassifierShape(outcome: ClassificationOutcome) {
+        logClassifierSignals(outcome)
+    }
+
+    private fun logClassifierSignals(outcome: ClassificationOutcome) {
         if ("mapping" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_mapping")
         if ("messages" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_messages")
         if ("message" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_message")
