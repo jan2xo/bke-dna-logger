@@ -14,7 +14,7 @@ import org.json.JSONArray
  * durability verification.
  */
 class AndroidCaptureIndex(context: Context) :
-    SQLiteOpenHelper(context, "dna/live.db", null, DATABASE_VERSION) {
+    SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
     override fun onCreate(db: SQLiteDatabase) {
         createCaptureSchema(db)
@@ -23,6 +23,7 @@ class AndroidCaptureIndex(context: Context) :
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createConversationSchema(db)
+        if (oldVersion == 2 && newVersion >= 3) upgradeDurabilitySchemaV3(db)
     }
 
     fun record(observation: JSONObjectObservation) {
@@ -41,6 +42,9 @@ class AndroidCaptureIndex(context: Context) :
             put("fidelity", observation.fidelity)
             put("stored_at", observation.storedAt)
             put("dna_archived", 0)
+            putNull("dna_archive_id")
+            putNull("dna_archive_sha256")
+            putNull("archived_at")
         }
         writableDatabase.insertOrThrow("captures", null, values)
     }
@@ -66,6 +70,9 @@ class AndroidCaptureIndex(context: Context) :
                 put("node_count", conversation.nodes.size)
                 // Any new/reconciled working state requires a fresh manual archive.
                 put("dna_archived", 0)
+                putNull("dna_archive_id")
+                putNull("dna_archive_sha256")
+                putNull("archived_at")
             }
             check(
                 db.insertWithOnConflict(
@@ -84,6 +91,10 @@ class AndroidCaptureIndex(context: Context) :
                     put("current_node_native_id", source.currentNodeNativeId)
                     put("coverage_status", source.coverageStatus)
                     put("coverage_basis", source.coverageBasis)
+                    put("dna_archived", 0)
+                    putNull("dna_archive_id")
+                    putNull("dna_archive_sha256")
+                    putNull("archived_at")
                 }
                 db.insertOrThrow("conversation_source", null, values)
             }
@@ -146,6 +157,106 @@ class AndroidCaptureIndex(context: Context) :
         }
     }
 
+    /**
+     * Durability gate: called only after a manual .dna destination was written,
+     * re-read, and verified. Imported evidence can have no local capture row,
+     * so conversation_source is the authoritative per-source durability set.
+     */
+    fun recordVerifiedConversationArchive(
+        conversationKey: String,
+        sourceSha256s: List<String>,
+        archiveId: String,
+        archiveSha256: String,
+        archivedAt: String,
+    ) {
+        require(sourceSha256s.isNotEmpty())
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            var sourceRows = 0
+            sourceSha256s.distinct().forEach { sourceSha256 ->
+                val values = ContentValues().apply {
+                    put("dna_archived", 1)
+                    put("dna_archive_id", archiveId)
+                    put("dna_archive_sha256", archiveSha256)
+                    put("archived_at", archivedAt)
+                }
+                sourceRows += db.update(
+                    "conversation_source",
+                    values,
+                    "conversation_key = ? AND source_sha256 = ?",
+                    arrayOf(conversationKey, sourceSha256),
+                )
+                // Local captures may not exist for evidence imported from another device.
+                db.update(
+                    "captures",
+                    values,
+                    "sha256 = ?",
+                    arrayOf(sourceSha256),
+                )
+            }
+            require(sourceRows == sourceSha256s.distinct().size) {
+                "Verified conversation .dna did not cover every logical source row"
+            }
+
+            val conversationValues = ContentValues().apply {
+                put("dna_archived", 1)
+                put("dna_archive_id", archiveId)
+                put("dna_archive_sha256", archiveSha256)
+                put("archived_at", archivedAt)
+            }
+            require(
+                db.update(
+                    "logical_conversation",
+                    conversationValues,
+                    "conversation_key = ?",
+                    arrayOf(conversationKey),
+                ) == 1,
+            ) { "Verified conversation .dna could not update logical durability state" }
+
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun listLogicalConversations(): List<AndroidConversationSummary> {
+        val cursor = readableDatabase.query(
+            "logical_conversation",
+            arrayOf(
+                "conversation_key",
+                "conversation_native_id",
+                "state_observed_through",
+                "coverage_status",
+                "source_count",
+                "node_count",
+                "dna_archived",
+                "archived_at",
+            ),
+            null,
+            null,
+            null,
+            null,
+            "state_observed_through DESC, conversation_key ASC",
+        )
+        cursor.use {
+            val result = mutableListOf<AndroidConversationSummary>()
+            while (it.moveToNext()) {
+                result += AndroidConversationSummary(
+                    conversationKey = it.getString(0),
+                    conversationNativeId = it.getString(1),
+                    stateObservedThrough = it.getString(2),
+                    coverageStatus = it.getString(3),
+                    sourceCount = it.getInt(4),
+                    nodeCount = it.getInt(5),
+                    dnaArchived = it.getInt(6) != 0,
+                    archivedAt = if (it.isNull(7)) null else it.getString(7),
+                )
+            }
+            return result
+        }
+    }
+
     private fun deleteConversationChildren(db: SQLiteDatabase, conversationKey: String) {
         listOf(
             "logical_message_revision_source",
@@ -175,7 +286,10 @@ class AndroidCaptureIndex(context: Context) :
                 captured_at TEXT,
                 fidelity TEXT,
                 stored_at TEXT NOT NULL,
-                dna_archived INTEGER NOT NULL DEFAULT 0
+                dna_archived INTEGER NOT NULL DEFAULT 0,
+                dna_archive_id TEXT,
+                dna_archive_sha256 TEXT,
+                archived_at TEXT
             )
             """.trimIndent(),
         )
@@ -195,7 +309,10 @@ class AndroidCaptureIndex(context: Context) :
                 state_path TEXT NOT NULL,
                 source_count INTEGER NOT NULL,
                 node_count INTEGER NOT NULL,
-                dna_archived INTEGER NOT NULL DEFAULT 0
+                dna_archived INTEGER NOT NULL DEFAULT 0,
+                dna_archive_id TEXT,
+                dna_archive_sha256 TEXT,
+                archived_at TEXT
             )
             """.trimIndent(),
         )
@@ -208,6 +325,10 @@ class AndroidCaptureIndex(context: Context) :
                 current_node_native_id TEXT,
                 coverage_status TEXT NOT NULL,
                 coverage_basis TEXT NOT NULL,
+                dna_archived INTEGER NOT NULL DEFAULT 0,
+                dna_archive_id TEXT,
+                dna_archive_sha256 TEXT,
+                archived_at TEXT,
                 PRIMARY KEY (conversation_key, source_sha256)
             )
             """.trimIndent(),
@@ -269,10 +390,37 @@ class AndroidCaptureIndex(context: Context) :
         )
     }
 
+    private fun upgradeDurabilitySchemaV3(db: SQLiteDatabase) {
+        listOf(
+            "ALTER TABLE captures ADD COLUMN dna_archive_id TEXT",
+            "ALTER TABLE captures ADD COLUMN dna_archive_sha256 TEXT",
+            "ALTER TABLE captures ADD COLUMN archived_at TEXT",
+            "ALTER TABLE logical_conversation ADD COLUMN dna_archive_id TEXT",
+            "ALTER TABLE logical_conversation ADD COLUMN dna_archive_sha256 TEXT",
+            "ALTER TABLE logical_conversation ADD COLUMN archived_at TEXT",
+            "ALTER TABLE conversation_source ADD COLUMN dna_archived INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE conversation_source ADD COLUMN dna_archive_id TEXT",
+            "ALTER TABLE conversation_source ADD COLUMN dna_archive_sha256 TEXT",
+            "ALTER TABLE conversation_source ADD COLUMN archived_at TEXT",
+        ).forEach(db::execSQL)
+    }
+
     companion object {
-        private const val DATABASE_VERSION = 2
+        const val DATABASE_NAME = "bke-dna-live.db"
+        private const val DATABASE_VERSION = 3
     }
 }
+
+data class AndroidConversationSummary(
+    val conversationKey: String,
+    val conversationNativeId: String,
+    val stateObservedThrough: String,
+    val coverageStatus: String,
+    val sourceCount: Int,
+    val nodeCount: Int,
+    val dnaArchived: Boolean,
+    val archivedAt: String?,
+)
 
 data class JSONObjectObservation(
     val captureId: String,

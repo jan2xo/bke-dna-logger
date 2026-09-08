@@ -32,7 +32,7 @@ for token in aggregation_tokens:
     assert token in aggregation, token
 
 schema_tokens = [
-    "DATABASE_VERSION = 2",
+    "DATABASE_VERSION = 3",
     "logical_conversation",
     "conversation_source",
     "logical_message_node",
