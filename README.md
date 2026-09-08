@@ -2,37 +2,135 @@
 
 BKE DNA Logger is a local-first conversation archaeology system.
 
-## Locked architecture
+## Core evidence rules
 
 - Ordinary manual ChatGPT browsing is the trigger; Playwright is not the primary capture design.
 - Browser application response payloads are primary evidence.
 - DOM inspection is verification/reconciliation only.
-- Raw captures are preserved before parsing and are never silently replaced by normalized data.
+- RAW evidence is never silently replaced by normalized data.
+- RAW means the captured conversation evidence in context, including user/assistant messages, tool calls/results and unknown application fields that were actually present in the captured payload.
+- There is no separate owner-facing TOOLS view. Tool evidence belongs inside RAW because tools without conversation context are not useful archaeology.
+- CLEAN is a derived human view containing only actual `JAN` user turns and `RIGHT-HAND` assistant turns. Tools, tool results, system/developer messages, diagnostics, IDs and archaeology metadata are excluded from CLEAN.
 - Native conversation/message identifiers and graph relationships are preserved when exposed.
-- Raw captures are content-addressed with SHA-256 for deduplication.
-- SQLite is local **Working Data**: Latest is the only live/writable generation; timestamped older generations are read-only recovery snapshots.
-- Saved Working Data generations keep their SQLite projection plus logical conversation-state files and reuse the shared immutable SHA-addressed evidence pool instead of duplicating raw bodies.
-- All Working Data SQLite generations feed one unified read-only conversation library. The library deduplicates by native conversation identity, so the same conversation may exist in several generations without appearing several times to the owner.
-- The unified library reads only lightweight SQLite summary metadata for listing/search. Full logical state, RAW payloads and human derivatives are loaded only after the owner opens or exports a specific conversation.
-- Conversation search operates on indexed lightweight metadata such as display title/native conversation identity; it does not scan every RAW conversation body.
-- `.dna` is the self-contained durable archive format and remains the only durability gate for destructive local cleanup eligibility.
-- CLEAN conversation export contains only actual `JAN` user turns and `RIGHT-HAND` assistant turns; tools, tool results, system/developer messages, diagnostics, IDs and archaeology metadata are excluded.
-- RAW conversation export preserves the unfiltered captured conversation payload sources and capture observations represented by that logical conversation.
-- Notion may be a searchable mirror, but Notion sync never makes SQLite data eligible for deletion.
-- Authentication secrets, cookies, and authorization headers are outside the capture scope.
+- Authentication secrets, cookies, authorization headers, request-header collections and response-header collections are outside the capture scope.
 
-## Android Working Data
+## Accepted target architecture: SQLite = DNA
 
-Android stores capture evidence and Working Data only in app-private storage.
+The target Android architecture is one self-contained Working Data SQLite database per generation.
 
-- `Latest — Active` is always the default and the only generation that receives live capture writes.
-- `Save & Start New Working Data` checkpoints and verifies the active SQLite, saves it under a timestamped generation, snapshots the indexed logical conversation-state files, starts a fresh Latest SQLite, then live capture resumes with a fresh native ingress.
-- Older Working Data generations remain read-only. Their raw bodies are not duplicated; they reference the same shared immutable SHA-addressed evidence pool.
-- The Working Data selector is administrative/inspection-only. It never filters the conversation library: conversations from Latest and every saved SQLite are shown together through one deduplicated reader.
-- If a conversation is captured again in a later Working Data generation, the new SQLite may contain another projection/reference, but the unified library collapses those copies to one visible conversation by `conversationNativeId`.
-- The conversation list is paged (`LOAD MORE`) and search is explicit. Opening a conversation is the trigger that resolves its preferred Working Data generation and loads its full CLEAN/RAW evidence.
-- Historical selection does not silently mutate Latest `.dna` durability state.
-- The 1 GiB threshold is notification-only; there is no automatic purge or hard storage limit.
+```text
+GeckoView
+   ↓
+streamed capture
+   ↓
+working.sqlite
+├── exact RAW capture chunks / source identity
+├── capture observations / metadata
+├── processing queue
+├── processing checkpoints
+├── conversations
+├── messages / revisions / provenance
+├── titles / searchable metadata
+└── indexes
+   ↓
+CLEAN / RAW reader and exports are generated on request
+```
+
+The important rule is:
+
+> BKE DNA Logger captures into SQLite, processes from SQLite, recovers processing from SQLite, reads from SQLite, searches SQLite, backs up SQLite, and may later package SQLite into `.dna`.
+
+Consequences of this decision:
+
+- Exact RAW evidence remains non-negotiable and must be reconstructable byte-for-byte.
+- SQLite is the live source of truth for Working Data.
+- Long-lived loose `normalized/*.json`, `classifications/*.json`, giant conversation-state JSON, duplicate observation JSON and permanent `.body` evidence files are transitional implementation details, not the target storage model.
+- Temporary capture/processing files may exist only as crash-safe scratch. Once the equivalent RAW evidence and required metadata are durably committed to SQLite and verified, the temporary copy should be removed.
+- Normalized/interpreted rows are indexes/projections over RAW evidence inside the same database; they do not replace RAW.
+- CLEAN is not pre-generated and stored forever. It is queried/paged from SQLite when the owner presses `READ CLEAN` or exports CLEAN.
+- RAW is not re-rendered into a giant in-memory string. It is streamed/paged from the RAW evidence stored in SQLite when the owner presses `READ RAW` or exports RAW.
+- `.dna` is deferred as a future portable packaging/archive/export route. It is not required for the current Working Data source-of-truth model.
+
+## Processing model: queue + breathing, not a worker farm
+
+Processing must never make GeckoView browsing feel blocked.
+
+- Capture has priority over semantic processing.
+- Completed captures enter a durable SQLite processing queue.
+- Processing is serial/cooperative by default rather than a multi-worker CPU/RAM race.
+- The processor performs a bounded unit of work, commits a checkpoint, yields, rests, then resumes.
+- If capture becomes active, semantic processing yields promptly and continues afterward.
+- Processing is always enabled; there is no `Capture Only` mode because an indefinitely growing unprocessed backlog is not a healthy steady state.
+- Owner-facing processing profiles are `Slow`, `Balanced`, and `Fast`. These tune work/rest budgets and batch sizes, not truth semantics.
+- Exact timings are device-profiled rather than permanently assumed in architecture docs.
+- Queue state and progress must be visible through a compact dropdown/monitor: waiting, processing stage, progress/checkpoint, failed/retry state and selected processing profile.
+- The queue is crash/restart recoverable. If the app dies halfway through a large source, SQLite checkpoints allow processing to resume instead of restarting the entire source.
+- Newer/currently opened conversations may be promoted in queue priority for responsiveness, while older RAW evidence remains preserved and can finish processing later.
+
+## Reader and export rules
+
+- Owner-facing primary actions are `READ CLEAN` and `READ RAW`.
+- CLEAN and RAW remain two views of the same SQLite DNA, not separate permanent duplicate files.
+- The interactive conversation reader must be paged/streamed and must not construct the whole conversation in one `TextView` or one giant `String`.
+- CLEAN should read lightweight normalized message/revision rows from SQLite in pages.
+- RAW should stream the selected conversation/source evidence incrementally from SQLite while preserving full context.
+- Exports are requests: `CLEAN.md`, RAW JSON/Markdown as appropriate, and Working Data SQLite backup are generated/written on demand rather than permanently cached.
+- Human export generation must stream directly to the destination for large conversations.
+
+## Working Data lifecycle
+
+- `Latest — Active` is the only live/writable generation.
+- `Save & Start New Working Data` checkpoints the active SQLite, creates a verified timestamped SQLite generation, then starts a fresh Latest database.
+- Historical Working Data generations are read-only recovery sources.
+- The unified conversation library may federate multiple SQLite generations and deduplicate visible conversations by native conversation identity.
+- Listing/search must use lightweight indexed SQLite metadata only. It must not scan RAW evidence or rebuild giant conversation state when opening the library.
+- Saving/exporting a Working Data SQLite database is the first-class current backup path.
+- Destructive cleanup is owner-directed at the Working Data generation level. The existing exact case-sensitive confirmation `jan2x` is sufficient owner confirmation; no additional `.dna` eligibility gate is part of the accepted target model.
+- The product does not need a primary `delete conversation` workflow. The owner manages Working Data generations instead.
+- Active handles/transactions must be closed or safely checkpointed before deleting a selected generation.
+
+## Lightweight goals
+
+BKE DNA Logger must remain bounded as history grows.
+
+- Capture transport is streamed and backpressured.
+- Semantic processing yields between bounded units of work.
+- Readers page/stream instead of loading entire conversations.
+- Library/search screens query indexed metadata only.
+- Processing derivatives are not retained as redundant permanent files after SQLite has absorbed their durable meaning.
+- RAW remains exact and durable, but storage representation may later use chunking, compression and content-aware deduplication as long as exact source bytes can be reconstructed and SHA-256 verified.
+- APK-size optimization is useful, but embedded GeckoView is an accepted fixed cost; unbounded conversation-data duplication is the higher-priority storage problem.
+
+## Current Android alpha.2 transition state
+
+Android `0.1.0-alpha.2` is a transitional implementation on the path above.
+
+Already proven/implemented:
+
+- Native Kotlin + GeckoView.
+- Gecko response clones stream before the old whole-body `arrayBuffer()` memory spike.
+- Streamed chunks use bounded backpressure into Android.
+- Raw capture writes are incrementally SHA-256 hashed and content-addressed.
+- GeckoSession stays alive while Working Data UI is open.
+- Semantic derivation is moved off the capture-end acknowledgement path.
+- Unified multi-SQLite conversation listing/search exists.
+
+Still transitional and scheduled for refactor:
+
+- Exact RAW body currently remains in SHA-addressed files outside SQLite.
+- Observation, classification, normalized and logical conversation-state files still exist outside SQLite.
+- SQLite is currently a projection/index rather than the complete RAW DNA store.
+- Deep semantic parsing still has a conservative large-body boundary in alpha.2.
+- Reader rendering still needs true incremental/paged loading.
+- Existing `.dna`-gated raw purge behavior belongs to alpha.2 and will be superseded by the accepted SQLite Working Data lifecycle above.
+
+## UI direction
+
+- Working Data & Conversations is a compact utility surface, not a wall of full-width buttons.
+- Conversation rows should prioritize title, date/status and compact actions.
+- Primary actions remain CLEAN and RAW; secondary actions belong in compact menus where appropriate.
+- Processing queue/status and `Slow` / `Balanced` / `Fast` controls should be visible without dominating the conversation list.
+- GeckoView should support normal ChatGPT user actions such as photo/gallery, camera and file selection without coupling those user-selected inputs to automatic DNA evidence duplication.
 
 ## Legacy checkpoint
 
@@ -47,11 +145,11 @@ That checkpoint preserves the earlier cross-platform/Desktop lineage for possibl
 
 - Windows and macOS are implemented in .NET.
 - Android is implemented natively in Kotlin.
-- Cross-platform compatibility is defined by the DNA wire/evidence/archive contracts, identifiers, hashing rules, and archaeology semantics — not by forcing every platform to share one implementation language.
+- Cross-platform compatibility is defined by DNA wire/evidence identifiers, hashing and archaeology semantics — not by forcing every platform to share one implementation language.
 - GeckoView is consumed directly from Kotlin on Android. BKE does not generate a managed C# binding for the full Mozilla API surface.
 
-## First gate: POC-0
+## Historical first gate: POC-0
 
 Manual ChatGPT browsing -> MAIN-world response interception -> extension bridge -> Chrome Native Messaging -> .NET 10 host -> exact captured application body on disk + metadata + SHA-256.
 
-The first proof deliberately avoids parser assumptions, SQLite, Notion, and `.dna` packaging. It proves the evidence source first.
+The first proof deliberately avoided parser assumptions, SQLite, Notion and `.dna` packaging. It proved the evidence source first.
