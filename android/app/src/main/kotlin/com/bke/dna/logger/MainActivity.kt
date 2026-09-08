@@ -11,6 +11,7 @@ import android.widget.LinearLayout
 import org.mozilla.geckoview.GeckoView
 
 class MainActivity : Activity() {
+    private lateinit var geckoView: GeckoView
     private lateinit var geckoHost: GeckoViewHost
     private var capturePausedForWorkingData = false
 
@@ -65,7 +66,7 @@ class MainActivity : Activity() {
             ),
         )
 
-        val geckoView = GeckoView(this)
+        geckoView = GeckoView(this)
         root.addView(
             geckoView,
             LinearLayout.LayoutParams(
@@ -83,7 +84,8 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (capturePausedForWorkingData && ::geckoHost.isInitialized) {
+        if (capturePausedForWorkingData && ::geckoView.isInitialized) {
+            geckoHost = GeckoViewHost(this, geckoView)
             geckoHost.start()
             capturePausedForWorkingData = false
         }
