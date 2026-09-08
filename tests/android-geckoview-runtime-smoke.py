@@ -75,6 +75,11 @@ bridge_diagnostics = (
     "capture_body_accepted",
     "capture_body_rejected",
     "capture_start_sent",
+    "chunk_encode_started",
+    "chunk_encode_complete",
+    "chunk_send_started",
+    "chunk_send_complete",
+    "capture_end_sent",
     "capture_forward_failed",
 )
 for event in bridge_diagnostics:
@@ -114,6 +119,14 @@ for token in (
     'await forwardDiagnostic("capture_body_accepted")',
     'type: "capture_start"',
     'await forwardDiagnostic("capture_start_sent")',
+    'await forwardDiagnostic("chunk_encode_started")',
+    "const base64 = bytesToBase64(chunk)",
+    'await forwardDiagnostic("chunk_encode_complete")',
+    'await forwardDiagnostic("chunk_send_started")',
+    'type: "capture_chunk"',
+    'await forwardDiagnostic("chunk_send_complete")',
+    'type: "capture_end"',
+    'await forwardDiagnostic("capture_end_sent")',
     'await forwardDiagnostic("capture_forward_failed")',
 ):
     if token not in bridge:
@@ -128,6 +141,16 @@ if bridge.index("const bytes = toCaptureBytes(packet.body, metadata.byteLength)"
     raise SystemExit("capture_body_accepted must be emitted only after realm-safe body conversion succeeds")
 if bridge.index('type: "capture_start"') > bridge.index('await forwardDiagnostic("capture_start_sent")'):
     raise SystemExit("capture_start_sent must be emitted only after native capture_start is sent")
+if bridge.index('await forwardDiagnostic("chunk_encode_started")') > bridge.index("const base64 = bytesToBase64(chunk)"):
+    raise SystemExit("chunk_encode_started must be emitted before first chunk base64 encoding")
+if bridge.index("const base64 = bytesToBase64(chunk)") > bridge.index('await forwardDiagnostic("chunk_encode_complete")'):
+    raise SystemExit("chunk_encode_complete must be emitted only after first chunk base64 encoding")
+if bridge.index('await forwardDiagnostic("chunk_send_started")') > bridge.index('type: "capture_chunk"'):
+    raise SystemExit("chunk_send_started must be emitted before native capture_chunk is sent")
+if bridge.index('type: "capture_chunk"') > bridge.index('await forwardDiagnostic("chunk_send_complete")'):
+    raise SystemExit("chunk_send_complete must be emitted only after native capture_chunk is sent")
+if bridge.index('type: "capture_end"') > bridge.index('await forwardDiagnostic("capture_end_sent")'):
+    raise SystemExit("capture_end_sent must be emitted only after native capture_end is sent")
 
 if 'private val DIAGNOSTIC_KEYS = setOf("type", "event")' not in host:
     raise SystemExit("runtime diagnostics must remain restricted to type + event only")

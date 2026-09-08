@@ -34,6 +34,11 @@ class GeckoViewHost(
             "capture_body_accepted",
             "capture_body_rejected",
             "capture_start_sent",
+            "chunk_encode_started",
+            "chunk_encode_complete",
+            "chunk_send_started",
+            "chunk_send_complete",
+            "capture_end_sent",
             "capture_forward_failed",
             "interceptor_load_error",
         )

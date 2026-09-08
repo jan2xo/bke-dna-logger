@@ -18,6 +18,11 @@
     "capture_body_accepted",
     "capture_body_rejected",
     "capture_start_sent",
+    "chunk_encode_started",
+    "chunk_encode_complete",
+    "chunk_send_started",
+    "chunk_send_complete",
+    "capture_end_sent",
     "capture_forward_failed",
     "interceptor_load_error"
   ]);
@@ -122,12 +127,17 @@
       let sequence = 0;
       for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
         const chunk = bytes.subarray(offset, Math.min(offset + CHUNK_BYTES, bytes.length));
+        await forwardDiagnostic("chunk_encode_started");
+        const base64 = bytesToBase64(chunk);
+        await forwardDiagnostic("chunk_encode_complete");
+        await forwardDiagnostic("chunk_send_started");
         await sendNative({
           type: "capture_chunk",
           captureId: metadata.captureId,
           sequence,
-          base64: bytesToBase64(chunk)
+          base64
         });
+        await forwardDiagnostic("chunk_send_complete");
         sequence += 1;
       }
 
@@ -135,6 +145,7 @@
         type: "capture_end",
         captureId: metadata.captureId
       });
+      await forwardDiagnostic("capture_end_sent");
     } catch (error) {
       try {
         await forwardDiagnostic("capture_forward_failed");
