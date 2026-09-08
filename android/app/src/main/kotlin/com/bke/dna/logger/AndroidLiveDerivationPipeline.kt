@@ -13,6 +13,9 @@ import java.time.Instant
 /**
  * Derivative live pipeline invoked only after raw body, observation, and SQLite
  * capture projection are durable. Failures here never invalidate raw evidence.
+ *
+ * The scheduler owns pacing. This pipeline exposes coarse stages so the single
+ * derivation lane can persist progress and deliberately breathe between them.
  */
 class AndroidLiveDerivationPipeline(context: Context) {
     private val appContext = context.applicationContext
@@ -27,27 +30,35 @@ class AndroidLiveDerivationPipeline(context: Context) {
         sourceSha256: String,
         byteLength: Long,
         contentType: String?,
-    ) {
-        try {
+        onStage: (String) -> Unit = {},
+    ): Boolean {
+        return try {
             Log.d(TAG, "BKE DNA derivation: started")
+
+            onStage(STAGE_CLASSIFYING)
             ensureClassification(bodyFile, sourceSha256, byteLength, contentType)
             logClassificationOutcome(readClassificationOutcome(sourceSha256))
 
+            onStage(STAGE_NORMALIZING)
             val normalized = normalizer.normalizeCandidate(sourceSha256)
             if (normalized == null) {
                 Log.d(TAG, "BKE DNA derivation: normalization_skipped")
-                return
-            }
-            Log.d(TAG, "BKE DNA derivation: normalization_complete")
+                true
+            } else {
+                Log.d(TAG, "BKE DNA derivation: normalization_complete")
 
-            AndroidConversationAggregationEngine(appContext).use { engine ->
-                engine.aggregateConversation(normalized.conversationNativeId)
+                onStage(STAGE_RECONCILING)
+                AndroidConversationAggregationEngine(appContext).use { engine ->
+                    engine.aggregateConversation(normalized.conversationNativeId)
+                }
+                Log.d(TAG, "BKE DNA derivation: reconciliation_complete")
+                true
             }
-            Log.d(TAG, "BKE DNA derivation: reconciliation_complete")
         } catch (_: Exception) {
             // Classification, normalization, and aggregation are derivatives.
             // Raw evidence and its immutable observation are already durable.
             Log.d(TAG, "BKE DNA derivation: derivative_failed")
+            false
         }
     }
 
@@ -187,6 +198,10 @@ class AndroidLiveDerivationPipeline(context: Context) {
     )
 
     companion object {
+        const val STAGE_CLASSIFYING = "CLASSIFYING"
+        const val STAGE_NORMALIZING = "NORMALIZING"
+        const val STAGE_RECONCILING = "RECONCILING"
+
         private const val TAG = "BkeDnaDerivation"
         private const val CANDIDATE_KIND = "conversation_payload_candidate"
         private const val MAX_CLASSIFICATION_BYTES = 16L * 1024 * 1024
