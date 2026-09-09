@@ -102,7 +102,7 @@ BKE DNA Logger must remain bounded as history grows.
 - Library/search screens query indexed metadata only.
 - Processing derivatives are not retained as redundant permanent files after SQLite has absorbed their durable meaning.
 - RAW remains exact and durable, but storage representation may use chunking, compression and content-aware deduplication as long as exact source bytes can be reconstructed and SHA-256 verified.
-- APK-size optimization is useful, but embedded GeckoView is an accepted fixed cost; unbounded conversation-data duplication is the higher-priority storage problem.
+- Embedded GeckoView is an accepted fixed APK cost. Package-size decisions are based on a repeatable APK composition audit rather than removing required browser functionality blindly.
 
 ## Current Android alpha.2 transition state
 
@@ -129,13 +129,14 @@ Already proven/implemented:
 - Working Data backups now contain the actual self-contained SQLite generation and are re-opened/checksum-verified after writing.
 - Working Data backup restore stages and verifies the bundle, then promotes it as a separate read-only generation instead of merging foreign SQLite into Latest.
 - Saved Working Data generations can be deleted directly with exact `jan2x` confirmation; the old per-conversation `.dna`-gated raw purge authority is retired.
+- Android packaging is arm64-v8a only.
+- CI and owner-preview release packaging run the same APK composition audit. It reports total APK size, native-library share, non-native remainder, DEX/assets/resources/signing groups, largest packaged entries and packaged ABIs, and preserves a machine-readable JSON report for release artifacts.
 
 Still transitional and scheduled for refactor:
 
 - Capture observation JSON, logical conversation-state JSON, title-catalog JSON and some reconciliation/witness metadata still exist outside SQLite.
 - SQLite still contains transitional JSON derivative envelopes alongside normalized logical rows; later work may collapse more derivative structure into direct relational projections/checkpoints.
 - Deep semantic parsing still has a conservative large-body boundary in alpha.2.
-- APK/package size still needs explicit audit so GeckoView fixed cost and app-owned payload can be measured separately.
 
 ## UI direction
 
