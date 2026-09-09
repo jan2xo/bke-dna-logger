@@ -11,6 +11,8 @@ reader = (base / "AndroidConversationReaderActivity.kt").read_text()
 pager = (base / "AndroidConversationReadPager.kt").read_text()
 raw_access = (base / "AndroidRawSourceAccess.kt").read_text()
 raw_store = (base / "AndroidRawEvidenceStore.kt").read_text()
+derivative_access = (base / "AndroidDerivativeSourceAccess.kt").read_text()
+derivative_store = (base / "AndroidDerivativeStore.kt").read_text()
 unified = (base / "AndroidUnifiedConversationLibrary.kt").read_text()
 titles = (base / "AndroidConversationTitleCatalog.kt").read_text()
 main = (base / "MainActivity.kt").read_text()
@@ -23,24 +25,33 @@ backup = (base / "AndroidWorkingBackupService.kt").read_text()
 contract = (base / "DnaReconciliationContract.kt").read_text()
 manifest = (root / "android" / "app" / "src" / "main" / "AndroidManifest.xml").read_text()
 
-# .dna remains an explicit portable owner export. New RAW is sourced from
-# SQLite and materialized only into export-temporary files before deterministic
-# archive verification; permanent captures/bodies are not required.
+# .dna remains an explicit portable owner export. SQLite-backed RAW and
+# derivatives are materialized only into export-temporary files; permanent loose
+# body/classification/normalized evidence is not recreated.
 for token in [
     '"formatVersion", 2', '"conversation/state.json"', '"SHA256SUMS"',
     '"sources/$sourceSha/raw.body"', 'AndroidConversationDnaV2Verifier.verify',
     'index.recordVerifiedConversationArchive',
     'materializeRawSource(sourceSha)', 'AndroidRawSourceAccess.writeExactSource(',
+    'materializeDerivativeSource(',
+    'AndroidDerivativeSourceAccess.readNormalized(',
+    'AndroidDerivativeSourceAccess.readClassification(',
     'File(stagingDirectory, ".raw-$sourceSha256-${UUID.randomUUID()}.tmp")',
-    'temporaryRaw.forEach(File::delete)',
+    '".derivative-$kind-$sourceSha256-${UUID.randomUUID()}.tmp"',
+    'temporaryEvidence.forEach(File::delete)',
 ]:
     assert token in archive, token
 assert archive.index('resolver.openInputStream(destinationUri)') < archive.index('index.recordVerifiedConversationArchive')
-assert 'File(captureRoot, "bodies/$sourceSha.body")' not in archive
+for forbidden in [
+    'File(captureRoot, "bodies/$sourceSha.body")',
+    'File(captureRoot, "normalized/$sourceSha.json")',
+    'File(captureRoot, "classifications/$sourceSha.json")',
+]:
+    assert forbidden not in archive, forbidden
 
 # Working Data remains timestamped/read-only outside Latest. New saved SQLite
-# generations contain exact RAW; old manifests that shared RAW by SHA remain
-# accepted for recovery compatibility.
+# generations contain exact RAW and PR5 derivative tables automatically because
+# the complete active database is checkpointed and copied.
 for token in [
     'Latest — Active', 'read_only_recovery', 'working.sqlite',
     'PRAGMA wal_checkpoint(TRUNCATE)', 'SQLiteDatabase.OPEN_READONLY',
@@ -51,6 +62,12 @@ for token in [
 ]:
     assert token in working_data, token
 assert 'dna/working-data' in paths
+for token in [
+    'CREATE TABLE IF NOT EXISTS derivative_classification (',
+    'CREATE TABLE IF NOT EXISTS derivative_normalized (',
+    'payload_sha256 TEXT NOT NULL', 'byte_length INTEGER NOT NULL',
+]:
+    assert token in derivative_store, token
 
 # RAW source abstraction prefers selected-generation SQLite and retains legacy
 # .body only as a pre-PR4 fallback.
@@ -68,6 +85,16 @@ for token in [
 ]:
     assert token in raw_store, token
 
+# Derivative source access federates all Working Data generations and keeps only
+# explicit legacy loose-file fallback for pre-PR5 snapshots.
+for token in [
+    'object AndroidDerivativeSourceAccess',
+    'AndroidWorkingDataManager(appContext).listWorkingData()',
+    'AndroidDerivativeStore(generation)',
+    'File(captureRoot, "$directoryName/$sourceSha256.json")',
+]:
+    assert token in derivative_access, token
+
 # Management no longer destroys/reloads ChatGPT. Storage mutation pauses capture only.
 assert 'startActivity(Intent(this@MainActivity, AndroidExportsBackupsActivity::class.java))' in main
 assert 'capturePausedForWorkingData' not in main
@@ -80,17 +107,19 @@ for token in ['withStorageMutationPause', 'pauseForStorageMutation', 'resumeAfte
 for token in ['storageMutation = true', 'AndroidCaptureRuntime.withStorageMutationPause(this)']:
     assert token in ui, token
 
-# Shared title catalog derives actual captured root titles through Working Data
-# RAW generations; never JAN text / UUID fallback.
+# Shared title catalog derives actual captured root titles through federated
+# normalized derivatives + Working Data RAW generations; never JAN text / UUID fallback.
 for token in [
     'class AndroidConversationTitleCatalog', 'conversation-title-catalog.json',
     'root.has("title")', 'candidate_root_title', 'candidate_title_string',
     'matchingConversationIds', 'indexedSources',
     'AndroidWorkingDataManager(appContext).listWorkingData()',
+    'AndroidDerivativeSourceAccess.listNormalizedSourceSha256s(generation, captureRoot)',
+    'AndroidDerivativeSourceAccess.readNormalized(generation, captureRoot, sourceSha256)',
     'AndroidRawSourceAccess.readAllBytes(',
 ]:
     assert token in titles, token
-for forbidden in ['setOf("user")', 'textParts', 'first user', 'first JAN', 'bodiesDirectory']:
+for forbidden in ['setOf("user")', 'textParts', 'first user', 'first JAN', 'bodiesDirectory', 'normalizedDirectory']:
     assert forbidden not in titles, forbidden
 
 # Unified library remains metadata-only, federated and deduplicated by native identity.
@@ -105,7 +134,6 @@ for token in [
 for forbidden in ['AndroidHumanExportService', '.readText(']:
     assert forbidden not in unified, forbidden
 
-# Owner library remains lazy and searchable.
 for token in [
     'Working Data & Conversations', 'All Conversations', 'Search conversation titles',
     'SEARCH', 'CLEAR', 'LOAD MORE', 'library.search(searchQuery, libraryLimit)',
@@ -118,8 +146,8 @@ assert 'conversationWorkingBytes' not in conversation_loop
 assert 'summary.displayTitle' in conversation_loop
 assert 'summary.generationCount' in conversation_loop
 
-# Guardrailed purge is intentionally transitional in PR4. It may clean legacy
-# loose files but must not delete Working Data SQLite or logical reader state.
+# Transitional purge may still clean legacy loose derivative files but must not
+# delete Working Data SQLite or PR5 derivative rows.
 for token in [
     'CONFIRMATION_TEXT = "jan2x"',
     'conversationArchived', 'sources.any { !it.archived }', 'archiveId', 'archiveSha256',
@@ -137,65 +165,42 @@ for token in [
     assert token in ui, token
 assert 'deleteDatabase' not in purge
 assert 'conversations/' not in purge
+assert 'derivative_classification' not in purge
+assert 'derivative_normalized' not in purge
 
-# Historical generations cannot mutate Latest .dna durability state.
 assert 'Historical Working Data cannot mutate Latest .dna durability state' in ui
 assert 'pendingWorkingDataId == AndroidWorkingDataManager.LATEST_ID' in ui
 
-# Interactive reader is strictly bounded. It resolves/open pagers on its
-# dedicated IO executor and never calls the giant full-conversation renderers.
 for token in [
-    'Executors.newSingleThreadExecutor',
-    '"bke-dna-reader-io"',
-    'AndroidUnifiedConversationLibrary(this)',
-    'AndroidCleanConversationPager(',
-    'AndroidRawConversationPager(',
-    'compactButton("CLEAN")',
-    'compactButton("RAW")',
-    'compactButton("PREV")',
-    'compactButton("NEXT")',
+    'Executors.newSingleThreadExecutor', '"bke-dna-reader-io"',
+    'AndroidUnifiedConversationLibrary(this)', 'AndroidCleanConversationPager(',
+    'AndroidRawConversationPager(', 'compactButton("CLEAN")', 'compactButton("RAW")',
+    'compactButton("PREV")', 'compactButton("NEXT")',
     'CLEAN · JAN / RIGHT-HAND only · no tools',
     'RAW · full captured evidence in context · bounded stream',
-    'setTextIsSelectable(true)',
-    'loadCleanPage(',
-    'loadRawPage(',
+    'setTextIsSelectable(true)', 'loadCleanPage(', 'loadRawPage(',
 ]:
     assert token in reader, token
 for forbidden in [
-    'human.renderCleanMarkdown',
-    'human.renderRawMarkdown',
-    'AndroidHumanExportService(this',
-    'conversationWorkingBytes(',
+    'human.renderCleanMarkdown', 'human.renderRawMarkdown',
+    'AndroidHumanExportService(this', 'conversationWorkingBytes(',
 ]:
     assert forbidden not in reader, forbidden
 assert reader.index('ioExecutor.execute {') < reader.index('AndroidUnifiedConversationLibrary(this)')
 
-# CLEAN paging comes from SQLite normalized rows, 40 turns at a time. RAW paging
-# resolves only a 64 KiB exact window through the SQLite-first source abstraction.
 for token in [
-    'class AndroidCleanConversationPager',
-    'class AndroidRawConversationPager',
-    'SQLiteDatabase.OPEN_READONLY',
-    'logical_message_node',
-    'logical_message_revision',
-    'conversation_source',
-    'const val DEFAULT_PAGE_SIZE = 40',
-    'const val RAW_PAGE_BYTES = 64 * 1024',
-    'AndroidRawSourceAccess.readPage(',
+    'class AndroidCleanConversationPager', 'class AndroidRawConversationPager',
+    'SQLiteDatabase.OPEN_READONLY', 'logical_message_node', 'logical_message_revision',
+    'conversation_source', 'const val DEFAULT_PAGE_SIZE = 40',
+    'const val RAW_PAGE_BYTES = 64 * 1024', 'AndroidRawSourceAccess.readPage(',
     'safeUtf8PrefixLength',
     'setOf("user") -> AndroidHumanExportService.CLEAN_JAN',
     'setOf("assistant") -> AndroidHumanExportService.CLEAN_RIGHT_HAND',
 ]:
     assert token in pager, token
-for forbidden in [
-    'RandomAccessFile(',
-    '.readText(Charsets.UTF_8)',
-    'buildString {\n        appendLine("#',
-]:
+for forbidden in ['RandomAccessFile(', '.readText(Charsets.UTF_8)', 'buildString {\n        appendLine("#']:
     assert forbidden not in pager, forbidden
 
-# Export helpers preserve CLEAN semantics; RAW export streams exact sources
-# through the same Working Data abstraction and remains an explicit owner action.
 for token in [
     'CLEAN_JAN = "JAN"', 'CLEAN_RIGHT_HAND = "RIGHT-HAND"',
     'setOf("user") -> CLEAN_JAN', 'setOf("assistant") -> CLEAN_RIGHT_HAND',
@@ -210,7 +215,6 @@ clean = human[clean_start:clean_end]
 for forbidden in ['conversationNativeId', 'sourceSha256', 'nodeNativeId', 'contentJson', 'tool', 'truncate']:
     assert forbidden not in clean, forbidden
 
-# Dark UI and backup/cross-device SQLite guardrails remain.
 assert '@android:style/Theme.Material.NoActionBar' in manifest
 assert 'Theme.Material.Light.NoActionBar' not in manifest
 for token in ['bke-dna-working-backup', '"sqliteIncluded", false', 'MERGE_SQLITE_ACROSS_DEVICES']:
@@ -233,4 +237,4 @@ identity = '\n'.join(f'{p}\t{s}\t{n}\t{src}' for p, s, n, src in sorted(evidence
 archive_id = 'dna-conversation-v2-' + hashlib.sha256(identity.encode()).hexdigest()
 assert len(archive_id) == len('dna-conversation-v2-') + 64
 
-print('android SQLite RAW reader, Working Data, portable export and guardrails smoke PASS')
+print('android SQLite RAW + derivative export, Working Data and guardrails smoke PASS')
