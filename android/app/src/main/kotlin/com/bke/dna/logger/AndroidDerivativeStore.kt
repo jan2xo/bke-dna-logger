@@ -40,10 +40,7 @@ class AndroidDerivativeStore private constructor(
         createSchema(database)
     }
 
-    fun hasSchema(): Boolean = database.rawQuery(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'derivative_normalized' LIMIT 1",
-        null,
-    ).use { it.moveToFirst() }
+    fun hasSchema(): Boolean = tableExists(TABLE_CLASSIFICATION) && tableExists(TABLE_NORMALIZED)
 
     fun classificationJson(sourceSha256: String): String? =
         readPayload(TABLE_CLASSIFICATION, sourceSha256)
@@ -52,7 +49,7 @@ class AndroidDerivativeStore private constructor(
         readPayload(TABLE_NORMALIZED, sourceSha256)
 
     fun listNormalizedSourceSha256s(): List<String> {
-        if (!hasSchema()) return emptyList()
+        if (!tableExists(TABLE_NORMALIZED)) return emptyList()
         database.query(
             TABLE_NORMALIZED,
             arrayOf("source_sha256"),
@@ -146,7 +143,7 @@ class AndroidDerivativeStore private constructor(
 
     private fun readPayload(table: String, sourceSha256: String): String? {
         requireSha(sourceSha256)
-        if (!hasSchema()) return null
+        if (!tableExists(table)) return null
         database.query(
             table,
             arrayOf("payload_json", "payload_sha256", "byte_length"),
@@ -169,6 +166,11 @@ class AndroidDerivativeStore private constructor(
             return payload
         }
     }
+
+    private fun tableExists(table: String): Boolean = database.rawQuery(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        arrayOf(table),
+    ).use { it.moveToFirst() }
 
     override fun close() = handle.close()
 
