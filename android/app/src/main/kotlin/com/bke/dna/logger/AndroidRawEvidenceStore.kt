@@ -19,8 +19,8 @@ import java.util.zip.InflaterInputStream
  *
  * Each source body is split into independently compressed chunks. Compression is
  * purely a storage representation: reading the chunks in sequence reconstructs
- * the exact original bytes, which are verified against the source SHA-256 before
- * temporary staging evidence becomes eligible for deletion.
+ * the exact original bytes. A new source is not committed until that SQLite
+ * reconstruction passes exact byte-length and SHA-256 verification.
  */
 class AndroidRawEvidenceStore private constructor(
     private val handle: DatabaseHandle,
@@ -150,16 +150,15 @@ class AndroidRawEvidenceStore private constructor(
                 put("compressed_bytes", compressedBytes)
             }
             database.insertOrThrow("raw_source", null, sourceValues)
+
+            // Re-read and decompress the exact SQLite representation before the
+            // transaction is allowed to commit. If verification fails or the
+            // process dies first, the whole source/chunk insert rolls back and
+            // the durable staging file remains the recovery authority.
+            verifySource(sourceSha256, expectedByteLength)
             database.setTransactionSuccessful()
         } finally {
             database.endTransaction()
-        }
-
-        try {
-            verifySource(sourceSha256, expectedByteLength)
-        } catch (error: Throwable) {
-            deleteSource(sourceSha256)
-            throw error
         }
 
         return AndroidRawImportResult(requireNotNull(descriptor(sourceSha256)), reused = false)
