@@ -19,9 +19,9 @@ import java.util.zip.ZipOutputStream
  * Manual Android conversation .dna v2 exporter.
  *
  * .dna is a portable owner export, not the ordinary Working Data durability
- * authority. New SQLite-backed RAW is materialized only into export-temporary
- * files while the deterministic archive is built; permanent loose bodies are
- * never recreated.
+ * authority. SQLite-backed RAW and derivatives are materialized only into
+ * export-temporary files while the deterministic archive is built; permanent
+ * loose bodies/classification/normalized files are never recreated.
  */
 class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -29,7 +29,10 @@ class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
     private val stagingDirectory = File(captureRoot, "export-staging").also { directory ->
         check(directory.exists() || directory.mkdirs()) { "Unable to create Android DNA export staging directory" }
         directory.listFiles().orEmpty()
-            .filter { it.isFile && it.name.startsWith(".raw-") && it.name.endsWith(".tmp") }
+            .filter {
+                it.isFile &&
+                    ((it.name.startsWith(".raw-") || it.name.startsWith(".derivative-")) && it.name.endsWith(".tmp"))
+            }
             .forEach(File::delete)
     }
     private val latestGeneration by lazy {
@@ -115,16 +118,22 @@ class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
                 sourceSha256 = null,
             ),
         )
-        val temporaryRaw = mutableListOf<File>()
+        val temporaryEvidence = mutableListOf<File>()
         val pageUrls = linkedSetOf<String>()
         val witnessIds = linkedSetOf<String>()
 
         sources.forEach { sourceSha ->
-            val raw = materializeRawSource(sourceSha).also(temporaryRaw::add)
-            val normalized = File(captureRoot, "normalized/$sourceSha.json")
-            require(normalized.isFile) {
-                "Conversation source '$sourceSha' is missing normalized evidence"
-            }
+            val raw = materializeRawSource(sourceSha).also(temporaryEvidence::add)
+            val normalizedPayload = AndroidDerivativeSourceAccess.readNormalized(
+                latestGeneration,
+                captureRoot,
+                sourceSha,
+            ) ?: error("Conversation source '$sourceSha' is missing normalized evidence")
+            val normalized = materializeDerivativeSource(
+                sourceSha,
+                "normalized",
+                normalizedPayload,
+            ).also(temporaryEvidence::add)
 
             val rawEvidence = EvidenceSource.fromFile(
                 "sources/$sourceSha/raw.body",
@@ -143,8 +152,17 @@ class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
                 sourceSha,
             )
 
-            val classification = File(captureRoot, "classifications/$sourceSha.json")
-            if (classification.isFile) {
+            val classificationPayload = AndroidDerivativeSourceAccess.readClassification(
+                latestGeneration,
+                captureRoot,
+                sourceSha,
+            )
+            if (classificationPayload != null) {
+                val classification = materializeDerivativeSource(
+                    sourceSha,
+                    "classification",
+                    classificationPayload,
+                ).also(temporaryEvidence::add)
                 evidence += EvidenceSource.fromFile(
                     "sources/$sourceSha/classification.json",
                     "classification",
@@ -269,7 +287,7 @@ class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
             archive.delete()
             throw error
         } finally {
-            temporaryRaw.forEach(File::delete)
+            temporaryEvidence.forEach(File::delete)
         }
 
         return ArchiveBuild(archiveId, conversationKey, archive)
@@ -292,6 +310,34 @@ class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
             }
             require(sha256File(temporary) == sourceSha256) {
                 "Materialized RAW no longer hashes to source identity '$sourceSha256'"
+            }
+            return temporary
+        } catch (error: Throwable) {
+            temporary.delete()
+            throw error
+        }
+    }
+
+    private fun materializeDerivativeSource(
+        sourceSha256: String,
+        kind: String,
+        payloadJson: String,
+    ): File {
+        val root = JSONObject(payloadJson)
+        when (kind) {
+            "normalized" -> require(root.getString("sourceSha256") == sourceSha256)
+            "classification" -> require(root.getString("sha256") == sourceSha256)
+            else -> error("Unsupported derivative kind '$kind'")
+        }
+        val temporary = File(
+            stagingDirectory,
+            ".derivative-$kind-$sourceSha256-${UUID.randomUUID()}.tmp",
+        )
+        try {
+            FileOutputStream(temporary, false).use { output ->
+                output.write(payloadJson.toByteArray(Charsets.UTF_8))
+                output.flush()
+                output.fd.sync()
             }
             return temporary
         } catch (error: Throwable) {
