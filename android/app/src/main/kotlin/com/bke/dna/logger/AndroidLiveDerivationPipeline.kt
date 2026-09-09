@@ -69,13 +69,15 @@ class AndroidLiveDerivationPipeline(context: Context) {
 
         var errorType: String? = null
         val classification = try {
-            if (byteLength > MAX_CLASSIFICATION_BYTES) {
-                AndroidPayloadClassification.other("classification_size_limit")
+            if (byteLength > MATERIALIZED_CLASSIFICATION_BYTES) {
+                AndroidRawSourceAccess.withExactInputStream(appContext, sourceSha256) { input ->
+                    AndroidStreamingConversationPayloadClassifier.classify(input, contentType)
+                } ?: error("RAW source is not available")
             } else {
                 val bytes = AndroidRawSourceAccess.readAllBytes(
                     appContext,
                     sourceSha256,
-                    MAX_CLASSIFICATION_BYTES,
+                    MATERIALIZED_CLASSIFICATION_BYTES,
                 ) ?: error("RAW source is not available")
                 AndroidConversationPayloadClassifier.classify(bytes, contentType)
             }
@@ -120,6 +122,8 @@ class AndroidLiveDerivationPipeline(context: Context) {
                 "classification_candidate_high"
             outcome.kind == CANDIDATE_KIND ->
                 "classification_candidate_medium"
+            // Historical classification derivatives may still contain this
+            // signal. New oversized RAW sources use the streaming classifier.
             "classification_size_limit" in outcome.signals ->
                 "classification_other_size_limit"
             "classifier_error" in outcome.signals ->
@@ -186,6 +190,6 @@ class AndroidLiveDerivationPipeline(context: Context) {
         private const val TAG = "BkeDnaDerivation"
         private const val CANDIDATE_KIND = "conversation_payload_candidate"
         private const val SOURCE_PREFIX_LENGTH = 8
-        private const val MAX_CLASSIFICATION_BYTES = 16L * 1024 * 1024
+        private const val MATERIALIZED_CLASSIFICATION_BYTES = 16L * 1024 * 1024
     }
 }
