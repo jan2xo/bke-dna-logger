@@ -2,9 +2,11 @@ package com.bke.dna.logger
 
 import android.content.Context
 import android.util.Base64
+import android.util.Log
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.net.URI
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
@@ -87,6 +89,12 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
         require(result.byteLength == finalDeclaredLength) {
             "Capture '$captureId' declared $finalDeclaredLength bytes but received ${result.byteLength}"
         }
+
+        val route = classifyCaptureRoute(session.start.optNullableString("requestUrl"))
+        Log.d(
+            CAPTURE_DIAGNOSTIC_TAG,
+            "DNA capture complete: source_${result.sha256.take(SOURCE_PREFIX_LENGTH)} $route bytes_${result.byteLength}",
+        )
 
         // Completion is represented by a SHA-addressed staging file. It remains
         // durable across process death until RAW_INGEST has verified exact bytes
@@ -199,6 +207,35 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
     private data class Result(val sha256: String, val byteLength: Long, val partial: File)
 
     companion object {
+        private const val CAPTURE_DIAGNOSTIC_TAG = "BkeDnaGeckoView"
+        private const val SOURCE_PREFIX_LENGTH = 8
+        private const val ROUTE_CONVERSATION = "capture_route_conversation"
+        private const val ROUTE_CONVERSATIONS_LIST = "capture_route_conversations_list"
+        private const val ROUTE_BACKEND_API = "capture_route_backend_api"
+        private const val ROUTE_PUBLIC_API = "capture_route_public_api"
+        private const val ROUTE_OTHER = "capture_route_other"
+
+        private fun classifyCaptureRoute(requestUrl: String?): String {
+            if (requestUrl.isNullOrBlank()) return ROUTE_OTHER
+            val uri = runCatching { URI(requestUrl) }.getOrNull() ?: return ROUTE_OTHER
+            val host = uri.host?.lowercase() ?: return ROUTE_OTHER
+            val chatGptHost = host == "chatgpt.com" ||
+                host.endsWith(".chatgpt.com") ||
+                host == "chat.openai.com"
+            if (!chatGptHost) return ROUTE_OTHER
+
+            val path = uri.path.orEmpty()
+            return when {
+                path == "/backend-api/conversations" ||
+                    path.startsWith("/backend-api/conversations/") -> ROUTE_CONVERSATIONS_LIST
+                path == "/backend-api/conversation" ||
+                    path.startsWith("/backend-api/conversation/") -> ROUTE_CONVERSATION
+                path.startsWith("/backend-api/") -> ROUTE_BACKEND_API
+                path.startsWith("/public-api/") -> ROUTE_PUBLIC_API
+                else -> ROUTE_OTHER
+            }
+        }
+
         fun awaitBackgroundDerivationIdle(context: Context) {
             AndroidDerivationScheduler.awaitIdle(context.applicationContext)
         }
