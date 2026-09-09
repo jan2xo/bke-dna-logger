@@ -73,7 +73,7 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         val currentNodeNativeId = sourceCurrentNodeId?.takeIf { it in knownMessageIds }
         val currentNodeFound = currentNodeNativeId != null
         val parser = if (envelope.container === root && envelope.messages is JSONArray) {
-            PARSER_ROOT_ARRAY
+            PARSER
         } else {
             PARSER_ENVELOPE
         }
@@ -99,14 +99,28 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         AndroidDerivativeStore(appContext).use { store ->
             store.putNormalizedJson(sourceSha256, normalized.toString(2))
         }
-        Log.d(TAG, "BKE DNA normalization: messages_normalization_complete")
+        Log.d(TAG, "BKE DNA normalization: messages_array_normalization_complete")
         return AndroidNormalizationResult(sourceSha256, identity.conversationNativeId, null)
     }
 
     private fun locateMessagesEnvelope(root: JSONObject): MessageEnvelope? {
+        val rootMessages = root.optJSONArray("messages") ?: root.optJSONObject("messages")
+        if (rootMessages != null && messageObjects(rootMessages).any(::isIdentifiedAuthoredMessage)) {
+            return MessageEnvelope(root, rootMessages)
+        }
+
         val candidates = mutableListOf<MessageEnvelope>()
         val stack = ArrayDeque<Any>()
-        stack.addLast(root)
+        val rootKeys = buildList {
+            val iterator = root.keys()
+            while (iterator.hasNext()) add(iterator.next())
+        }.sorted()
+        rootKeys.forEach { key ->
+            if (key == "messages") return@forEach
+            when (val child = root.opt(key)) {
+                is JSONObject, is JSONArray -> stack.addLast(child)
+            }
+        }
         var visited = 0
 
         while (stack.isNotEmpty() && visited < MAX_ENVELOPE_VALUES) {
@@ -142,7 +156,6 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
             }
         }
 
-        candidates.firstOrNull { it.container === root }?.let { return it }
         return candidates.singleOrNull()
     }
 
@@ -285,7 +298,7 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         private const val MAX_BODY_BYTES = 16L * 1024 * 1024
         private const val MAX_ENVELOPE_VALUES = 4096
         private const val CANDIDATE_KIND = "conversation_payload_candidate"
-        private const val PARSER_ROOT_ARRAY = "messages-array-v0"
+        private const val PARSER = "messages-array-v0"
         private const val PARSER_ENVELOPE = "messages-envelope-v1"
         private const val COVERAGE_BASIS = "messages_array_no_graph_edges"
         private val SHA256 = Regex("[0-9a-f]{64}")
