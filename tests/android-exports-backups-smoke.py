@@ -149,7 +149,8 @@ for token in [
     'AndroidDerivationScheduler.getProfile(this)', 'AndroidDerivationScheduler.setProfile(this, profile)',
     'AndroidProcessingProfile.entries', 'profileLabel(profile)',
     'compactButton("CLEAN")', 'compactButton("RAW")', 'compactButton("MORE")',
-    'PopupMenu(this, anchor)', 'panel.setOnClickListener { openConversation(summary) }',
+    'PopupMenu(this, anchor)', 'setOnClickListener { openConversation(summary) }',
+    'contentDescription = "Read ${summary.displayTitle}"',
     'Tap a conversation row to read it', 'archival/purge actions live under MORE',
 ]:
     assert token in ui, token
