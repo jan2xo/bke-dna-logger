@@ -49,6 +49,12 @@ class MainActivity : Activity() {
         }
         val exportsButton = Button(this).apply {
             text = "Working Data & Exports"
+            textSize = 12f
+            minHeight = 0
+            minimumHeight = 0
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(18, 8, 18, 8)
             setOnClickListener {
                 // Management is a sibling Activity. Keep the GeckoSession alive so
                 // Back returns to the exact ChatGPT page/scroll/session instead of
@@ -59,7 +65,7 @@ class MainActivity : Activity() {
         root.addView(
             exportsButton,
             LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ),
         )
