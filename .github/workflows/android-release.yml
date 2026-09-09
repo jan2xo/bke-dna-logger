@@ -10,17 +10,19 @@ permissions:
   contents: write
 
 concurrency:
-  group: android-owner-preview-release
+  group: android-production-release
   cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: android-v0.1.0-alpha.2
-      APK_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.2.apk
-      CHECKSUM_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.2.apk.sha256
-      SIZE_REPORT_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.2.apk-size.json
+      RELEASE_TAG: android-v0.1.0-alpha.3
+      APK_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.3.apk
+      CHECKSUM_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.3.apk.sha256
+      SIZE_REPORT_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.3.apk-size.json
+      SIGNING_REPORT_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.3.signing.txt
+      RELEASE_APK: android/app/build/outputs/apk/release/app-release.apk
     steps:
       - uses: actions/checkout@v4
 
@@ -38,11 +40,49 @@ jobs:
         with:
           gradle-version: '9.5.0'
 
-      - name: Build installable Android owner-preview APK
-        run: gradle -p android :app:assembleDebug --stacktrace
+      - name: Prepare production Android signing identity
+        env:
+          BKE_ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.BKE_ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          BKE_ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.BKE_ANDROID_RELEASE_STORE_PASSWORD }}
+          BKE_ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.BKE_ANDROID_RELEASE_KEY_ALIAS }}
+          BKE_ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.BKE_ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          test -n "${BKE_ANDROID_RELEASE_KEYSTORE_BASE64}" || { echo "Missing BKE_ANDROID_RELEASE_KEYSTORE_BASE64" >&2; exit 1; }
+          test -n "${BKE_ANDROID_RELEASE_STORE_PASSWORD}" || { echo "Missing BKE_ANDROID_RELEASE_STORE_PASSWORD" >&2; exit 1; }
+          test -n "${BKE_ANDROID_RELEASE_KEY_ALIAS}" || { echo "Missing BKE_ANDROID_RELEASE_KEY_ALIAS" >&2; exit 1; }
+          test -n "${BKE_ANDROID_RELEASE_KEY_PASSWORD}" || { echo "Missing BKE_ANDROID_RELEASE_KEY_PASSWORD" >&2; exit 1; }
 
-      - name: Audit owner-preview APK size composition
-        run: python3 tests/android-apk-size-audit.py android/app/build/outputs/apk/debug/app-debug.apk --json-out android/app/build/reports/apk-size.json
+          KEYSTORE_PATH="${RUNNER_TEMP}/bke-dna-release.jks"
+          printf '%s' "${BKE_ANDROID_RELEASE_KEYSTORE_BASE64}" | base64 --decode > "${KEYSTORE_PATH}"
+          chmod 600 "${KEYSTORE_PATH}"
+          keytool -list \
+            -keystore "${KEYSTORE_PATH}" \
+            -storepass "${BKE_ANDROID_RELEASE_STORE_PASSWORD}" \
+            -alias "${BKE_ANDROID_RELEASE_KEY_ALIAS}" >/dev/null
+          echo "BKE_ANDROID_RELEASE_KEYSTORE_PATH=${KEYSTORE_PATH}" >> "${GITHUB_ENV}"
+
+      - name: Build production-signed Android release APK
+        env:
+          BKE_ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.BKE_ANDROID_RELEASE_STORE_PASSWORD }}
+          BKE_ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.BKE_ANDROID_RELEASE_KEY_ALIAS }}
+          BKE_ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.BKE_ANDROID_RELEASE_KEY_PASSWORD }}
+        run: gradle -p android :app:assembleRelease --stacktrace
+
+      - name: Verify production APK signature
+        run: |
+          test -f "${RELEASE_APK}"
+          mkdir -p android/app/build/reports
+          "${ANDROID_HOME}/build-tools/36.0.0/apksigner" verify \
+            --verbose \
+            --print-certs \
+            "${RELEASE_APK}" | tee android/app/build/reports/release-signing.txt
+          if grep -Fq 'CN=Android Debug,O=Android,C=US' android/app/build/reports/release-signing.txt; then
+            echo "Refusing to publish an APK signed with the Android debug certificate." >&2
+            exit 1
+          fi
+
+      - name: Audit production APK size composition
+        run: python3 tests/android-apk-size-audit.py "${RELEASE_APK}" --json-out android/app/build/reports/apk-size.json
 
       - name: Certify Android contracts
         run: |
@@ -55,40 +95,50 @@ jobs:
           python3 tests/android-geckoview-runtime-smoke.py
           python3 tests/android-native-ingress-smoke.py
           python3 tests/android-apk-size-audit.py --self-test
+          python3 tests/android-release-signing-smoke.py
 
-      - name: Stage APK checksum and size report
+      - name: Stage release APK, checksum, size and signing reports
         run: |
           mkdir -p release
-          cp android/app/build/outputs/apk/debug/app-debug.apk "release/${APK_NAME}"
+          cp "${RELEASE_APK}" "release/${APK_NAME}"
           cp android/app/build/reports/apk-size.json "release/${SIZE_REPORT_NAME}"
+          cp android/app/build/reports/release-signing.txt "release/${SIGNING_REPORT_NAME}"
           (
             cd release
             sha256sum "${APK_NAME}" > "${CHECKSUM_NAME}"
           )
 
-      - name: Preserve workflow artifact
+      - name: Preserve production release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bke-dna-logger-android-0.1.0-alpha.2
+          name: bke-dna-logger-android-0.1.0-alpha.3
           path: |
             release/${{ env.APK_NAME }}
             release/${{ env.CHECKSUM_NAME }}
             release/${{ env.SIZE_REPORT_NAME }}
+            release/${{ env.SIGNING_REPORT_NAME }}
           if-no-files-found: error
 
-      - name: Publish GitHub prerelease
+      - name: Publish immutable GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "Release ${RELEASE_TAG} already exists; leaving the immutable preview release unchanged."
+            echo "Release ${RELEASE_TAG} already exists; leaving the immutable release unchanged."
             exit 0
           fi
 
           cat > release/RELEASE_NOTES.md <<'EOF'
-          # BKE DNA Logger Android 0.1.0-alpha.2
+          # BKE DNA Logger Android 0.1.0-alpha.3
 
-          Owner/internal Android performance and storage preview.
+          Production-signed owner/internal Android release candidate containing the completed nine-PR SQLite/GeckoView architecture program.
+
+          ## Release identity
+
+          - Built with the Android `release` build type (`assembleRelease`).
+          - Signed with the repository production Android signing identity supplied through GitHub Actions secrets.
+          - The workflow verifies the APK signature with `apksigner` and refuses the standard Android debug certificate.
+          - arm64-v8a only.
 
           ## Current architecture
 
@@ -104,18 +154,9 @@ jobs:
           - Gecko file prompts support document/gallery selection, multiple files, folders and user-controlled camera image/video capture without automatically duplicating selected local files into DNA evidence.
           - APK composition is measured during CI/release so GeckoView/native-library cost and app-owned DEX/assets/resources remain visible.
 
-          ## Current semantic-processing boundary
+          ## Semantic-processing boundary
 
-          Large-response transport is streamed and capture processing is backgrounded. Deep JSON classifier/normalizer work still keeps its conservative 16 MiB semantic parsing limit in this alpha; larger payloads remain preserved as immutable exact RAW rather than risking an unbounded JSON object graph.
-
-          ## Device target
-
-          - Android API 26+.
-          - arm64-v8a only.
-
-          ## Signing status
-
-          This owner/internal alpha uses Android debug signing for immediate physical-device testing. It is not the long-term production signing identity.
+          Deep JSON classifier/normalizer work still keeps its conservative 16 MiB semantic parsing limit. Larger payloads remain preserved as immutable exact RAW rather than risking an unbounded JSON object graph.
 
           ## Evidence safety
 
@@ -126,7 +167,8 @@ jobs:
             "release/${APK_NAME}" \
             "release/${CHECKSUM_NAME}" \
             "release/${SIZE_REPORT_NAME}" \
+            "release/${SIGNING_REPORT_NAME}" \
             --target "${GITHUB_SHA}" \
-            --title "BKE DNA Logger Android 0.1.0-alpha.2" \
+            --title "BKE DNA Logger Android 0.1.0-alpha.3" \
             --notes-file release/RELEASE_NOTES.md \
             --prerelease
