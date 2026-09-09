@@ -92,8 +92,6 @@ class AndroidHumanExportService(
         sourceShas.forEach { source ->
             files += File(captureRoot, "classifications/$source.json")
             files += File(captureRoot, "normalized/$source.json")
-            // Legacy bodies remain attributable only when this selected
-            // generation predates SQLite RAW and the shared body still exists.
             if (!hasSqliteRaw(source)) files += File(captureRoot, "bodies/$source.body")
         }
 
@@ -175,8 +173,13 @@ class AndroidHumanExportService(
         (0 until array.length()).map { array.getJSONObject(it).getString("sourceSha256") }.distinct()
     }
 
-    private fun resolvedGeneration(): AndroidWorkingDataGeneration = generation
-        ?: AndroidWorkingDataManager(appContext).generation(AndroidWorkingDataManager.LATEST_ID)
+    private fun resolvedGeneration(): AndroidWorkingDataGeneration {
+        generation?.let { return it }
+        val statePath = stateDirectory.absolutePath
+        return AndroidWorkingDataManager(appContext).listWorkingData()
+            .firstOrNull { it.conversationStateDirectory.absolutePath == statePath }
+            ?: AndroidWorkingDataManager(appContext).generation(AndroidWorkingDataManager.LATEST_ID)
+    }
 
     private fun hasSqliteRaw(sourceSha256: String): Boolean = runCatching {
         AndroidRawEvidenceStore(resolvedGeneration()).use { it.contains(sourceSha256) }
@@ -192,11 +195,6 @@ class AndroidHumanExportService(
         return null
     }
 
-    /**
-     * CLEAN contract: exactly JAN / RIGHT-HAND conversational turns.
-     * No title, timestamp, IDs, tool summaries, system/developer content or
-     * forensic metadata are emitted here.
-     */
     private fun renderCleanMarkdown(state: JSONObject): String = buildString {
         var wroteTurn = false
         orderedNodes(state).forEach { node ->
@@ -213,11 +211,6 @@ class AndroidHumanExportService(
         }
     }.trimEnd() + "\n"
 
-    /**
-     * RAW contract: preserve every unfiltered raw conversation payload source
-     * represented by this logical conversation, plus its exact capture
-     * observation envelopes. No tool/system/content filtering is performed.
-     */
     private fun renderRawToStream(
         state: JSONObject,
         descriptor: AndroidConversationExportDescriptor,
