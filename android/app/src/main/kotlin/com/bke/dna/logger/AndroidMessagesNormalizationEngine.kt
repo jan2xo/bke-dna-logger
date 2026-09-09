@@ -102,8 +102,16 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
             .put("normalizedAt", Instant.now().toString())
 
         Log.d(TAG, "BKE DNA normalization: messages_derivative_write_started")
-        AndroidDerivativeStore(appContext).use { store ->
-            store.putNormalizedJson(sourceSha256, normalized.toString(2))
+        try {
+            AndroidDerivativeStore(appContext).use { store ->
+                store.putNormalizedJson(sourceSha256, normalized.toString(2))
+            }
+        } catch (error: OutOfMemoryError) {
+            // OutOfMemoryError is not an Exception, so the outer derivation
+            // failure handler cannot expose it. Log only the failure class;
+            // never log the normalized payload or any user content.
+            Log.e(TAG, "BKE DNA normalization: messages_derivative_out_of_memory")
+            throw error
         }
         Log.d(TAG, "BKE DNA normalization: messages_derivative_write_complete")
         Log.d(TAG, "BKE DNA normalization: messages_array_normalization_complete")
