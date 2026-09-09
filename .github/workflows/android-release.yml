@@ -20,6 +20,7 @@ jobs:
       RELEASE_TAG: android-v0.1.0-alpha.2
       APK_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.2.apk
       CHECKSUM_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.2.apk.sha256
+      SIZE_REPORT_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.2.apk-size.json
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +41,9 @@ jobs:
       - name: Build installable Android owner-preview APK
         run: gradle -p android :app:assembleDebug --stacktrace
 
+      - name: Audit owner-preview APK size composition
+        run: python3 tests/android-apk-size-audit.py android/app/build/outputs/apk/debug/app-debug.apk --json-out android/app/build/reports/apk-size.json
+
       - name: Certify Android contracts
         run: |
           python3 tests/cross-device-reconciliation-smoke.py
@@ -50,11 +54,13 @@ jobs:
           python3 tests/android-foundation-smoke.py
           python3 tests/android-geckoview-runtime-smoke.py
           python3 tests/android-native-ingress-smoke.py
+          python3 tests/android-apk-size-audit.py --self-test
 
-      - name: Stage APK and checksum
+      - name: Stage APK checksum and size report
         run: |
           mkdir -p release
           cp android/app/build/outputs/apk/debug/app-debug.apk "release/${APK_NAME}"
+          cp android/app/build/reports/apk-size.json "release/${SIZE_REPORT_NAME}"
           (
             cd release
             sha256sum "${APK_NAME}" > "${CHECKSUM_NAME}"
@@ -67,6 +73,7 @@ jobs:
           path: |
             release/${{ env.APK_NAME }}
             release/${{ env.CHECKSUM_NAME }}
+            release/${{ env.SIZE_REPORT_NAME }}
           if-no-files-found: error
 
       - name: Publish GitHub prerelease
@@ -83,26 +90,28 @@ jobs:
 
           Owner/internal Android performance and storage preview.
 
-          ## What changed since alpha.1
+          ## Current architecture
 
-          - ChatGPT's GeckoSession stays alive while Working Data & Conversations is open; Back returns to the existing browser session instead of explicitly loading ChatGPT again.
-          - Captured response clones stream from `ReadableStream` in bounded 128 KiB pieces instead of first materializing the entire response with `arrayBuffer()`.
-          - Every streamed chunk waits for the Android native-message path before the next chunk is read, providing bounded backpressure.
-          - Raw evidence still streams to app-private partial files with incremental SHA-256, fsync, content-addressed promotion and deduplication.
-          - Classification/normalization/reconciliation run on a background single-thread derivative lane after raw evidence + observation + capture index are durable, so capture-end acknowledgement no longer waits for semantic processing.
-          - Working Data rotation/import/archive mutations pause only the capture writer and drain queued derivatives; they do not intentionally destroy the Gecko browser session.
-          - Adds red `PURGE VERIFIED RAW` and `PURGE ALL VERIFIED RAW` actions guarded by the exact confirmation `jan2x`.
-          - Purge is fail-closed: a conversation and every source must already be covered by the same verified `.dna`, and source evidence referenced by another Working Data conversation is retained.
-          - Purge removes only local heavy SHA-addressed raw/normalized/classification/observation files. SQLite and logical conversation state remain resident so the library/CLEAN reader does not disappear.
+          - ChatGPT's GeckoSession stays alive while Working Data & Conversations is open; Back returns to the existing browser session.
+          - Captured response clones stream from `ReadableStream` in bounded 128 KiB pieces with backpressure into Android.
+          - Exact RAW is staged crash-safely, then stored as independently compressed and byte-for-byte verified chunks inside Working Data SQLite.
+          - Classification and normalized derivatives for new sources are stored inside Working Data SQLite instead of permanent loose derivative files.
+          - Classification/normalization/reconciliation run on a background single-thread breathing queue after RAW evidence and capture metadata are durable.
+          - CLEAN is paged from SQLite logical rows; RAW is read through a bounded SQLite-first source pager.
+          - Working Data backup contains the actual self-contained SQLite generation and is re-opened/checksum-verified after writing.
+          - Working Data backup restore creates a separate verified read-only generation; foreign SQLite is never merged or attached into Latest.
+          - Saved Working Data generations can be deleted directly with exact `jan2x` confirmation. `.dna` is a portable conversation export, not the Working Data deletion gate.
+          - Gecko file prompts support document/gallery selection, multiple files, folders and user-controlled camera image/video capture without automatically duplicating selected local files into DNA evidence.
+          - APK composition is measured during CI/release so GeckoView/native-library cost and app-owned DEX/assets/resources remain visible.
 
           ## Current semantic-processing boundary
 
-          Large-response transport is now streamed and capture processing is backgrounded. The existing deep JSON classifier/normalizer still keeps its conservative 16 MiB semantic parsing limit in this alpha; payloads above that limit remain preserved as immutable RAW evidence rather than risking an unbounded JSON object graph. Streaming semantic normalization is a separate follow-up gate.
+          Large-response transport is streamed and capture processing is backgrounded. Deep JSON classifier/normalizer work still keeps its conservative 16 MiB semantic parsing limit in this alpha; larger payloads remain preserved as immutable exact RAW rather than risking an unbounded JSON object graph.
 
           ## Device target
 
           - Android API 26+.
-          - arm64-v8a.
+          - arm64-v8a only.
 
           ## Signing status
 
@@ -110,12 +119,13 @@ jobs:
 
           ## Evidence safety
 
-          The logger does not capture Authorization values, cookies, request-header collections, or response-header collections. Verified conversation `.dna` remains the only durability authority for destructive local evidence cleanup.
+          The logger does not capture Authorization values, cookies, request-header collections, or response-header collections. SQLite Working Data is the local durability authority; portable `.dna` export remains explicit and owner-controlled.
           EOF
 
           gh release create "${RELEASE_TAG}" \
             "release/${APK_NAME}" \
             "release/${CHECKSUM_NAME}" \
+            "release/${SIZE_REPORT_NAME}" \
             --target "${GITHUB_SHA}" \
             --title "BKE DNA Logger Android 0.1.0-alpha.2" \
             --notes-file release/RELEASE_NOTES.md \
