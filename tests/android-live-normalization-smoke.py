@@ -13,6 +13,7 @@ queue = (kotlin / "AndroidDerivationQueue.kt").read_text(encoding="utf-8")
 raw_store = (kotlin / "AndroidRawEvidenceStore.kt").read_text(encoding="utf-8")
 raw_access = (kotlin / "AndroidRawSourceAccess.kt").read_text(encoding="utf-8")
 derivative_store = (kotlin / "AndroidDerivativeStore.kt").read_text(encoding="utf-8")
+chunked_store = (kotlin / "AndroidChunkedNormalizedStore.kt").read_text(encoding="utf-8")
 derivative_access = (kotlin / "AndroidDerivativeSourceAccess.kt").read_text(encoding="utf-8")
 runtime = (kotlin / "AndroidCaptureRuntime.kt").read_text(encoding="utf-8")
 aggregation = (kotlin / "AndroidConversationAggregationEngine.kt").read_text(encoding="utf-8")
@@ -52,25 +53,34 @@ for token in (
 ):
     assert token in graph_normalizer, token
 
-# Modern messages representation remains separate and graphless.
+# Modern messages representation remains separate and graphless, but its large
+# normalized derivative is now serialized directly into bounded SQLite chunks.
 for token in (
     'PARSER = "messages-array-v0"', 'COVERAGE_BASIS = "messages_array_no_graph_edges"',
     'AndroidRawSourceAccess.readAllBytes', 'JSONTokener(String(rawBytes, Charsets.UTF_8))',
-    'AndroidDerivativeSourceAccess.readClassification', 'AndroidDerivativeSourceAccess.readNormalized',
-    'store.putNormalizedJson(sourceSha256, normalized.toString(2))',
+    'AndroidDerivativeSourceAccess.readClassification',
+    'AndroidDerivativeSourceAccess.readNormalizedMetadata',
+    'AndroidChunkedNormalizedStore(appContext)', 'store.putNormalizedJsonStream(',
+    'writeNormalizedPayload(',
     'root.optJSONArray("messages")', 'root.opt("conversation_id")', 'root.opt("current_node")',
     'message.opt("id")', 'message.optJSONObject("author")', 'message.opt("create_time")',
     'message.opt("content")', 'content.optJSONArray("parts")',
-    '.put("coverageStatus", "indeterminate")', '.put("rootFound", false)',
-    '.put("currentLeafFound", false)', '.put("parentChainComplete", false)',
-    '.put("parentNativeId", JSONObject.NULL)', '.put("childNativeIds", JSONArray())',
+    'writer.name("coverageStatus").value("indeterminate")',
+    'writer.name("rootFound").value(false)',
+    'writer.name("currentLeafFound").value(false)',
+    'writer.name("parentChainComplete").value(false)',
+    'writer.name("parentNativeId").nullValue()',
+    'writer.name("childNativeIds").beginArray().endArray()',
     'sourceCurrentNodeId?.takeIf { it in knownMessageIds }',
+    '"BKE DNA normalization: messages_derivative_write_started"',
+    '"BKE DNA normalization: messages_derivative_write_complete"',
     '"BKE DNA normalization: messages_array_normalization_complete"',
 ):
     assert token in messages_normalizer, token
 for forbidden in (
     'optJSONObject("mapping")', 'message.opt("parent")', 'message.optJSONArray("children")',
     'bodiesDirectory', 'classificationsDirectory', 'normalizedDirectory', 'writeDerivativeAtomically',
+    'normalized.toString(2)',
 ):
     assert forbidden not in messages_normalizer, forbidden
 
@@ -123,9 +133,7 @@ for token in (
 ):
     assert token in raw_access, token
 
-# PR5 collapses classification + normalized JSON into the same Working Data
-# SQLite. Exact serialized derivative payloads have integrity metadata and are
-# immutable per source SHA; conflicting rewrites fail closed.
+# Existing inline PR5 derivatives remain intact for compatibility.
 for token in (
     'CREATE TABLE IF NOT EXISTS derivative_classification (',
     'CREATE TABLE IF NOT EXISTS derivative_normalized (',
@@ -137,14 +145,29 @@ for token in (
 ):
     assert token in derivative_store, token
 
-# Derivative reads are SQLite-first, federated across Latest + saved Working
-# Data, and retain only a legacy loose-file fallback for pre-PR5 generations.
+# Large modern normalized derivatives use a separate migration-safe chunked
+# SQLite representation with bounded serialization and verification.
+for token in (
+    'CREATE TABLE IF NOT EXISTS derivative_normalized_chunked (',
+    'CREATE TABLE IF NOT EXISTS derivative_normalized_chunk (',
+    'payload_utf8 BLOB NOT NULL', 'chunk_count INTEGER NOT NULL',
+    'PAYLOAD_CHUNK_BYTES = 64 * 1024',
+    'fun putNormalizedJsonStream(', 'JsonWriter(OutputStreamWriter(sink, Charsets.UTF_8))',
+    'verifyStoredPayload(sourceSha256, identity)',
+    'database.setTransactionSuccessful()',
+    '"Derivative SQLite round-trip mismatch"',
+):
+    assert token in chunked_store, token
+
+# Derivative reads federate chunked, inline, and legacy generations.
 for token in (
     'object AndroidDerivativeSourceAccess',
     'AndroidWorkingDataManager(appContext).listWorkingData()',
+    'AndroidChunkedNormalizedStore(generation)',
     'AndroidDerivativeStore(generation)',
     'store.classificationJson(sourceSha256)', 'store.normalizedJson(sourceSha256)',
-    'store.listNormalizedSourceSha256s()',
+    'store.listSourceSha256s()', 'store.listNormalizedSourceSha256s()',
+    'readNormalizedMetadata(', 'withNormalizedJsonReader(',
     'File(captureRoot, "$directoryName/$sourceSha256.json")',
 ):
     assert token in derivative_access, token
