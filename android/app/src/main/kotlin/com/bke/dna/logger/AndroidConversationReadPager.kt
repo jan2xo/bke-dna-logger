@@ -3,15 +3,13 @@ package com.bke.dna.logger
 import android.database.sqlite.SQLiteDatabase
 import org.json.JSONArray
 import java.io.File
-import java.io.RandomAccessFile
 
 /**
  * Bounded interactive reader sources.
  *
  * CLEAN pages are resolved from the selected Working Data SQLite projection.
- * RAW pages currently stream the exact SHA-addressed body files in bounded byte
- * windows. PR4 will swap that RAW backend to SQLite without changing the reader
- * paging contract.
+ * RAW pages resolve exact source bytes through SQLite first, with legacy shared
+ * SHA-addressed .body fallback only for generations that predate RAW-in-SQLite.
  */
 class AndroidCleanConversationPager(
     generation: AndroidWorkingDataGeneration,
@@ -153,12 +151,12 @@ data class AndroidCleanPage(
 )
 
 /**
- * Exact RAW stream pager. Only one bounded body window is materialized at a
- * time. The source list comes from the selected generation's SQLite metadata;
- * body bytes remain the current alpha.2 SHA-addressed evidence backend.
+ * Exact RAW stream pager. Only one bounded source window is materialized at a
+ * time. New generations read compressed RAW chunks from their selected SQLite;
+ * legacy generations can still fall back to shared SHA-addressed .body files.
  */
 class AndroidRawConversationPager(
-    generation: AndroidWorkingDataGeneration,
+    private val generation: AndroidWorkingDataGeneration,
     private val conversationKey: String,
     private val captureRoot: File,
 ) : AutoCloseable {
@@ -176,57 +174,44 @@ class AndroidRawConversationPager(
         require(cursor.sourceIndex in sources.indices)
         require(cursor.byteOffset >= 0L)
         val source = sources[cursor.sourceIndex]
-        val body = File(captureRoot, "bodies/${source.sha256}.body")
-        if (!body.isFile) {
-            val next = nextSourceCursor(cursor.sourceIndex)
+        val resolved = AndroidRawSourceAccess.readPage(
+            generation = generation,
+            captureRoot = captureRoot,
+            sourceSha256 = source.sha256,
+            byteOffset = cursor.byteOffset,
+            maxBytes = RAW_PAGE_BYTES,
+        ) ?: return AndroidRawPage(
+            cursor = cursor,
+            text = rawHeader(source) + "\n[RAW BODY IS NOT RESIDENT IN THIS WORKING DATA]\n",
+            nextCursor = nextSourceCursor(cursor.sourceIndex),
+            sourceCount = sources.size,
+        )
+
+        if (cursor.byteOffset >= resolved.sourceLength || resolved.bytes.isEmpty()) {
             return AndroidRawPage(
                 cursor = cursor,
-                text = rawHeader(source) + "\n[RAW BODY IS NOT RESIDENT IN THIS WORKING DATA]\n",
-                nextCursor = next,
+                text = rawHeader(source) + "\n[END OF SOURCE]\n",
+                nextCursor = nextSourceCursor(cursor.sourceIndex),
                 sourceCount = sources.size,
             )
         }
 
-        RandomAccessFile(body, "r").use { file ->
-            if (cursor.byteOffset >= file.length()) {
-                val next = nextSourceCursor(cursor.sourceIndex)
-                return AndroidRawPage(
-                    cursor = cursor,
-                    text = rawHeader(source) + "\n[END OF SOURCE]\n",
-                    nextCursor = next,
-                    sourceCount = sources.size,
-                )
-            }
-            file.seek(cursor.byteOffset)
-            val maxRead = minOf(RAW_PAGE_BYTES.toLong(), file.length() - cursor.byteOffset).toInt()
-            val buffer = ByteArray(maxRead)
-            val read = file.read(buffer)
-            if (read <= 0) {
-                return AndroidRawPage(
-                    cursor = cursor,
-                    text = rawHeader(source) + "\n[END OF SOURCE]\n",
-                    nextCursor = nextSourceCursor(cursor.sourceIndex),
-                    sourceCount = sources.size,
-                )
-            }
-
-            val safeLength = safeUtf8PrefixLength(buffer, read)
-            val consumed = if (safeLength > 0) safeLength else read
-            val text = String(buffer, 0, consumed, Charsets.UTF_8)
-            val nextOffset = cursor.byteOffset + consumed
-            val nextCursor = if (nextOffset < file.length()) {
-                AndroidRawCursor(cursor.sourceIndex, nextOffset)
-            } else {
-                nextSourceCursor(cursor.sourceIndex)
-            }
-            val prefix = if (cursor.byteOffset == 0L) rawHeader(source) else ""
-            return AndroidRawPage(
-                cursor = cursor,
-                text = prefix + text,
-                nextCursor = nextCursor,
-                sourceCount = sources.size,
-            )
+        val safeLength = safeUtf8PrefixLength(resolved.bytes, resolved.bytes.size)
+        val consumed = if (safeLength > 0) safeLength else resolved.bytes.size
+        val text = String(resolved.bytes, 0, consumed, Charsets.UTF_8)
+        val nextOffset = cursor.byteOffset + consumed
+        val nextCursor = if (nextOffset < resolved.sourceLength) {
+            AndroidRawCursor(cursor.sourceIndex, nextOffset)
+        } else {
+            nextSourceCursor(cursor.sourceIndex)
         }
+        val prefix = if (cursor.byteOffset == 0L) rawHeader(source) else ""
+        return AndroidRawPage(
+            cursor = cursor,
+            text = prefix + text,
+            nextCursor = nextCursor,
+            sourceCount = sources.size,
+        )
     }
 
     private fun loadSources(): List<RawSource> {
