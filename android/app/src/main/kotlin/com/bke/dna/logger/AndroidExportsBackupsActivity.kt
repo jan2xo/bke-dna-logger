@@ -224,12 +224,21 @@ class AndroidExportsBackupsActivity : Activity() {
 
         val totalWorkingBytes = AndroidWorkingStorage.workingBytes(this) + manager.savedWorkingDataBytes()
         val warning = DnaReconciliationContract.shouldNotifyStorage(totalWorkingBytes)
+        val rawTelemetry = runCatching { AndroidWorkingDataTelemetry.inspect(inspected) }.getOrNull()
         content.addView(TextView(this).apply {
             text = buildString {
-                append("Total local Working Data: ${formatBytes(totalWorkingBytes)}")
-                append("\nInspected generation SQLite/state: ${formatBytes(inspected.snapshotBytes)}")
+                append("Physical local Working Data: ${formatBytes(totalWorkingBytes)}")
+                append("\nInspected generation physical SQLite/state: ${formatBytes(inspected.snapshotBytes)}")
+                rawTelemetry?.let { telemetry ->
+                    append("\nInspected exact RAW represented: ${formatBytes(telemetry.exactRawBytes)}")
+                    append("\nInspected compressed RAW payload: ${formatBytes(telemetry.compressedRawPayloadBytes)}")
+                    append("\nInspected verified RAW sources: ${telemetry.verifiedSourceCount}")
+                    if (telemetry.exactRawBytes > telemetry.compressedRawPayloadBytes) {
+                        append("\nRAW is stored compressed; exact bytes are length + SHA-256 verified during ingest.")
+                    }
+                }
                 append("\nWorking Data generations: ${generations.size}")
-                append("\nNotify threshold: 1 GiB — capture continues; Jan decides when saved generations are deleted.")
+                append("\nNotify threshold: 1 GiB physical storage — capture continues; Jan decides when saved generations are deleted.")
                 if (warning) append("\n⚠ Storage is above the warning threshold.")
             }
             textSize = 13f

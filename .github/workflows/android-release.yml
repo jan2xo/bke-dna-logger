@@ -17,11 +17,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: android-v0.1.0-alpha.3
-      APK_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.3.apk
-      CHECKSUM_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.3.apk.sha256
-      SIZE_REPORT_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.3.apk-size.json
-      SIGNING_REPORT_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.3.signing.txt
+      RELEASE_TAG: android-v0.1.0-alpha.4
+      APK_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.4.apk
+      CHECKSUM_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.4.apk.sha256
+      SIZE_REPORT_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.4.apk-size.json
+      SIGNING_REPORT_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.4.signing.txt
       RELEASE_APK: android/app/build/outputs/apk/release/app-release.apk
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +90,7 @@ jobs:
           python3 tests/android-dna-reconciliation-import-smoke.py
           python3 tests/android-conversation-reconciliation-smoke.py
           python3 tests/android-live-normalization-smoke.py
+          python3 tests/android-sqlite-normalization-recovery-smoke.py
           python3 tests/android-exports-backups-smoke.py
           python3 tests/android-foundation-smoke.py
           python3 tests/android-geckoview-runtime-smoke.py
@@ -111,7 +112,7 @@ jobs:
       - name: Preserve production release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bke-dna-logger-android-0.1.0-alpha.3
+          name: bke-dna-logger-android-0.1.0-alpha.4
           path: |
             release/${{ env.APK_NAME }}
             release/${{ env.CHECKSUM_NAME }}
@@ -129,9 +130,15 @@ jobs:
           fi
 
           cat > release/RELEASE_NOTES.md <<'EOF'
-          # BKE DNA Logger Android 0.1.0-alpha.3
+          # BKE DNA Logger Android 0.1.0-alpha.4
 
-          Production-signed owner/internal Android release candidate containing the completed nine-PR SQLite/GeckoView architecture program.
+          Production-signed normalization recovery hotfix for the SQLite-first Android Working Data architecture.
+
+          ## Fixed
+
+          - Fixes a stale normalization-dispatcher lookup that still expected retired loose `captures/classifications/<sha>.json` files after classification derivatives moved into SQLite.
+          - Adds a one-shot repair for alpha.3 Working Data: DONE conversation candidates with SQLite classification but no normalized derivative are re-armed and processed from already verified SQLite RAW. No recapture is required.
+          - Working Data now distinguishes physical compressed storage from the exact RAW byte volume represented, including verified RAW source count and compressed RAW payload size.
 
           ## Release identity
 
@@ -140,27 +147,11 @@ jobs:
           - The workflow verifies the APK signature with `apksigner` and refuses the standard Android debug certificate.
           - arm64-v8a only.
 
-          ## Current architecture
-
-          - ChatGPT's GeckoSession stays alive while Working Data & Conversations is open; Back returns to the existing browser session.
-          - Captured response clones stream from `ReadableStream` in bounded 128 KiB pieces with backpressure into Android.
-          - Exact RAW is staged crash-safely, then stored as independently compressed and byte-for-byte verified chunks inside Working Data SQLite.
-          - Classification and normalized derivatives for new sources are stored inside Working Data SQLite instead of permanent loose derivative files.
-          - Classification/normalization/reconciliation run on a background single-thread breathing queue after RAW evidence and capture metadata are durable.
-          - CLEAN is paged from SQLite logical rows; RAW is read through a bounded SQLite-first source pager.
-          - Working Data backup contains the actual self-contained SQLite generation and is re-opened/checksum-verified after writing.
-          - Working Data backup restore creates a separate verified read-only generation; foreign SQLite is never merged or attached into Latest.
-          - Saved Working Data generations can be deleted directly with exact `jan2x` confirmation. `.dna` is a portable conversation export, not the Working Data deletion gate.
-          - Gecko file prompts support document/gallery selection, multiple files, folders and user-controlled camera image/video capture without automatically duplicating selected local files into DNA evidence.
-          - APK composition is measured during CI/release so GeckoView/native-library cost and app-owned DEX/assets/resources remain visible.
-
-          ## Semantic-processing boundary
-
-          Deep JSON classifier/normalizer work still keeps its conservative 16 MiB semantic parsing limit. Larger payloads remain preserved as immutable exact RAW rather than risking an unbounded JSON object graph.
-
           ## Evidence safety
 
-          The logger does not capture Authorization values, cookies, request-header collections, or response-header collections. SQLite Working Data is the local durability authority; portable `.dna` export remains explicit and owner-controlled.
+          Exact RAW remains the authority. Existing RAW is re-read from SQLite and verified by byte length + SHA-256 before semantic recovery proceeds. This hotfix does not weaken classifier thresholds, does not delete RAW, and does not merge foreign SQLite generations.
+
+          Deep JSON classifier/normalizer work retains the conservative 16 MiB semantic parsing limit. Larger payloads remain preserved as immutable exact RAW.
           EOF
 
           gh release create "${RELEASE_TAG}" \
@@ -169,6 +160,6 @@ jobs:
             "release/${SIZE_REPORT_NAME}" \
             "release/${SIGNING_REPORT_NAME}" \
             --target "${GITHUB_SHA}" \
-            --title "BKE DNA Logger Android 0.1.0-alpha.3" \
+            --title "BKE DNA Logger Android 0.1.0-alpha.4" \
             --notes-file release/RELEASE_NOTES.md \
             --prerelease
