@@ -1,10 +1,14 @@
 package com.bke.dna.logger
 
 import android.content.Context
+import android.util.JsonReader
+import android.util.JsonToken
+import android.util.JsonWriter
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.io.OutputStreamWriter
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -39,19 +43,32 @@ class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
     /** Rebuild only the logical conversation touched by a live normalized capture. */
     fun aggregateConversation(conversationNativeId: String): AndroidLogicalConversation? {
         require(conversationNativeId.isNotBlank())
-        val snapshots = readSnapshots().filter { it.conversationNativeId == conversationNativeId }
+        val snapshots = readSnapshots(conversationNativeId)
         return if (snapshots.isEmpty()) null else aggregateConversationState(conversationNativeId, snapshots)
     }
 
     override fun close() = index.close()
 
-    private fun readSnapshots(): List<Snapshot> {
+    private fun readSnapshots(targetConversationNativeId: String? = null): List<Snapshot> {
         val observedAtBySource = readObservationTimes()
         return AndroidDerivativeSourceAccess.listNormalizedSourceSha256s(appContext)
             .mapNotNull { sourceSha256 ->
-                val payload = AndroidDerivativeSourceAccess.readNormalized(appContext, sourceSha256)
+                val metadata = AndroidDerivativeSourceAccess.readNormalizedMetadata(appContext, sourceSha256)
                     ?: return@mapNotNull null
-                runCatching { readSnapshot(payload, observedAtBySource) }.getOrNull()
+                if (
+                    targetConversationNativeId != null &&
+                    metadata.conversationNativeId != targetConversationNativeId
+                ) {
+                    return@mapNotNull null
+                }
+                runCatching {
+                    AndroidDerivativeSourceAccess.withNormalizedJsonReader(
+                        appContext,
+                        sourceSha256,
+                    ) { reader ->
+                        readSnapshot(reader, observedAtBySource)
+                    }
+                }.getOrNull()
             }
     }
 
@@ -76,44 +93,116 @@ class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
     }
 
     private fun readSnapshot(
-        payloadJson: String,
+        reader: JsonReader,
         observedAtBySource: Map<String, String>,
     ): Snapshot? {
-        val root = JSONObject(payloadJson)
-        val conversationNativeId = root.optNullableString("conversationNativeId")
-            ?.takeIf { it.isNotBlank() }
-            ?: return null
-        val sourceSha256 = root.getString("sourceSha256")
-        val normalizedAt = root.getString("normalizedAt")
-        val observedAt = observedAtBySource[sourceSha256] ?: normalizedAt
-        val nodeArray = root.getJSONArray("nodes")
-        val nodes = buildList {
-            for (index in 0 until nodeArray.length()) {
-                val node = nodeArray.getJSONObject(index)
-                add(
-                    SnapshotNode(
-                        nodeNativeId = node.getString("nodeNativeId"),
-                        messageNativeId = node.optNullableString("messageNativeId"),
-                        parentNativeId = node.optNullableString("parentNativeId"),
-                        childNativeIds = node.optStringList("childNativeIds"),
-                        role = node.optNullableString("role"),
-                        createdAt = node.optNullableString("createdAt"),
-                        textParts = node.optStringList("textParts"),
-                        contentJson = node.optNullableString("contentJson"),
-                    ),
-                )
+        var sourceSha256: String? = null
+        var conversationNativeId: String? = null
+        var currentNodeNativeId: String? = null
+        var coverageStatus: String? = null
+        var coverageBasis: String? = null
+        var normalizedAt: String? = null
+        val nodes = mutableListOf<SnapshotNode>()
+
+        reader.beginObject()
+        while (reader.hasNext()) {
+            when (reader.nextName()) {
+                "sourceSha256" -> sourceSha256 = nextNullableString(reader)
+                "conversationNativeId" -> conversationNativeId = nextNullableString(reader)
+                "currentNodeNativeId" -> currentNodeNativeId = nextNullableString(reader)
+                "coverageStatus" -> coverageStatus = nextNullableString(reader)
+                "coverageBasis" -> coverageBasis = nextNullableString(reader)
+                "normalizedAt" -> normalizedAt = nextNullableString(reader)
+                "nodes" -> {
+                    reader.beginArray()
+                    while (reader.hasNext()) {
+                        readSnapshotNode(reader)?.let(nodes::add)
+                    }
+                    reader.endArray()
+                }
+                else -> reader.skipValue()
             }
         }
+        reader.endObject()
+
+        val source = sourceSha256?.takeIf { it.isNotBlank() } ?: return null
+        val conversation = conversationNativeId?.takeIf { it.isNotBlank() } ?: return null
+        val normalized = normalizedAt?.takeIf { it.isNotBlank() } ?: return null
+        val observedAt = observedAtBySource[source] ?: normalized
 
         return Snapshot(
-            sourceSha256 = sourceSha256,
-            conversationNativeId = conversationNativeId,
-            currentNodeNativeId = root.optNullableString("currentNodeNativeId"),
-            coverageStatus = root.getString("coverageStatus"),
-            coverageBasis = root.getString("coverageBasis"),
+            sourceSha256 = source,
+            conversationNativeId = conversation,
+            currentNodeNativeId = currentNodeNativeId,
+            coverageStatus = coverageStatus ?: "indeterminate",
+            coverageBasis = coverageBasis ?: MESSAGES_COVERAGE_BASIS,
             observedAt = observedAt,
             nodes = nodes,
         )
+    }
+
+    private fun readSnapshotNode(reader: JsonReader): SnapshotNode? {
+        if (reader.peek() == JsonToken.NULL) {
+            reader.nextNull()
+            return null
+        }
+
+        var nodeNativeId: String? = null
+        var messageNativeId: String? = null
+        var parentNativeId: String? = null
+        var role: String? = null
+        var createdAt: String? = null
+        var contentJson: String? = null
+        var childNativeIds = emptyList<String>()
+        var textParts = emptyList<String>()
+
+        reader.beginObject()
+        while (reader.hasNext()) {
+            when (reader.nextName()) {
+                "nodeNativeId" -> nodeNativeId = nextNullableString(reader)
+                "messageNativeId" -> messageNativeId = nextNullableString(reader)
+                "parentNativeId" -> parentNativeId = nextNullableString(reader)
+                "childNativeIds" -> childNativeIds = readStringList(reader)
+                "role" -> role = nextNullableString(reader)
+                "createdAt" -> createdAt = nextNullableString(reader)
+                "textParts" -> textParts = readStringList(reader)
+                "contentJson" -> contentJson = nextNullableString(reader)
+                else -> reader.skipValue()
+            }
+        }
+        reader.endObject()
+
+        val nodeId = nodeNativeId?.takeIf { it.isNotBlank() } ?: return null
+        return SnapshotNode(
+            nodeNativeId = nodeId,
+            messageNativeId = messageNativeId,
+            parentNativeId = parentNativeId,
+            childNativeIds = childNativeIds,
+            role = role,
+            createdAt = createdAt,
+            textParts = textParts,
+            contentJson = contentJson,
+        )
+    }
+
+    private fun nextNullableString(reader: JsonReader): String? =
+        if (reader.peek() == JsonToken.NULL) {
+            reader.nextNull()
+            null
+        } else {
+            reader.nextString()
+        }
+
+    private fun readStringList(reader: JsonReader): List<String> = buildList {
+        reader.beginArray()
+        while (reader.hasNext()) {
+            if (reader.peek() == JsonToken.NULL) {
+                reader.nextNull()
+            } else {
+                reader.nextString().takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
+        reader.endArray()
     }
 
     private fun aggregateConversationState(
@@ -187,17 +276,19 @@ class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
         )
 
         val relativePath = "conversations/$conversationKey.json"
-        writeState(File(captureRoot, relativePath), state.toJson().toString(2))
+        writeState(File(captureRoot, relativePath), state)
         index.replaceLogicalConversation(state, relativePath)
         return state
     }
 
-    private fun writeState(target: File, text: String) {
+    private fun writeState(target: File, state: AndroidLogicalConversation) {
         val temp = File(target.parentFile, ".${target.name}.${System.nanoTime()}.tmp")
         try {
             FileOutputStream(temp, false).use { output ->
-                output.write(text.toByteArray(Charsets.UTF_8))
-                output.flush()
+                val writer = JsonWriter(OutputStreamWriter(output, Charsets.UTF_8))
+                writer.setIndent("  ")
+                writeLogicalConversation(writer, state)
+                writer.flush()
                 output.fd.sync()
             }
             try {
@@ -213,6 +304,69 @@ class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
         } finally {
             if (temp.exists()) temp.delete()
         }
+    }
+
+    private fun writeLogicalConversation(writer: JsonWriter, state: AndroidLogicalConversation) {
+        writer.beginObject()
+        writer.name("conversationKey").value(state.conversationKey)
+        writer.name("conversationNativeId").value(state.conversationNativeId)
+        writer.name("currentNodeNativeId")
+        if (state.currentNodeNativeId == null) writer.nullValue() else writer.value(state.currentNodeNativeId)
+        writer.name("stateObservedThrough").value(state.stateObservedThrough)
+        writer.name("coverageStatus").value(state.coverageStatus)
+        writer.name("coverageBasis").value(state.coverageBasis)
+        writer.name("rootFound").value(state.rootFound)
+        writer.name("currentNodeFound").value(state.currentNodeFound)
+        writer.name("currentLeafFound").value(state.currentLeafFound)
+        writer.name("parentChainComplete").value(state.parentChainComplete)
+        writer.name("cycleDetected").value(state.cycleDetected)
+        writeStringList(writer, "unresolvedParentNativeIds", state.unresolvedParentNativeIds)
+        writeStringList(writer, "unresolvedChildNativeIds", state.unresolvedChildNativeIds)
+
+        writer.name("sources").beginArray()
+        state.sources.forEach { source ->
+            writer.beginObject()
+            writer.name("sourceSha256").value(source.sourceSha256)
+            writer.name("observedAt").value(source.observedAt)
+            writer.name("currentNodeNativeId")
+            if (source.currentNodeNativeId == null) writer.nullValue() else writer.value(source.currentNodeNativeId)
+            writer.name("coverageStatus").value(source.coverageStatus)
+            writer.name("coverageBasis").value(source.coverageBasis)
+            writer.endObject()
+        }
+        writer.endArray()
+
+        writer.name("nodes").beginArray()
+        state.nodes.forEach { node ->
+            writer.beginObject()
+            writer.name("nodeNativeId").value(node.nodeNativeId)
+            writeStringList(writer, "messageNativeIds", node.messageNativeIds)
+            writeStringList(writer, "parentNativeIds", node.parentNativeIds)
+            writeStringList(writer, "childNativeIds", node.childNativeIds)
+            writeStringList(writer, "roles", node.roles)
+            writeStringList(writer, "createdAtValues", node.createdAtValues)
+            writer.name("revisions").beginArray()
+            node.revisions.forEach { revision ->
+                writer.beginObject()
+                writer.name("revisionSha256").value(revision.revisionSha256)
+                writer.name("contentJson").value(revision.contentJson)
+                writeStringList(writer, "textParts", revision.textParts)
+                writeStringList(writer, "sourceSha256s", revision.sourceSha256s)
+                writer.name("firstObservedAt").value(revision.firstObservedAt)
+                writer.name("lastObservedAt").value(revision.lastObservedAt)
+                writer.endObject()
+            }
+            writer.endArray()
+            writer.endObject()
+        }
+        writer.endArray()
+        writer.endObject()
+    }
+
+    private fun writeStringList(writer: JsonWriter, name: String, values: List<String>) {
+        writer.name(name).beginArray()
+        values.forEach(writer::value)
+        writer.endArray()
     }
 
     private fun computeGraphlessCoverage(
@@ -502,18 +656,6 @@ data class AndroidLogicalRevision(
         .put("sourceSha256s", JSONArray(sourceSha256s))
         .put("firstObservedAt", firstObservedAt)
         .put("lastObservedAt", lastObservedAt)
-}
-
-private fun JSONObject.optNullableString(key: String): String? =
-    if (has(key) && !isNull(key)) getString(key) else null
-
-private fun JSONObject.optStringList(key: String): List<String> {
-    val array = optJSONArray(key) ?: return emptyList()
-    return buildList {
-        for (index in 0 until array.length()) {
-            if (!array.isNull(index)) array.optString(index)?.takeIf { it.isNotBlank() }?.let(::add)
-        }
-    }
 }
 
 private fun sha256Text(value: String): String =
