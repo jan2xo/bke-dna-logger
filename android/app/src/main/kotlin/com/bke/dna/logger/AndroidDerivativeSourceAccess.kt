@@ -12,13 +12,24 @@ import java.io.StringReader
  * New large normalized conversation derivatives may use bounded SQLite chunks.
  * Existing PR5 inline TEXT rows and pre-PR5 loose JSON remain readable so saved
  * Working Data generations stay migration-safe.
+ *
+ * Latest is the live writable generation and must always use the process-wide
+ * AndroidCaptureIndex pool. Only saved read-only generations are opened through
+ * their standalone SQLite snapshot files.
  */
 object AndroidDerivativeSourceAccess {
     fun readClassification(context: Context, sourceSha256: String): String? {
         val appContext = context.applicationContext
         val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
         for (generation in AndroidWorkingDataManager(appContext).listWorkingData()) {
-            readClassification(generation, captureRoot, sourceSha256)?.let { return it }
+            if (generation.isLatest) {
+                AndroidDerivativeStore(appContext).use { store ->
+                    store.classificationJson(sourceSha256)?.let { return it }
+                }
+                legacyDerivative(captureRoot, "classifications", sourceSha256)?.let { return it }
+            } else {
+                readClassification(generation, captureRoot, sourceSha256)?.let { return it }
+            }
         }
         return null
     }
@@ -27,7 +38,17 @@ object AndroidDerivativeSourceAccess {
         val appContext = context.applicationContext
         val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
         for (generation in AndroidWorkingDataManager(appContext).listWorkingData()) {
-            readNormalized(generation, captureRoot, sourceSha256)?.let { return it }
+            if (generation.isLatest) {
+                AndroidChunkedNormalizedStore(appContext).use { store ->
+                    store.normalizedJson(sourceSha256)?.let { return it }
+                }
+                AndroidDerivativeStore(appContext).use { store ->
+                    store.normalizedJson(sourceSha256)?.let { return it }
+                }
+                legacyDerivative(captureRoot, "normalized", sourceSha256)?.let { return it }
+            } else {
+                readNormalized(generation, captureRoot, sourceSha256)?.let { return it }
+            }
         }
         return null
     }
@@ -39,19 +60,37 @@ object AndroidDerivativeSourceAccess {
         val appContext = context.applicationContext
         val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
         for (generation in AndroidWorkingDataManager(appContext).listWorkingData()) {
-            AndroidChunkedNormalizedStore(generation).use { store ->
-                store.metadata(sourceSha256)?.let { metadata ->
-                    return AndroidNormalizedDerivativeMetadata(
-                        sourceSha256 = metadata.sourceSha256,
-                        conversationNativeId = metadata.conversationNativeId,
-                        normalizedAt = metadata.normalizedAt,
-                        storage = "sqlite-chunked-v1",
-                    )
+            if (generation.isLatest) {
+                AndroidChunkedNormalizedStore(appContext).use { store ->
+                    store.metadata(sourceSha256)?.let { metadata ->
+                        return AndroidNormalizedDerivativeMetadata(
+                            sourceSha256 = metadata.sourceSha256,
+                            conversationNativeId = metadata.conversationNativeId,
+                            normalizedAt = metadata.normalizedAt,
+                            storage = "sqlite-chunked-v1",
+                        )
+                    }
                 }
-            }
-            AndroidDerivativeStore(generation).use { store ->
-                store.normalizedJson(sourceSha256)?.let { payload ->
-                    parseNormalizedMetadata(payload)?.let { return it.copy(storage = "sqlite-inline-v1") }
+                AndroidDerivativeStore(appContext).use { store ->
+                    store.normalizedJson(sourceSha256)?.let { payload ->
+                        parseNormalizedMetadata(payload)?.let { return it.copy(storage = "sqlite-inline-v1") }
+                    }
+                }
+            } else {
+                AndroidChunkedNormalizedStore(generation).use { store ->
+                    store.metadata(sourceSha256)?.let { metadata ->
+                        return AndroidNormalizedDerivativeMetadata(
+                            sourceSha256 = metadata.sourceSha256,
+                            conversationNativeId = metadata.conversationNativeId,
+                            normalizedAt = metadata.normalizedAt,
+                            storage = "sqlite-chunked-v1",
+                        )
+                    }
+                }
+                AndroidDerivativeStore(generation).use { store ->
+                    store.normalizedJson(sourceSha256)?.let { payload ->
+                        parseNormalizedMetadata(payload)?.let { return it.copy(storage = "sqlite-inline-v1") }
+                    }
                 }
             }
             legacyDerivative(captureRoot, "normalized", sourceSha256)?.let { payload ->
@@ -69,14 +108,27 @@ object AndroidDerivativeSourceAccess {
         val appContext = context.applicationContext
         val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
         for (generation in AndroidWorkingDataManager(appContext).listWorkingData()) {
-            AndroidChunkedNormalizedStore(generation).use { store ->
-                if (store.hasPayload(sourceSha256)) {
-                    return store.withJsonReader(sourceSha256, block)
+            if (generation.isLatest) {
+                AndroidChunkedNormalizedStore(appContext).use { store ->
+                    if (store.hasPayload(sourceSha256)) {
+                        return store.withJsonReader(sourceSha256, block)
+                    }
                 }
-            }
-            AndroidDerivativeStore(generation).use { store ->
-                store.normalizedJson(sourceSha256)?.let { payload ->
-                    return JsonReader(StringReader(payload)).use(block)
+                AndroidDerivativeStore(appContext).use { store ->
+                    store.normalizedJson(sourceSha256)?.let { payload ->
+                        return JsonReader(StringReader(payload)).use(block)
+                    }
+                }
+            } else {
+                AndroidChunkedNormalizedStore(generation).use { store ->
+                    if (store.hasPayload(sourceSha256)) {
+                        return store.withJsonReader(sourceSha256, block)
+                    }
+                }
+                AndroidDerivativeStore(generation).use { store ->
+                    store.normalizedJson(sourceSha256)?.let { payload ->
+                        return JsonReader(StringReader(payload)).use(block)
+                    }
                 }
             }
             val legacy = File(captureRoot, "normalized/$sourceSha256.json")
@@ -119,7 +171,22 @@ object AndroidDerivativeSourceAccess {
         val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
         val sources = linkedSetOf<String>()
         AndroidWorkingDataManager(appContext).listWorkingData().forEach { generation ->
-            sources += listNormalizedSourceSha256s(generation, captureRoot)
+            if (generation.isLatest) {
+                AndroidChunkedNormalizedStore(appContext).use { store ->
+                    sources += store.listSourceSha256s()
+                }
+                AndroidDerivativeStore(appContext).use { store ->
+                    sources += store.listNormalizedSourceSha256s()
+                }
+                File(captureRoot, "normalized").listFiles().orEmpty()
+                    .filter { it.isFile && it.extension == "json" }
+                    .map { it.nameWithoutExtension }
+                    .filter(SHA256::matches)
+                    .sorted()
+                    .forEach(sources::add)
+            } else {
+                sources += listNormalizedSourceSha256s(generation, captureRoot)
+            }
         }
         return sources.sorted()
     }
