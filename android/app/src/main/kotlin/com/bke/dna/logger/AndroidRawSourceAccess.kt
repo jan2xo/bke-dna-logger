@@ -83,6 +83,23 @@ object AndroidRawSourceAccess {
         }
     }
 
+    /**
+     * Portable-export helper. A logical conversation may span Working Data
+     * rotations, so source lookup must federate Latest plus saved generations.
+     */
+    fun writeExactSource(
+        context: Context,
+        sourceSha256: String,
+        output: OutputStream,
+    ): Boolean {
+        val appContext = context.applicationContext
+        val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
+        for (generation in AndroidWorkingDataManager(appContext).listWorkingData()) {
+            if (writeExactSource(generation, captureRoot, sourceSha256, output)) return true
+        }
+        return false
+    }
+
     fun writeExactSource(
         generation: AndroidWorkingDataGeneration,
         captureRoot: File,
