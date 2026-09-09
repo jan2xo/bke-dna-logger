@@ -49,8 +49,9 @@ class AndroidLiveDerivationPipeline(context: Context) {
             // Exact RAW evidence is already verified inside Working Data SQLite.
             // Log only the exception class and stack trace; never log RAW payloads.
             val errorType = error.javaClass.simpleName.ifBlank { "Exception" }
+            Log.d(TAG, "BKE DNA derivation: derivative_failed")
             Log.d(TAG, "BKE DNA derivation: derivative_failed_$errorType")
-            Log.d(TAG, "BKE DNA derivation: derivative_failed", error)
+            Log.d(TAG, "BKE DNA derivation: derivative_failed_stack", error)
             false
         }
     }
