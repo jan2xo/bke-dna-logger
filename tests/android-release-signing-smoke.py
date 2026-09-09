@@ -17,8 +17,8 @@ def forbid(haystack: str, needle: str, where: str) -> None:
         raise AssertionError(f"forbidden {needle!r} in {where}")
 
 
-require(BUILD, 'versionCode = 4', 'android/app/build.gradle.kts')
-require(BUILD, 'versionName = "0.1.0-alpha.4"', 'android/app/build.gradle.kts')
+require(BUILD, 'versionCode = 5', 'android/app/build.gradle.kts')
+require(BUILD, 'versionName = "0.1.0-alpha.5"', 'android/app/build.gradle.kts')
 require(BUILD, 'create("release")', 'android/app/build.gradle.kts')
 require(BUILD, 'isDebuggable = false', 'android/app/build.gradle.kts')
 require(BUILD, 'BKE_ANDROID_RELEASE_KEYSTORE_PATH', 'android/app/build.gradle.kts')
@@ -26,7 +26,7 @@ require(BUILD, 'BKE_ANDROID_RELEASE_STORE_PASSWORD', 'android/app/build.gradle.k
 require(BUILD, 'BKE_ANDROID_RELEASE_KEY_ALIAS', 'android/app/build.gradle.kts')
 require(BUILD, 'BKE_ANDROID_RELEASE_KEY_PASSWORD', 'android/app/build.gradle.kts')
 
-require(WORKFLOW, 'RELEASE_TAG: android-v0.1.0-alpha.4', '.github/workflows/android-release.yml')
+require(WORKFLOW, 'RELEASE_TAG: android-v0.1.0-alpha.5', '.github/workflows/android-release.yml')
 require(WORKFLOW, ':app:assembleRelease', '.github/workflows/android-release.yml')
 require(WORKFLOW, 'android/app/build/outputs/apk/release/app-release.apk', '.github/workflows/android-release.yml')
 require(WORKFLOW, 'BKE_ANDROID_RELEASE_KEYSTORE_BASE64', '.github/workflows/android-release.yml')
@@ -36,7 +36,7 @@ require(WORKFLOW, 'BKE_ANDROID_RELEASE_KEY_PASSWORD', '.github/workflows/android
 require(WORKFLOW, 'apksigner', '.github/workflows/android-release.yml')
 require(WORKFLOW, 'CN=Android Debug', '.github/workflows/android-release.yml')
 require(WORKFLOW, 'release-signing.txt', '.github/workflows/android-release.yml')
-require(WORKFLOW, 'BKE-DNA-Logger-Android-0.1.0-alpha.4.apk', '.github/workflows/android-release.yml')
+require(WORKFLOW, 'BKE-DNA-Logger-Android-0.1.0-alpha.5.apk', '.github/workflows/android-release.yml')
 forbid(WORKFLOW, ':app:assembleDebug', '.github/workflows/android-release.yml')
 forbid(WORKFLOW, 'outputs/apk/debug/app-debug.apk', '.github/workflows/android-release.yml')
 forbid(WORKFLOW, 'uses Android debug signing', '.github/workflows/android-release.yml')
@@ -55,9 +55,9 @@ for path in ROOT.rglob('*'):
 require(WORKFLOW, 'gh release view "${RELEASE_TAG}"', '.github/workflows/android-release.yml')
 require(WORKFLOW, 'leaving the immutable release unchanged', '.github/workflows/android-release.yml')
 
-# A future accidental version drift should fail loudly rather than silently publishing under alpha.4.
+# A future accidental version drift should fail loudly rather than silently publishing under alpha.5.
 version_match = re.search(r'versionName\s*=\s*"([^"]+)"', BUILD)
-if not version_match or version_match.group(1) != '0.1.0-alpha.4':
-    raise AssertionError('release version drifted from 0.1.0-alpha.4')
+if not version_match or version_match.group(1) != '0.1.0-alpha.5':
+    raise AssertionError('release version drifted from 0.1.0-alpha.5')
 
 print('android production release signing contract smoke PASS')

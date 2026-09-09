@@ -8,28 +8,52 @@ import org.json.JSONObject
 import java.time.Instant
 
 /**
- * One-shot repair for alpha.3 jobs that were marked DONE after the dispatcher
- * looked only for the retired loose classification file.
+ * One-shot semantic recovery migrations for already durable SQLite RAW.
  *
- * Exact RAW and classification were already durable in SQLite. This migration
+ * Alpha.4 repaired the stale loose-classification dispatcher path. Alpha.5 adds
+ * explicit modern message-envelope and event-stream normalizers. Each migration
  * only re-arms DONE conversation candidates that still lack a normalized
- * derivative, allowing the normal queue to verify RAW and resume semantic work.
+ * derivative; RAW is never recaptured, deleted, or rewritten here.
  */
 object AndroidNormalizationRecovery {
     private const val TAG = "BkeDnaRecovery"
     private const val PREFS = "bke-dna-processing"
     private const val PREF_SQLITE_CLASSIFICATION_RECOVERY = "sqlite-classification-dispatcher-v1"
+    private const val PREF_MODERN_MESSAGES_RECOVERY = "modern-messages-normalizer-v2"
     private const val CANDIDATE_KIND = "conversation_payload_candidate"
     private const val STATUS_DONE = "DONE"
     private const val STATUS_WAITING = "WAITING"
-    private const val STAGE_RECOVERED = "RECOVERED_SQLITE_CLASSIFICATION"
+    private const val STAGE_SQLITE_RECOVERED = "RECOVERED_SQLITE_CLASSIFICATION"
+    private const val STAGE_MODERN_MESSAGES_RECOVERED = "RECOVERED_MODERN_MESSAGES"
 
     fun rearmOnce(context: Context): Int {
         val appContext = context.applicationContext
         val preferences = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (preferences.getBoolean(PREF_SQLITE_CLASSIFICATION_RECOVERY, false)) return 0
+        var recoveredTotal = 0
 
-        val recovered = AndroidCaptureIndex(appContext).use { index ->
+        if (!preferences.getBoolean(PREF_SQLITE_CLASSIFICATION_RECOVERY, false)) {
+            val recovered = rearmEligibleCandidates(appContext, STAGE_SQLITE_RECOVERED)
+            persistMarker(preferences, PREF_SQLITE_CLASSIFICATION_RECOVERY)
+            if (recovered > 0) {
+                Log.d(TAG, "BKE DNA recovery: rearmed_sqlite_classification_candidates")
+            }
+            recoveredTotal += recovered
+        }
+
+        if (!preferences.getBoolean(PREF_MODERN_MESSAGES_RECOVERY, false)) {
+            val recovered = rearmEligibleCandidates(appContext, STAGE_MODERN_MESSAGES_RECOVERED)
+            persistMarker(preferences, PREF_MODERN_MESSAGES_RECOVERY)
+            if (recovered > 0) {
+                Log.d(TAG, "BKE DNA recovery: rearmed_modern_message_candidates")
+            }
+            recoveredTotal += recovered
+        }
+
+        return recoveredTotal
+    }
+
+    private fun rearmEligibleCandidates(context: Context, recoveredStage: String): Int =
+        AndroidCaptureIndex(context).use { index ->
             val database = index.writableDatabase
             if (!hasTable(database, "derivation_queue") ||
                 !hasTable(database, "derivative_classification") ||
@@ -37,23 +61,22 @@ object AndroidNormalizationRecovery {
             ) {
                 0
             } else {
-                rearmCandidates(database)
+                rearmCandidates(database, recoveredStage)
             }
         }
 
+    private fun persistMarker(
+        preferences: android.content.SharedPreferences,
+        marker: String,
+    ) {
         check(
             preferences.edit()
-                .putBoolean(PREF_SQLITE_CLASSIFICATION_RECOVERY, true)
+                .putBoolean(marker, true)
                 .commit(),
         ) { "Unable to persist normalization recovery marker" }
-
-        if (recovered > 0) {
-            Log.d(TAG, "BKE DNA recovery: rearmed_sqlite_classification_candidates")
-        }
-        return recovered
     }
 
-    private fun rearmCandidates(database: SQLiteDatabase): Int {
+    private fun rearmCandidates(database: SQLiteDatabase, recoveredStage: String): Int {
         val candidateSources = mutableListOf<String>()
         database.rawQuery(
             """
@@ -86,7 +109,7 @@ object AndroidNormalizationRecovery {
             candidateSources.distinct().forEach { sourceSha256 ->
                 val values = ContentValues().apply {
                     put("status", STATUS_WAITING)
-                    put("stage", STAGE_RECOVERED)
+                    put("stage", recoveredStage)
                     putNull("last_error_code")
                     put("updated_at", Instant.now().toString())
                 }

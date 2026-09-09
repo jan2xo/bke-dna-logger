@@ -14,7 +14,7 @@ ui = (BASE / "AndroidExportsBackupsActivity.kt").read_text(encoding="utf-8")
 # the retired permanent captures/classifications/<sha>.json path.
 for token in (
     'AndroidDerivativeSourceAccess.readClassification(appContext, sourceSha256)',
-    'JSONObject(classificationPayload).getJSONObject("classification")',
+    'classificationRoot.optJSONObject("classification")',
     'AndroidRawSourceAccess.readAllBytes(appContext, sourceSha256, MAX_BODY_BYTES)',
     'root.optJSONObject("mapping") != null',
     'root.optJSONArray("messages") != null',
@@ -27,11 +27,12 @@ for forbidden in (
 ):
     assert forbidden not in dispatcher, forbidden
 
-# Alpha.3 repair is deliberately one-shot and re-arms only DONE candidates that
-# have SQLite classification but no normalized derivative. It never recaptures
-# or deletes RAW.
+# Semantic repairs are deliberately one-shot and re-arm only DONE candidates
+# that have SQLite classification but no normalized derivative. Alpha.5 gets a
+# new marker so candidates skipped by alpha.4 are eligible exactly once.
 for token in (
     'sqlite-classification-dispatcher-v1',
+    'modern-messages-normalizer-v2',
     'INNER JOIN derivative_classification c',
     'LEFT JOIN derivative_normalized n',
     'WHERE q.status = ?',
@@ -39,7 +40,10 @@ for token in (
     'conversation_payload_candidate',
     'put("status", STATUS_WAITING)',
     'RECOVERED_SQLITE_CLASSIFICATION',
-    'putBoolean(PREF_SQLITE_CLASSIFICATION_RECOVERY, true)',
+    'RECOVERED_MODERN_MESSAGES',
+    'persistMarker(preferences, PREF_SQLITE_CLASSIFICATION_RECOVERY)',
+    'persistMarker(preferences, PREF_MODERN_MESSAGES_RECOVERY)',
+    '.putBoolean(marker, true)',
 ):
     assert token in recovery, token
 for forbidden in ('deleteSource(', 'deleteDatabase(', 'captures/bodies', 'stagingFile.delete'):

@@ -7,12 +7,11 @@ import org.json.JSONTokener
 import java.time.Instant
 
 /**
- * Normalizes modern ChatGPT message collections independently of
- * generic-mapping-graph-v0. Message collections may be root-level or carried
- * inside one explicit JSON envelope. This representation does not expose
- * parent/child graph edges, so none are invented here.
+ * Normalizes conversation messages carried in a captured text/event-stream.
+ * The stream order is evidence: later observations of the same message id
+ * replace earlier incremental versions. No graph edges are synthesized.
  */
-class AndroidMessagesNormalizationEngine(context: android.content.Context) {
+class AndroidEventStreamNormalizationEngine(context: android.content.Context) {
     private val appContext = context.applicationContext
 
     fun normalizeCandidate(sourceSha256: String): AndroidNormalizationResult? {
@@ -39,55 +38,60 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
             return null
         }
 
-        val root = try {
-            val tokener = JSONTokener(String(rawBytes, Charsets.UTF_8))
-            val value = tokener.nextValue()
-            if (tokener.nextClean() != '\u0000' || value !is JSONObject) {
-                Log.d(TAG, "BKE DNA normalization: normalization_skip_invalid_messages_representation")
+        val events = parseEventValues(String(rawBytes, Charsets.UTF_8))
+        if (events.isEmpty()) {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_no_event_stream_json")
+            return null
+        }
+
+        val conversationIds = linkedSetOf<String>()
+        val currentNodeObservations = mutableListOf<String>()
+        val messagesById = linkedMapOf<String, JSONObject>()
+
+        events.forEach { event ->
+            collectScalarValues(event, "conversation_id").forEach(conversationIds::add)
+            currentNodeObservations += collectScalarValues(event, "current_node")
+            collectAuthoredMessages(event).forEach { message ->
+                val id = scalarToString(message.opt("id"))?.takeIf { it.isNotBlank() } ?: return@forEach
+                messagesById[id] = message
+            }
+        }
+
+        if (messagesById.isEmpty()) {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_no_identified_messages")
+            return null
+        }
+        if (conversationIds.size > 1) {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_ambiguous_conversation_identity")
+            return null
+        }
+
+        val identity = conversationIds.singleOrNull()?.let {
+            AndroidConversationIdentityResolution(it, "event_stream_conversation_id")
+        } ?: AndroidConversationSourceIdentity.resolve(appContext, sourceSha256)
+            ?: run {
+                Log.d(TAG, "BKE DNA normalization: normalization_skip_missing_conversation_id")
                 return null
             }
-            value
-        } catch (_: Exception) {
-            Log.d(TAG, "BKE DNA normalization: normalization_skip_invalid_messages_representation")
-            return null
-        }
 
-        val envelope = locateMessagesEnvelope(root) ?: run {
-            Log.d(TAG, "BKE DNA normalization: normalization_skip_no_unambiguous_messages_envelope")
-            return null
-        }
-        val identity = resolveConversationIdentity(root, envelope.container, sourceSha256) ?: return null
-        val sourceCurrentNodeId = scalarToString(envelope.container.opt("current_node"))
-            ?.takeIf { it.isNotBlank() }
-            ?: scalarToString(root.opt("current_node"))?.takeIf { it.isNotBlank() }
-
-        val nodes = messageObjects(envelope.messages)
-            .mapNotNull(::parseMessage)
-            .distinctBy { it.nodeNativeId }
+        val nodes = messagesById.values.mapNotNull(::parseMessage)
         if (nodes.isEmpty()) {
             Log.d(TAG, "BKE DNA normalization: normalization_skip_no_identified_messages")
             return null
         }
-
         val knownMessageIds = nodes.mapTo(linkedSetOf()) { it.nodeNativeId }
-        val currentNodeNativeId = sourceCurrentNodeId?.takeIf { it in knownMessageIds }
-        val currentNodeFound = currentNodeNativeId != null
-        val parser = if (envelope.container === root && envelope.messages is JSONArray) {
-            PARSER
-        } else {
-            PARSER_ENVELOPE
-        }
+        val currentNodeNativeId = currentNodeObservations.lastOrNull()?.takeIf { it in knownMessageIds }
 
         val normalized = JSONObject()
             .put("sourceSha256", sourceSha256)
-            .put("parser", parser)
+            .put("parser", PARSER)
             .put("conversationNativeId", identity.conversationNativeId)
             .put("conversationIdentityBasis", identity.basis)
             .put("currentNodeNativeId", currentNodeNativeId ?: JSONObject.NULL)
             .put("coverageStatus", "indeterminate")
             .put("coverageBasis", COVERAGE_BASIS)
             .put("rootFound", false)
-            .put("currentNodeFound", currentNodeFound)
+            .put("currentNodeFound", currentNodeNativeId != null)
             .put("currentLeafFound", false)
             .put("parentChainComplete", false)
             .put("cycleDetected", false)
@@ -99,49 +103,50 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         AndroidDerivativeStore(appContext).use { store ->
             store.putNormalizedJson(sourceSha256, normalized.toString(2))
         }
-        Log.d(TAG, "BKE DNA normalization: messages_array_normalization_complete")
+        Log.d(TAG, "BKE DNA normalization: event_stream_normalization_complete")
         return AndroidNormalizationResult(sourceSha256, identity.conversationNativeId, null)
     }
 
-    private fun locateMessagesEnvelope(root: JSONObject): MessageEnvelope? {
-        val rootMessages = root.optJSONArray("messages") ?: root.optJSONObject("messages")
-        if (rootMessages != null && messageObjects(rootMessages).any(::isIdentifiedAuthoredMessage)) {
-            return MessageEnvelope(root, rootMessages)
+    private fun parseEventValues(text: String): List<Any> {
+        val values = mutableListOf<Any>()
+        val dataLines = mutableListOf<String>()
+
+        fun flush() {
+            if (dataLines.isEmpty()) return
+            val payload = dataLines.joinToString("\n").trim()
+            dataLines.clear()
+            if (payload.isEmpty() || payload == "[DONE]") return
+            parseJsonValue(payload)?.let(values::add)
         }
 
-        val candidates = mutableListOf<MessageEnvelope>()
-        val stack = ArrayDeque<Any>()
-        val rootKeys = buildList {
-            val iterator = root.keys()
-            while (iterator.hasNext()) add(iterator.next())
-        }.sorted()
-        rootKeys.forEach { key ->
-            if (key == "messages") return@forEach
-            when (val child = root.opt(key)) {
-                is JSONObject, is JSONArray -> stack.addLast(child)
+        text.lineSequence().forEach { line ->
+            if (line.isEmpty()) {
+                flush()
+            } else if (line.startsWith("data:", ignoreCase = true)) {
+                dataLines += line.substringAfter(':').trimStart()
             }
         }
+        flush()
+        return values
+    }
+
+    private fun collectAuthoredMessages(root: Any): List<JSONObject> {
+        val messages = linkedMapOf<String, JSONObject>()
+        val stack = ArrayDeque<Any>()
+        stack.addLast(root)
         var visited = 0
 
-        while (stack.isNotEmpty() && visited < MAX_ENVELOPE_VALUES) {
+        while (stack.isNotEmpty() && visited < MAX_EVENT_VALUES) {
             val current = stack.removeLast()
             visited += 1
             when (current) {
                 is JSONObject -> {
-                    val messages = current.opt("messages")
-                    if ((messages is JSONArray || messages is JSONObject) &&
-                        messageObjects(messages).any(::isIdentifiedAuthoredMessage)
-                    ) {
-                        candidates += MessageEnvelope(current, messages)
+                    if (isIdentifiedAuthoredMessage(current)) {
+                        scalarToString(current.opt("id"))?.let { messages[it] = current }
                     }
-
-                    val keys = buildList {
-                        val iterator = current.keys()
-                        while (iterator.hasNext()) add(iterator.next())
-                    }.sorted()
-                    keys.forEach { key ->
-                        if (key == "messages") return@forEach
-                        when (val child = current.opt(key)) {
+                    val iterator = current.keys()
+                    while (iterator.hasNext()) {
+                        when (val child = current.opt(iterator.next())) {
                             is JSONObject, is JSONArray -> stack.addLast(child)
                         }
                     }
@@ -155,59 +160,40 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
                 }
             }
         }
-
-        return candidates.singleOrNull()
+        return messages.values.toList()
     }
 
-    private fun resolveConversationIdentity(
-        root: JSONObject,
-        envelope: JSONObject,
-        sourceSha256: String,
-    ): AndroidConversationIdentityResolution? {
-        val payloadIds = linkedSetOf<String>()
-        scalarToString(envelope.opt("conversation_id"))
-            ?.takeIf { it.isNotBlank() }
-            ?.let(payloadIds::add)
-        scalarToString(root.opt("conversation_id"))
-            ?.takeIf { it.isNotBlank() }
-            ?.let(payloadIds::add)
+    private fun collectScalarValues(root: Any, fieldName: String): List<String> {
+        val values = mutableListOf<String>()
+        val stack = ArrayDeque<Any>()
+        stack.addLast(root)
+        var visited = 0
 
-        if (payloadIds.size > 1) {
-            Log.d(TAG, "BKE DNA normalization: normalization_skip_ambiguous_conversation_identity")
-            return null
-        }
-        payloadIds.singleOrNull()?.let { id ->
-            return AndroidConversationIdentityResolution(id, "payload_conversation_id")
-        }
-
-        val metadataIdentity = AndroidConversationSourceIdentity.resolve(appContext, sourceSha256)
-        if (metadataIdentity == null) {
-            Log.d(TAG, "BKE DNA normalization: normalization_skip_missing_conversation_id")
-            return null
-        }
-        return metadataIdentity
-    }
-
-    private fun messageObjects(messages: Any): List<JSONObject> = when (messages) {
-        is JSONArray -> buildList {
-            for (index in 0 until messages.length()) {
-                val item = messages.optJSONObject(index) ?: continue
-                val direct = if (isIdentifiedAuthoredMessage(item)) item else item.optJSONObject("message")
-                if (direct != null) add(direct)
+        while (stack.isNotEmpty() && visited < MAX_EVENT_VALUES) {
+            val current = stack.removeLast()
+            visited += 1
+            when (current) {
+                is JSONObject -> {
+                    scalarToString(current.opt(fieldName))
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let(values::add)
+                    val iterator = current.keys()
+                    while (iterator.hasNext()) {
+                        when (val child = current.opt(iterator.next())) {
+                            is JSONObject, is JSONArray -> stack.addLast(child)
+                        }
+                    }
+                }
+                is JSONArray -> {
+                    for (index in current.length() - 1 downTo 0) {
+                        when (val child = current.opt(index)) {
+                            is JSONObject, is JSONArray -> stack.addLast(child)
+                        }
+                    }
+                }
             }
         }
-        is JSONObject -> buildList {
-            val keys = buildList {
-                val iterator = messages.keys()
-                while (iterator.hasNext()) add(iterator.next())
-            }.sorted()
-            keys.forEach { key ->
-                val item = messages.optJSONObject(key) ?: return@forEach
-                val direct = if (isIdentifiedAuthoredMessage(item)) item else item.optJSONObject("message")
-                if (direct != null) add(direct)
-            }
-        }
-        else -> emptyList()
+        return values
     }
 
     private fun isIdentifiedAuthoredMessage(message: JSONObject): Boolean {
@@ -226,7 +212,6 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         val content = if (message.has("content")) message.opt("content") else null
         val contentJson = if (content == null) null else compactJson(content)
         val textParts = if (content is JSONObject) stringArray(content.optJSONArray("parts")) else emptyList()
-
         return NormalizedMessageNode(
             nodeNativeId = messageNativeId,
             messageNativeId = messageNativeId,
@@ -243,6 +228,16 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         val conversationNativeId = scalarToString(root.opt("conversationNativeId"))?.takeIf { it.isNotBlank() }
             ?: return null
         return AndroidNormalizationResult(sourceSha256, conversationNativeId, null)
+    }
+
+    private fun parseJsonValue(text: String): Any? = try {
+        val tokener = JSONTokener(text)
+        val value = tokener.nextValue()
+        if (value !is JSONObject && value !is JSONArray) return null
+        if (tokener.nextClean() != '\u0000') return null
+        value
+    } catch (_: Exception) {
+        null
     }
 
     private fun stringArray(array: JSONArray?): List<String> {
@@ -269,11 +264,6 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         else -> JSONObject.quote(value.toString())
     }
 
-    private data class MessageEnvelope(
-        val container: JSONObject,
-        val messages: Any,
-    )
-
     private data class NormalizedMessageNode(
         val nodeNativeId: String,
         val messageNativeId: String,
@@ -296,10 +286,9 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
     companion object {
         private const val TAG = "BkeDnaNormalizer"
         private const val MAX_BODY_BYTES = 16L * 1024 * 1024
-        private const val MAX_ENVELOPE_VALUES = 4096
+        private const val MAX_EVENT_VALUES = 8192
         private const val CANDIDATE_KIND = "conversation_payload_candidate"
-        private const val PARSER = "messages-array-v0"
-        private const val PARSER_ENVELOPE = "messages-envelope-v1"
+        private const val PARSER = "event-stream-messages-v1"
         private const val COVERAGE_BASIS = "messages_array_no_graph_edges"
         private val SHA256 = Regex("[0-9a-f]{64}")
         private val RECOGNIZED_ROLES = setOf("user", "assistant", "system", "tool")
