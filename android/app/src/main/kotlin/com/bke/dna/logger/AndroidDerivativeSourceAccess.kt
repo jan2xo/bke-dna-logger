@@ -6,31 +6,29 @@ import java.io.File
 /**
  * SQLite-first derivative access with transitional loose-file fallback.
  *
- * New captures write only to Working Data SQLite. Pre-PR5 generations remain
- * readable from shared `classifications/*.json` / `normalized/*.json` files if
- * those legacy files still exist.
+ * New captures write only to Working Data SQLite. Context-level reads federate
+ * Latest plus every saved read-only generation so reconciliation keeps the
+ * same multi-snapshot behavior that the former shared loose directories had.
+ * Pre-PR5 generations remain readable from shared `classifications/*.json` /
+ * `normalized/*.json` files if those legacy files still exist.
  */
 object AndroidDerivativeSourceAccess {
     fun readClassification(context: Context, sourceSha256: String): String? {
         val appContext = context.applicationContext
-        val generation = AndroidWorkingDataManager(appContext)
-            .generation(AndroidWorkingDataManager.LATEST_ID)
-        return readClassification(
-            generation = generation,
-            captureRoot = AndroidDnaPaths.capturesRoot(appContext),
-            sourceSha256 = sourceSha256,
-        )
+        val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
+        for (generation in AndroidWorkingDataManager(appContext).listWorkingData()) {
+            readClassification(generation, captureRoot, sourceSha256)?.let { return it }
+        }
+        return null
     }
 
     fun readNormalized(context: Context, sourceSha256: String): String? {
         val appContext = context.applicationContext
-        val generation = AndroidWorkingDataManager(appContext)
-            .generation(AndroidWorkingDataManager.LATEST_ID)
-        return readNormalized(
-            generation = generation,
-            captureRoot = AndroidDnaPaths.capturesRoot(appContext),
-            sourceSha256 = sourceSha256,
-        )
+        val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
+        for (generation in AndroidWorkingDataManager(appContext).listWorkingData()) {
+            readNormalized(generation, captureRoot, sourceSha256)?.let { return it }
+        }
+        return null
     }
 
     fun readClassification(
@@ -57,12 +55,12 @@ object AndroidDerivativeSourceAccess {
 
     fun listNormalizedSourceSha256s(context: Context): List<String> {
         val appContext = context.applicationContext
-        val generation = AndroidWorkingDataManager(appContext)
-            .generation(AndroidWorkingDataManager.LATEST_ID)
-        return listNormalizedSourceSha256s(
-            generation = generation,
-            captureRoot = AndroidDnaPaths.capturesRoot(appContext),
-        )
+        val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
+        val sources = linkedSetOf<String>()
+        AndroidWorkingDataManager(appContext).listWorkingData().forEach { generation ->
+            sources += listNormalizedSourceSha256s(generation, captureRoot)
+        }
+        return sources.sorted()
     }
 
     fun listNormalizedSourceSha256s(
