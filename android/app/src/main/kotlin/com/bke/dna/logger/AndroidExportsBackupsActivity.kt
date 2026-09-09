@@ -6,6 +6,8 @@ import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
 import android.view.ViewGroup
 import android.widget.AdapterView
@@ -13,6 +15,7 @@ import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
@@ -31,10 +34,32 @@ class AndroidExportsBackupsActivity : Activity() {
     private var pendingConversationKey: String? = null
     @Volatile private var operationInProgress = false
     private val purgeService by lazy { AndroidPurgeService(this) }
+    private var queueStatusView: TextView? = null
+    private val queueMonitorHandler = Handler(Looper.getMainLooper())
+    private val queueMonitorTick = object : Runnable {
+        override fun run() {
+            refreshQueueStatus()
+            if (!isFinishing && !isDestroyed) {
+                queueMonitorHandler.postDelayed(this, QUEUE_REFRESH_MS)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         refreshUi()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        AndroidDerivationScheduler.start(this)
+        queueMonitorHandler.removeCallbacks(queueMonitorTick)
+        queueMonitorHandler.post(queueMonitorTick)
+    }
+
+    override fun onPause() {
+        queueMonitorHandler.removeCallbacks(queueMonitorTick)
+        super.onPause()
     }
 
     @Suppress("DEPRECATION")
@@ -74,13 +99,37 @@ class AndroidExportsBackupsActivity : Activity() {
             text = "Working Data & Conversations"
             textSize = 24f
         })
-        content.addView(actionButton("Back to ChatGPT") { finish() })
+        content.addView(compactRow(compactButton("← ChatGPT") { finish() }))
 
+        content.addView(sectionTitle("Processing"))
+        queueStatusView = TextView(this).apply {
+            textSize = 13f
+            setPadding(0, 0, 0, 6)
+        }
+        content.addView(queueStatusView)
+        val currentProfile = AndroidDerivationScheduler.getProfile(this)
+        content.addView(
+            compactRow(
+                *AndroidProcessingProfile.entries.map { profile ->
+                    compactButton(
+                        if (profile == currentProfile) "✓ ${profileLabel(profile)}" else profileLabel(profile),
+                    ) {
+                        AndroidDerivationScheduler.setProfile(this, profile)
+                        refreshUi()
+                    }.apply {
+                        isEnabled = profile != currentProfile
+                    }
+                }.toTypedArray(),
+            ),
+        )
         content.addView(TextView(this).apply {
-            text = "Working Data"
-            textSize = 20f
-            setPadding(0, 24, 0, 8)
+            text = "Slow gives the browser the most breathing room; Balanced is the default; Fast minimizes queue rest time. Capture always keeps priority."
+            textSize = 12f
+            setPadding(0, 4, 0, 8)
         })
+        refreshQueueStatus()
+
+        content.addView(sectionTitle("Working Data"))
 
         val spinner = Spinner(this)
         spinner.adapter = ArrayAdapter(
@@ -115,48 +164,55 @@ class AndroidExportsBackupsActivity : Activity() {
                 append("\nThis selector only inspects Working Data; it does NOT filter the conversation library below.")
             }
             textSize = 14f
-            setPadding(0, 10, 0, 12)
+            setPadding(0, 10, 0, 8)
         })
 
         if (inspected.isLatest) {
-            content.addView(actionButton("Save & Start New Working Data") {
-                runWork(
-                    successMessage = "Working Data saved; fresh Latest is now active",
-                    storageMutation = true,
-                ) {
-                    AndroidWorkingDataManager(this).rotateLatest()
-                    inspectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
-                }
-            })
-            content.addView(TextView(this).apply {
-                text = "Use this when Latest becomes heavy or laggy. SQLite/state are timestamped and verified; shared SHA-addressed raw evidence is not duplicated. ChatGPT's GeckoSession stays alive while the capture writer is briefly paused."
-                textSize = 13f
-                setPadding(0, 4, 0, 10)
-            })
-
-            content.addView(actionButton("Backup Working Data") {
-                pendingConversationKey = null
-                pendingWorkingDataId = AndroidWorkingDataManager.LATEST_ID
-                createDocument(
-                    REQUEST_BACKUP,
-                    "BKE-DNA-working-${System.currentTimeMillis()}.dna-backup.zip",
-                    "application/zip",
-                )
-            })
-            content.addView(actionButton("Import .dna / backup") {
-                startActivityForResult(
-                    Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                        addCategory(Intent.CATEGORY_OPENABLE)
-                        type = "*/*"
+            content.addView(
+                compactRow(
+                    compactButton("SAVE NEW") {
+                        runWork(
+                            successMessage = "Working Data saved; fresh Latest is now active",
+                            storageMutation = true,
+                        ) {
+                            AndroidWorkingDataManager(this).rotateLatest()
+                            inspectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                        }
                     },
-                    REQUEST_IMPORT,
-                )
+                    compactButton("BACKUP") {
+                        pendingConversationKey = null
+                        pendingWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                        createDocument(
+                            REQUEST_BACKUP,
+                            "BKE-DNA-working-${System.currentTimeMillis()}.dna-backup.zip",
+                            "application/zip",
+                        )
+                    },
+                    compactButton("IMPORT") {
+                        startActivityForResult(
+                            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                                addCategory(Intent.CATEGORY_OPENABLE)
+                                type = "*/*"
+                            },
+                            REQUEST_IMPORT,
+                        )
+                    },
+                ),
+            )
+            content.addView(TextView(this).apply {
+                text = "SAVE NEW snapshots verified SQLite/state and activates a fresh Latest. GeckoSession stays alive while the capture writer is briefly paused."
+                textSize = 12f
+                setPadding(0, 4, 0, 8)
             })
         } else {
-            content.addView(actionButton("Inspect Latest Working Data") {
-                inspectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
-                refreshUi()
-            })
+            content.addView(
+                compactRow(
+                    compactButton("LATEST") {
+                        inspectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                        refreshUi()
+                    },
+                ),
+            )
         }
 
         val totalWorkingBytes = AndroidWorkingStorage.workingBytes(this) + manager.savedWorkingDataBytes()
@@ -169,24 +225,20 @@ class AndroidExportsBackupsActivity : Activity() {
                 append("\nNotify threshold: 1 GiB — capture continues until Jan explicitly purges verified evidence.")
                 if (warning) append("\n⚠ Storage is above the warning threshold.")
             }
-            textSize = 14f
-            setPadding(0, 14, 0, 10)
+            textSize = 13f
+            setPadding(0, 10, 0, 6)
         })
-        content.addView(dangerButton("PURGE ALL VERIFIED RAW") { confirmPurgeAll() })
+        content.addView(compactRow(dangerButton("PURGE ALL VERIFIED RAW") { confirmPurgeAll() }))
         content.addView(TextView(this).apply {
             text = "Red purge deletes only local SHA-addressed raw/normalized/classification/observation files already covered by verified .dna. Shared sources used by another conversation stay. SQLite and logical reader state stay. Exact confirmation: jan2x"
             textSize = 12f
-            setPadding(0, 4, 0, 18)
+            setPadding(0, 4, 0, 12)
         })
 
+        content.addView(sectionTitle("All Conversations"))
         content.addView(TextView(this).apply {
-            text = "All Conversations"
-            textSize = 20f
-            setPadding(0, 20, 0, 8)
-        })
-        content.addView(TextView(this).apply {
-            text = "One deduplicated library across Latest + every saved SQLite. Only lightweight summary rows are read here; full conversation data loads after you open/export a conversation."
-            textSize = 13f
+            text = "One deduplicated library across Latest + every saved SQLite. Tap a conversation row to read it. CLEAN and RAW stay immediate; archival/purge actions live under MORE."
+            textSize = 12f
             setPadding(0, 0, 0, 8)
         })
 
@@ -196,18 +248,20 @@ class AndroidExportsBackupsActivity : Activity() {
             setText(searchQuery)
         }
         content.addView(searchInput)
-        val searchActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        searchActions.addView(actionButton("SEARCH") {
-            searchQuery = searchInput.text.toString().trim()
-            libraryLimit = AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE
-            refreshUi()
-        })
-        searchActions.addView(actionButton("CLEAR") {
-            searchQuery = ""
-            libraryLimit = AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE
-            refreshUi()
-        })
-        content.addView(searchActions)
+        content.addView(
+            compactRow(
+                compactButton("SEARCH") {
+                    searchQuery = searchInput.text.toString().trim()
+                    libraryLimit = AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE
+                    refreshUi()
+                },
+                compactButton("CLEAR") {
+                    searchQuery = ""
+                    libraryLimit = AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE
+                    refreshUi()
+                },
+            ),
+        )
 
         val library = AndroidUnifiedConversationLibrary(this)
         val conversations = runCatching { library.search(searchQuery, libraryLimit) }
@@ -231,11 +285,15 @@ class AndroidExportsBackupsActivity : Activity() {
             val locallyPurged = purgeService.isLocallyPurged(summary.conversationKey)
             val panel = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(0, 16, 0, 24)
+                setPadding(0, 12, 0, 16)
+                isClickable = true
+                isFocusable = true
+                contentDescription = "Read ${summary.displayTitle}"
+                setOnClickListener { openConversation(summary) }
             }
             panel.addView(TextView(this).apply {
                 text = summary.displayTitle
-                textSize = 18f
+                textSize = 17f
             })
             panel.addView(TextView(this).apply {
                 text = buildString {
@@ -246,42 +304,30 @@ class AndroidExportsBackupsActivity : Activity() {
                     if (summary.dnaArchived) append(" · .dna verified")
                     if (locallyPurged) append(" · LOCAL RAW PURGED")
                 }
-                textSize = 13f
+                textSize = 12f
+                setPadding(0, 2, 0, 4)
             })
 
-            panel.addView(actionButton("Read conversation") {
-                startActivity(
-                    Intent(this, AndroidConversationReaderActivity::class.java)
-                        .putExtra(
-                            AndroidConversationReaderActivity.EXTRA_CONVERSATION_NATIVE_ID,
-                            summary.conversationNativeId,
-                        ),
-                )
-            })
-
-            val cleanAndRaw = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            cleanAndRaw.addView(actionButton("Export CLEAN.md") {
+            val actions = mutableListOf<Button>()
+            actions += compactButton("CLEAN") {
                 prepareHumanExport(summary, clean = true)
-            })
-            cleanAndRaw.addView(actionButton("Export RAW.md") {
+            }
+            actions += compactButton("RAW") {
                 prepareHumanExport(summary, clean = false)
-            })
-            panel.addView(cleanAndRaw)
-
-            if (summary.hasLatest && !locallyPurged) {
-                panel.addView(actionButton("Export .dna") {
-                    pendingConversationKey = summary.conversationKey
-                    pendingWorkingDataId = AndroidWorkingDataManager.LATEST_ID
-                    createDocument(
-                        REQUEST_EXPORT_DNA,
-                        "${safeFileBase(summary.displayTitle)}.dna",
-                        "application/zip",
-                    )
-                })
             }
             if (summary.hasLatest) {
-                panel.addView(dangerButton("PURGE VERIFIED RAW") { preparePurge(summary) })
+                val moreButton = compactButton("MORE")
+                moreButton.setOnClickListener {
+                    if (operationInProgress) {
+                        showOperationInProgress()
+                    } else {
+                        showConversationMenu(moreButton, summary, locallyPurged)
+                    }
+                }
+                actions += moreButton
             }
+            panel.addView(compactRow(*actions.toTypedArray()))
+
             if (locallyPurged) {
                 panel.addView(TextView(this).apply {
                     text = "Heavy local evidence was purged after verified .dna. Import that .dna to restore RAW evidence before re-archiving. CLEAN/logical state remains locally readable."
@@ -292,12 +338,80 @@ class AndroidExportsBackupsActivity : Activity() {
         }
 
         if (conversations.size >= libraryLimit && libraryLimit < AndroidUnifiedConversationLibrary.MAX_PAGE_SIZE) {
-            content.addView(actionButton("LOAD MORE") {
+            content.addView(compactRow(compactButton("LOAD MORE") {
                 libraryLimit = (libraryLimit + AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE)
                     .coerceAtMost(AndroidUnifiedConversationLibrary.MAX_PAGE_SIZE)
                 refreshUi()
-            })
+            }))
         }
+    }
+
+    private fun refreshQueueStatus() {
+        val target = queueStatusView ?: return
+        if (operationInProgress) {
+            target.text = "Queue monitor paused · Working Data operation in progress"
+            return
+        }
+        val snapshot = runCatching { AndroidDerivationScheduler.snapshot(this) }
+        target.text = snapshot.fold(
+            onSuccess = { queue ->
+                buildString {
+                    when {
+                        queue.processing > 0 -> {
+                            append("PROCESSING")
+                            queue.currentStage?.let { append(" · $it") }
+                        }
+                        queue.waiting > 0 -> append("QUEUED")
+                        queue.failed > 0 -> append("IDLE · ATTENTION")
+                        else -> append("IDLE")
+                    }
+                    append("\n${queue.waiting} waiting · ${queue.processing} processing · ${queue.failed} failed · ${queue.done} done")
+                }
+            },
+            onFailure = { error -> "Queue unavailable · ${error.message ?: "unknown error"}" },
+        )
+    }
+
+    private fun showConversationMenu(
+        anchor: Button,
+        summary: AndroidUnifiedConversationSummary,
+        locallyPurged: Boolean,
+    ) {
+        val popup = PopupMenu(this, anchor)
+        if (!locallyPurged) {
+            popup.menu.add(0, MENU_EXPORT_DNA, 0, "Export .dna")
+        }
+        popup.menu.add(0, MENU_PURGE_VERIFIED_RAW, 1, "PURGE VERIFIED RAW")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                MENU_EXPORT_DNA -> {
+                    pendingConversationKey = summary.conversationKey
+                    pendingWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                    createDocument(
+                        REQUEST_EXPORT_DNA,
+                        "${safeFileBase(summary.displayTitle)}.dna",
+                        "application/zip",
+                    )
+                    true
+                }
+                MENU_PURGE_VERIFIED_RAW -> {
+                    preparePurge(summary)
+                    true
+                }
+                else -> false
+            }
+        }
+        popup.show()
+    }
+
+    private fun openConversation(summary: AndroidUnifiedConversationSummary) {
+        startActivity(
+            Intent(this, AndroidConversationReaderActivity::class.java)
+                .putExtra(
+                    AndroidConversationReaderActivity.EXTRA_CONVERSATION_NATIVE_ID,
+                    summary.conversationNativeId,
+                ),
+        )
     }
 
     private fun preparePurge(summary: AndroidUnifiedConversationSummary) {
@@ -306,10 +420,12 @@ class AndroidExportsBackupsActivity : Activity() {
             return
         }
         operationInProgress = true
+        refreshQueueStatus()
         Thread {
             val plan = runCatching { purgeService.plan(summary.conversationNativeId) }
             runOnUiThread {
                 operationInProgress = false
+                refreshQueueStatus()
                 plan.fold(
                     onSuccess = { ready ->
                         when {
@@ -508,6 +624,7 @@ class AndroidExportsBackupsActivity : Activity() {
             return
         }
         operationInProgress = true
+        refreshQueueStatus()
         Thread {
             val result = runCatching {
                 if (storageMutation) {
@@ -533,26 +650,61 @@ class AndroidExportsBackupsActivity : Activity() {
         }.start()
     }
 
-    private fun actionButton(label: String, action: () -> Unit): Button =
-        Button(this).apply {
-            text = label
+    private fun sectionTitle(label: String): TextView = TextView(this).apply {
+        text = label
+        textSize = 19f
+        setPadding(0, 20, 0, 6)
+    }
+
+    private fun compactRow(vararg buttons: Button): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            buttons.forEach { button ->
+                addView(
+                    button,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply { marginEnd = 8 },
+                )
+            }
+        }
+
+    private fun compactButton(label: String): Button = Button(this).apply {
+        text = label
+        textSize = 12f
+        minHeight = 0
+        minimumHeight = 0
+        minWidth = 0
+        minimumWidth = 0
+        setPadding(18, 8, 18, 8)
+    }
+
+    private fun compactButton(label: String, action: () -> Unit): Button =
+        compactButton(label).apply {
             setOnClickListener {
                 if (operationInProgress) showOperationInProgress() else action()
             }
         }
 
     private fun dangerButton(label: String, action: () -> Unit): Button =
-        actionButton(label, action).apply {
+        compactButton(label, action).apply {
             setBackgroundColor(Color.rgb(183, 28, 28))
             setTextColor(Color.WHITE)
         }
+
+    private fun profileLabel(profile: AndroidProcessingProfile): String = when (profile) {
+        AndroidProcessingProfile.SLOW -> "Slow"
+        AndroidProcessingProfile.BALANCED -> "Balanced"
+        AndroidProcessingProfile.FAST -> "Fast"
+    }
 
     private fun showOperationInProgress() {
         Toast.makeText(this, "Working Data operation in progress", Toast.LENGTH_SHORT).show()
     }
 
     private fun safeFileBase(value: String): String = value
-        .replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), " ")
+        .replace(Regex("[\\/:*?\"<>|\\p{Cntrl}]"), " ")
         .replace(Regex("\\s+"), " ")
         .trim()
         .take(100)
@@ -573,5 +725,8 @@ class AndroidExportsBackupsActivity : Activity() {
         private const val REQUEST_BACKUP = 1103
         private const val REQUEST_IMPORT = 1104
         private const val REQUEST_EXPORT_RAW_MD = 1105
+        private const val MENU_EXPORT_DNA = 2101
+        private const val MENU_PURGE_VERIFIED_RAW = 2102
+        private const val QUEUE_REFRESH_MS = 1_500L
     }
 }
