@@ -7,6 +7,7 @@ manifest = (repo / "android" / "app" / "src" / "main" / "AndroidManifest.xml").r
 main = (kotlin / "MainActivity.kt").read_text(encoding="utf-8")
 provider = (kotlin / "GeckoRuntimeProvider.kt").read_text(encoding="utf-8")
 host = (kotlin / "GeckoViewHost.kt").read_text(encoding="utf-8")
+user_files = (kotlin / "AndroidUserSelectedFileProvider.kt").read_text(encoding="utf-8")
 runtime = (kotlin / "AndroidCaptureRuntime.kt").read_text(encoding="utf-8")
 interceptor = (repo / "extension" / "main-interceptor.js").read_text(encoding="utf-8")
 bridge = (repo / "android" / "app" / "src" / "main" / "assets" / "dna-extension" / "bridge.js").read_text(encoding="utf-8")
@@ -16,6 +17,7 @@ for token in (
     "GeckoViewHost(this, geckoView)",
     "geckoHost.start()",
     "startActivity(Intent(this@MainActivity, AndroidExportsBackupsActivity::class.java))",
+    "geckoHost.onActivityResult(requestCode, resultCode, data)",
     "geckoHost.stop()",
 ):
     assert token in main, token
@@ -52,6 +54,67 @@ for token in (
 ):
     assert token in host, token
 assert "AndroidWireIngress(activity.applicationContext)" not in host
+
+# PR7 uses Gecko's own FilePrompt contract for normal web uploads. Gallery/files
+# are passed through as content URIs, while optional camera output goes through a
+# temporary non-exported cache provider. File-prompt plumbing is deliberately
+# separate from DNA network-response capture.
+for token in (
+    "session.setPromptDelegate(promptDelegate)",
+    "override fun onFilePrompt(",
+    "GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE",
+    "GeckoSession.PromptDelegate.FilePrompt.Type.FOLDER",
+    "GeckoSession.PromptDelegate.FilePrompt.Capture.NONE",
+    "Intent.ACTION_OPEN_DOCUMENT",
+    "Intent.ACTION_OPEN_DOCUMENT_TREE",
+    "Intent.EXTRA_ALLOW_MULTIPLE",
+    "Intent.EXTRA_MIME_TYPES",
+    "Intent.EXTRA_INITIAL_INTENTS",
+    "MediaStore.ACTION_IMAGE_CAPTURE",
+    "MediaStore.ACTION_VIDEO_CAPTURE",
+    "MediaStore.EXTRA_OUTPUT",
+    "AndroidUserSelectedFileProvider.createCameraUri(appContext, mimeType)",
+    "pending.prompt.confirm(appContext, finalUris.toTypedArray())",
+    "pending.prompt.confirm(appContext, finalUris.first())",
+    "pending.prompt.dismiss()",
+    "collectSelectedUris(data)",
+    "activity.revokeUriPermission(",
+):
+    assert token in host, token
+file_prompt_block = host[host.index("private val promptDelegate"):host.index("private fun handleDiagnostic")]
+assert "AndroidCaptureRuntime" not in file_prompt_block
+assert "openInputStream" not in host
+assert "copyTo(" not in host
+
+for token in (
+    "class AndroidUserSelectedFileProvider : ContentProvider()",
+    'File(context.cacheDir, "user-selected")',
+    '"${context.packageName}.user-selected-files"',
+    "ParcelFileDescriptor.open(file, flags)",
+    "OpenableColumns.DISPLAY_NAME",
+    "OpenableColumns.SIZE",
+    "MAX_CACHE_AGE_MS = 24L * 60L * 60L * 1000L",
+    "cleanupStaleFiles(appContext)",
+    "deleteIfOwned(context: Context, uri: Uri?)",
+):
+    assert token in user_files, token
+assert "AndroidCaptureRuntime" not in user_files
+assert "AndroidRawEvidenceStore" not in user_files
+assert "AndroidCaptureStore" not in user_files
+for token in (
+    'android:name=".AndroidUserSelectedFileProvider"',
+    'android:authorities="${applicationId}.user-selected-files"',
+    'android:exported="false"',
+    'android:grantUriPermissions="true"',
+):
+    assert token in manifest, token
+for forbidden in (
+    'android.permission.CAMERA',
+    'android.permission.READ_MEDIA_IMAGES',
+    'android.permission.READ_MEDIA_VIDEO',
+    'android.permission.READ_EXTERNAL_STORAGE',
+):
+    assert forbidden not in manifest, forbidden
 
 for token in (
     "pauseForStorageMutation",
@@ -147,4 +210,4 @@ assert 'type: "diagnostic"' in bridge
 assert host.index("ensureBuiltIn(EXTENSION_URI, EXTENSION_ID)") < host.index("session.loadUri(CHATGPT_URL)")
 assert 'android:windowSoftInputMode="stateUnspecified|adjustResize"' in manifest
 
-print("android GeckoView streamed runtime/session-preservation smoke PASS")
+print("android GeckoView streamed runtime + user photo/camera/file prompt smoke PASS")
