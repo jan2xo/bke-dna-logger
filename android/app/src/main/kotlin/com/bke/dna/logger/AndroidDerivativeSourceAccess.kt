@@ -9,8 +9,8 @@ import java.io.File
  * New captures write only to Working Data SQLite. Context-level reads federate
  * Latest plus every saved read-only generation so reconciliation keeps the
  * same multi-snapshot behavior that the former shared loose directories had.
- * Pre-PR5 generations remain readable from shared `classifications/*.json` /
- * `normalized/*.json` files if those legacy files still exist.
+ * Pre-PR5 generations remain readable from shared classification and normalized
+ * JSON files if those legacy files still exist.
  */
 object AndroidDerivativeSourceAccess {
     fun readClassification(context: Context, sourceSha256: String): String? {
