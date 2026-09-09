@@ -31,10 +31,9 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
         }
         val byteLength = classificationRoot.optLong("byteLength", -1L)
 
-        // Large modern messages payloads are classified and normalized from RAW
-        // streams. The 16 MiB value now selects the legacy materialized parser;
-        // it is no longer a semantic rejection limit.
-        if (byteLength > MATERIALIZED_BODY_BYTES) {
+        // MAX_BODY_BYTES now selects the legacy materialized parser only.
+        // Large modern messages payloads continue through bounded RAW streams.
+        if (byteLength > MAX_BODY_BYTES) {
             return when {
                 contentType?.contains("text/event-stream", ignoreCase = true) == true -> {
                     Log.d(TAG, "BKE DNA normalization: normalization_representation_event_stream")
@@ -58,7 +57,7 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
         }
 
         val rawBytes = try {
-            AndroidRawSourceAccess.readAllBytes(appContext, sourceSha256, MATERIALIZED_BODY_BYTES)
+            AndroidRawSourceAccess.readAllBytes(appContext, sourceSha256, MAX_BODY_BYTES)
         } catch (_: IllegalArgumentException) {
             Log.d(TAG, "BKE DNA normalization: normalization_skip_body_oversize")
             return null
@@ -115,7 +114,7 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
 
     companion object {
         private const val TAG = "BkeDnaNormalizer"
-        private const val MATERIALIZED_BODY_BYTES = 16L * 1024 * 1024
+        private const val MAX_BODY_BYTES = 16L * 1024 * 1024
         private const val CANDIDATE_KIND = "conversation_payload_candidate"
         private val SHA256 = Regex("[0-9a-f]{64}")
     }
