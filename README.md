@@ -119,6 +119,8 @@ Already proven/implemented:
 - CLEAN is paged from SQLite normalized conversation rows and RAW is read through a bounded SQLite-first source pager.
 - Unified multi-SQLite conversation listing/search exists.
 - Manual `.dna` export remains portable by materializing SQLite RAW/derivatives only into export-temporary files.
+- Working Data & Conversations uses compact utility actions, tappable conversation rows, immediate CLEAN/RAW actions and a secondary MORE menu.
+- The existing durable derivation queue is visible through a live compact monitor with current stage/counts and persisted `Slow` / `Balanced` / `Fast` breathing controls.
 
 Still transitional and scheduled for refactor:
 
@@ -126,14 +128,14 @@ Still transitional and scheduled for refactor:
 - SQLite still contains transitional JSON derivative envelopes alongside normalized logical rows; later work may collapse more derivative structure into direct relational projections/checkpoints.
 - Deep semantic parsing still has a conservative large-body boundary in alpha.2.
 - Working Data backup/generation deletion and the old `.dna`-gated raw purge UI still need to converge on the accepted generation-level SQLite lifecycle.
-- Compact queue/profile UI and ordinary Gecko photo/camera/file selection support remain scheduled follow-up work.
+- Ordinary Gecko photo/camera/file selection support remains scheduled follow-up work.
 
 ## UI direction
 
 - Working Data & Conversations is a compact utility surface, not a wall of full-width buttons.
-- Conversation rows should prioritize title, date/status and compact actions.
-- Primary actions remain CLEAN and RAW; secondary actions belong in compact menus where appropriate.
-- Processing queue/status and `Slow` / `Balanced` / `Fast` controls should be visible without dominating the conversation list.
+- Conversation rows prioritize title, date/status and compact actions; tapping the row opens the reader.
+- Primary actions remain CLEAN and RAW; secondary `.dna`/purge actions belong in the compact MORE menu.
+- Processing queue/status and `Slow` / `Balanced` / `Fast` controls are visible without dominating the conversation list.
 - GeckoView should support normal ChatGPT user actions such as photo/gallery, camera and file selection without coupling those user-selected inputs to automatic DNA evidence duplication.
 
 ## Legacy checkpoint
