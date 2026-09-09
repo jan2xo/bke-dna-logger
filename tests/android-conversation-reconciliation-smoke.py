@@ -4,12 +4,15 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 base = root / "android" / "app" / "src" / "main" / "kotlin" / "com" / "bke" / "dna" / "logger"
 aggregation = (base / "AndroidConversationAggregationEngine.kt").read_text()
+derivative_access = (base / "AndroidDerivativeSourceAccess.kt").read_text()
 index = (base / "AndroidCaptureIndex.kt").read_text()
 importer = (base / "AndroidConversationDnaImportService.kt").read_text()
 contract = (base / "DnaReconciliationContract.kt").read_text()
 
 aggregation_tokens = [
     "groupBy { it.conversationNativeId }",
+    "AndroidDerivativeSourceAccess.listNormalizedSourceSha256s(appContext)",
+    "AndroidDerivativeSourceAccess.readNormalized(appContext, sourceSha256)",
     "getOrPut(node.nodeNativeId)",
     "messageNativeIds",
     "parentNativeIds",
@@ -34,6 +37,16 @@ aggregation_tokens = [
 ]
 for token in aggregation_tokens:
     assert token in aggregation, token
+assert "normalizedDirectory" not in aggregation
+
+# Context-level derivative enumeration federates Latest + saved read-only
+# generations before reconciliation; source SHA dedup preserves snapshot identity.
+for token in [
+    "AndroidWorkingDataManager(appContext).listWorkingData()",
+    "sources += listNormalizedSourceSha256s(generation, captureRoot)",
+    "return sources.sorted()",
+]:
+    assert token in derivative_access, token
 
 for token in (
     'status = "indeterminate"',
@@ -118,4 +131,4 @@ messages_snapshot = {
 assert messages_snapshot["coverage_basis"] == "messages_array_no_graph_edges"
 assert all(not node["children"] for node in messages_snapshot["nodes"])
 
-print("android logical conversation reconciliation smoke PASS")
+print("android federated SQLite derivative logical reconciliation smoke PASS")
