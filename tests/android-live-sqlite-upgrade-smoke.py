@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+from pathlib import Path
+
+repo = Path(__file__).resolve().parents[1]
+kotlin = repo / "android" / "app" / "src" / "main" / "kotlin" / "com" / "bke" / "dna" / "logger"
+
+capture_index = (kotlin / "AndroidCaptureIndex.kt").read_text(encoding="utf-8")
+capture_store = (kotlin / "AndroidCaptureStore.kt").read_text(encoding="utf-8")
+runtime = (kotlin / "AndroidCaptureRuntime.kt").read_text(encoding="utf-8")
+derivative_store = (kotlin / "AndroidDerivativeStore.kt").read_text(encoding="utf-8")
+pipeline = (kotlin / "AndroidLiveDerivationPipeline.kt").read_text(encoding="utf-8")
+
+# Live Working Data owns exactly one process-wide SQLiteOpenHelper/pool. Public
+# AndroidCaptureIndex(context) remains a lease facade so existing callers need
+# no ownership rewrite, and ordinary close() only releases that lease.
+for token in (
+    "private object SharedDatabasePool",
+    "SharedDatabasePool.acquire(appContext)",
+    "SharedDatabasePool.release(checkNotNull(sharedOwner))",
+    "private var owner: AndroidCaptureIndex? = null",
+    "private var leases = 0",
+    "fun closeSharedDatabaseForStorageMutation()",
+    "check(leases == 0)",
+):
+    assert token in capture_index, token
+
+# Do not paper over SQLite ownership bugs with lock sleeps/retries.
+for forbidden in (
+    "SQLiteDatabaseLockedException",
+    "SQLITE_BUSY",
+    "Thread.sleep",
+    "busy_timeout",
+):
+    assert forbidden not in capture_index, forbidden
+
+# Storage mutation closes ingress, waits for the single derivation lane to be
+# idle, then explicitly asserts/closes the shared live DB before checkpoint,
+# snapshot, delete, or rotation code may proceed.
+await_idle = runtime.index("AndroidCaptureStore.awaitBackgroundDerivationIdle(appContext)")
+close_pool = runtime.index("AndroidCaptureIndex.closeSharedDatabaseForStorageMutation()")
+assert await_idle < close_pool
+
+# captureFinished() must be in the end() finally block after every durable
+# capture_end persistence step and RAW_INGEST enqueue. This prevents derivation
+# from resuming while capture index/queue writes are still in flight.
+end_start = capture_store.index("private fun end(")
+enqueue = capture_store.index("AndroidDerivationScheduler.enqueue(", end_start)
+finally_block = capture_store.index("} finally {", end_start)
+finished = capture_store.index("AndroidDerivationScheduler.captureFinished()", end_start)
+assert enqueue < finally_block < finished
+for token in (
+    "session.finish()",
+    "result.partial.renameTo(stagedRaw)",
+    "index.record(",
+    "AndroidDerivationScheduler.enqueue(",
+):
+    assert capture_store.index(token, end_start) < finished, token
+
+# Derivative immutability remains the default. The sole mutation escape hatch is
+# the obsolete pre-streaming classification_size_limit row; no RAW or normalized
+# derivative table is deleted by this method.
+for token in (
+    "fun invalidateLegacyClassificationSizeLimit(",
+    'LEGACY_CLASSIFICATION_SIZE_LIMIT_SIGNAL = "classification_size_limit"',
+    "database.delete(",
+    "TABLE_CLASSIFICATION",
+):
+    assert token in derivative_store, token
+migration_start = derivative_store.index("fun invalidateLegacyClassificationSizeLimit(")
+migration_end = derivative_store.index("fun putNormalizedJson(", migration_start)
+migration = derivative_store[migration_start:migration_end]
+assert "TABLE_CLASSIFICATION" in migration
+assert "TABLE_NORMALIZED" not in migration
+assert "raw_source" not in migration
+
+# Only oversized RAW with the historical size-limit signal is rebuilt. Current
+# classifications and all <=16 MiB classifications remain reusable. Rebuild is
+# through the streaming classifier and writes a new Latest derivative.
+for token in (
+    "val existing = AndroidDerivativeSourceAccess.readClassification(appContext, sourceSha256)",
+    "byteLength <= MAX_CLASSIFICATION_BYTES",
+    "!hasLegacyClassificationSizeLimit(existing)",
+    "store.invalidateLegacyClassificationSizeLimit(sourceSha256)",
+    '"BKE DNA derivation: classification_legacy_size_limit_invalidated"',
+    "if (byteLength > MAX_CLASSIFICATION_BYTES)",
+    "AndroidStreamingConversationPayloadClassifier.classify(input, contentType)",
+    "store.putClassificationJson(sourceSha256, envelope.toString(2))",
+):
+    assert token in pipeline, token
+
+# The 16 MiB value remains a legacy materialization threshold, not an enlarged
+# semantic limit or lowered classifier admission gate.
+assert "MAX_CLASSIFICATION_BYTES = 16L * 1024 * 1024" in pipeline
+assert "score >= 28" not in pipeline  # admission threshold belongs to classifier, untouched here
+
+print("android live SQLite ownership + upgrade migration smoke PASS")
