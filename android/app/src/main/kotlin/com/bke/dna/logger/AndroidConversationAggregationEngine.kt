@@ -13,19 +13,21 @@ import java.security.MessageDigest
 /**
  * Native Android logical-conversation aggregator.
  *
- * Raw evidence and normalized snapshots remain immutable inputs. This engine
- * unions snapshots by conversationNativeId, preserves graph/revision/source
- * provenance, recomputes structural coverage, writes one logical conversation
- * state file, then projects that derivative state into Android SQLite.
+ * Raw evidence and normalized snapshots remain immutable inputs. New normalized
+ * snapshots are resolved from Working Data SQLite while pre-PR5 loose snapshots
+ * remain readable through the compatibility accessor. This engine unions
+ * snapshots by conversationNativeId, preserves graph/revision/source provenance,
+ * recomputes structural coverage, writes one logical conversation state file,
+ * then projects that derivative state into Android SQLite.
  */
 class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
-    private val captureRoot = AndroidDnaPaths.capturesRoot(context.applicationContext)
-    private val normalizedDirectory = File(captureRoot, "normalized")
+    private val appContext = context.applicationContext
+    private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
     private val observationsDirectory = File(captureRoot, "observations")
     private val conversationsDirectory = File(captureRoot, "conversations").also {
         check(it.exists() || it.mkdirs()) { "Unable to create Android conversation directory" }
     }
-    private val index = AndroidCaptureIndex(context.applicationContext)
+    private val index = AndroidCaptureIndex(appContext)
 
     fun aggregateAll(): List<AndroidLogicalConversation> = readSnapshots()
         .groupBy { it.conversationNativeId }
@@ -44,14 +46,12 @@ class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
     override fun close() = index.close()
 
     private fun readSnapshots(): List<Snapshot> {
-        if (!normalizedDirectory.isDirectory) return emptyList()
         val observedAtBySource = readObservationTimes()
-        return normalizedDirectory.listFiles()
-            .orEmpty()
-            .filter { it.isFile && it.extension == "json" }
-            .sortedBy { it.name }
-            .mapNotNull { path ->
-                runCatching { readSnapshot(path, observedAtBySource) }.getOrNull()
+        return AndroidDerivativeSourceAccess.listNormalizedSourceSha256s(appContext)
+            .mapNotNull { sourceSha256 ->
+                val payload = AndroidDerivativeSourceAccess.readNormalized(appContext, sourceSha256)
+                    ?: return@mapNotNull null
+                runCatching { readSnapshot(payload, observedAtBySource) }.getOrNull()
             }
     }
 
@@ -76,10 +76,10 @@ class AndroidConversationAggregationEngine(context: Context) : AutoCloseable {
     }
 
     private fun readSnapshot(
-        path: File,
+        payloadJson: String,
         observedAtBySource: Map<String, String>,
     ): Snapshot? {
-        val root = JSONObject(path.readText())
+        val root = JSONObject(payloadJson)
         val conversationNativeId = root.optNullableString("conversationNativeId")
             ?.takeIf { it.isNotBlank() }
             ?: return null

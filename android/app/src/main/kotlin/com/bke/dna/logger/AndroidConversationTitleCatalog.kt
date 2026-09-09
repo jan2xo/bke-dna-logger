@@ -16,14 +16,13 @@ import java.nio.file.StandardCopyOption
  *
  * Saved SQLite generations remain immutable. Titles are recovered from the
  * exact RAW conversation payload belonging to each normalized source and keyed
- * by conversationNativeId. New generations read RAW from SQLite; pre-PR4
- * generations can still fall back to shared SHA-addressed bodies. No
- * user-message title synthesis is allowed.
+ * by conversationNativeId. New generations resolve normalized derivatives and
+ * RAW from SQLite; pre-PR5 generations can still fall back to shared loose
+ * derivative/body files. No user-message title synthesis is allowed.
  */
 class AndroidConversationTitleCatalog(context: Context) {
     private val appContext = context.applicationContext
     private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
-    private val normalizedDirectory = File(captureRoot, "normalized")
     private val catalogFile = File(captureRoot, CATALOG_FILE_NAME)
 
     @Volatile private var cached: CatalogState? = null
@@ -32,20 +31,22 @@ class AndroidConversationTitleCatalog(context: Context) {
     fun refreshFromEvidence() {
         val state = readCatalog()
         val generations = AndroidWorkingDataManager(appContext).listWorkingData()
+        val seenSources = linkedSetOf<String>()
         var changed = false
 
-        normalizedDirectory.listFiles().orEmpty()
-            .filter { it.isFile && it.extension == "json" }
-            .sortedBy { it.name }
-            .forEach { normalizedPath ->
-                val normalized = runCatching { JSONObject(normalizedPath.readText()) }.getOrNull()
-                    ?: return@forEach
-                val sourceSha256 = normalized.optString("sourceSha256").takeIf(SHA256::matches)
-                    ?: return@forEach
-                if (sourceSha256 in state.indexedSources) return@forEach
+        for (generation in generations) {
+            val sourceSha256s = runCatching {
+                AndroidDerivativeSourceAccess.listNormalizedSourceSha256s(generation, captureRoot)
+            }.getOrDefault(emptyList())
+            for (sourceSha256 in sourceSha256s) {
+                if (!seenSources.add(sourceSha256) || sourceSha256 in state.indexedSources) continue
+                val normalizedPayload = runCatching {
+                    AndroidDerivativeSourceAccess.readNormalized(generation, captureRoot, sourceSha256)
+                }.getOrNull() ?: continue
+                val normalized = runCatching { JSONObject(normalizedPayload) }.getOrNull() ?: continue
                 val conversationNativeId = normalized.optString("conversationNativeId").trim()
                     .takeIf { it.isNotBlank() }
-                    ?: return@forEach
+                    ?: continue
                 val observedAt = normalized.optString("normalizedAt").trim()
 
                 val normalizedTitle = normalized.optNullableTitle("displayTitle")
@@ -67,15 +68,12 @@ class AndroidConversationTitleCatalog(context: Context) {
                     }
                 }
 
-                // RAW is persisted before normalization. Once a source can be
-                // resolved from any Working Data generation (or a normalized
-                // title already exists), the source is completely inspected for
-                // this catalog format and does not need repeated full reads.
                 if (normalizedTitle != null || rawTitleResult.inspected) {
                     state.indexedSources += sourceSha256
                     changed = true
                 }
             }
+        }
 
         if (changed) writeCatalog(state)
         cached = state
@@ -124,8 +122,6 @@ class AndroidConversationTitleCatalog(context: Context) {
                     break
                 }
             } else if (source.exceptionOrNull() is IllegalArgumentException) {
-                // A resolved source that exceeds the bounded title parser has
-                // still been inspected for this catalog format.
                 inspected = true
                 break
             }

@@ -12,10 +12,11 @@ import java.util.zip.ZipFile
  * Native Kotlin importer for portable conversation-scoped .dna archives.
  *
  * This never attaches or merges another device's SQLite database. Archives are
- * independently verified, staged, then admitted into this device's local
- * evidence store. Imported normalized evidence is then reconciled into this
- * device's own logical conversation projection. Manual archive export remains
- * a separate owner action.
+ * independently verified and staged. Normalized/classification derivatives are
+ * committed into this device's active Working Data SQLite; older file-shaped
+ * evidence types retain their existing compatibility import route. Imported
+ * normalized evidence is then reconciled into this device's own logical
+ * conversation projection. Manual archive export remains a separate owner action.
  */
 class AndroidConversationDnaImportService(context: Context) {
     private val appContext = context.applicationContext
@@ -141,6 +142,27 @@ class AndroidConversationDnaImportService(context: Context) {
     }
 
     private fun commitStaged(item: StagedFile) {
+        derivativeSourceSha(item.relativeTarget, "normalized")?.let { sourceSha256 ->
+            val payload = item.stage.readText(Charsets.UTF_8)
+            AndroidDerivativeStore(appContext).use { store ->
+                store.putNormalizedJson(sourceSha256, payload)
+            }
+            check(item.stage.delete() || !item.stage.exists()) {
+                "Unable to clear imported normalized staging"
+            }
+            return
+        }
+        derivativeSourceSha(item.relativeTarget, "classifications")?.let { sourceSha256 ->
+            val payload = item.stage.readText(Charsets.UTF_8)
+            AndroidDerivativeStore(appContext).use { store ->
+                store.putClassificationJson(sourceSha256, payload)
+            }
+            check(item.stage.delete() || !item.stage.exists()) {
+                "Unable to clear imported classification staging"
+            }
+            return
+        }
+
         val target = File(captureRoot, item.relativeTarget).canonicalFile
         val root = captureRoot.canonicalFile
         require(target.path.startsWith(root.path + File.separator)) {
@@ -158,6 +180,13 @@ class AndroidConversationDnaImportService(context: Context) {
         check(item.stage.renameTo(target)) { "Unable to promote staged DNA evidence" }
     }
 
+    private fun derivativeSourceSha(relativeTarget: String, directoryName: String): String? {
+        val prefix = "$directoryName/"
+        if (!relativeTarget.startsWith(prefix) || !relativeTarget.endsWith(".json")) return null
+        val sourceSha256 = relativeTarget.removePrefix(prefix).removeSuffix(".json")
+        return sourceSha256.takeIf { it.matches(SHA256) }
+    }
+
     private fun sha256File(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
@@ -173,6 +202,10 @@ class AndroidConversationDnaImportService(context: Context) {
 
     private data class ImportTarget(val relativeTarget: String, val expectedSha256: String?)
     private data class StagedFile(val relativeTarget: String, val stage: File, val sha256: String)
+
+    companion object {
+        private val SHA256 = Regex("[0-9a-f]{64}")
+    }
 }
 
 object AndroidConversationDnaVerifier {

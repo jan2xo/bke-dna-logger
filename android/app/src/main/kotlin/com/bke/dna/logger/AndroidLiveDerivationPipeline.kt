@@ -3,11 +3,6 @@ package com.bke.dna.logger
 import android.content.Context
 import android.util.Log
 import org.json.JSONObject
-import java.io.File
-import java.io.FileOutputStream
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.time.Instant
 
 /**
@@ -19,10 +14,6 @@ import java.time.Instant
  */
 class AndroidLiveDerivationPipeline(context: Context) {
     private val appContext = context.applicationContext
-    private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
-    private val classificationsDirectory = File(captureRoot, "classifications").also {
-        check(it.exists() || it.mkdirs()) { "Unable to create Android classification directory" }
-    }
     private val normalizer = AndroidConversationNormalizationDispatcher(appContext)
 
     fun processCompletedCapture(
@@ -66,8 +57,7 @@ class AndroidLiveDerivationPipeline(context: Context) {
         byteLength: Long,
         contentType: String?,
     ) {
-        val target = File(classificationsDirectory, "$sourceSha256.json")
-        if (target.isFile) return
+        if (AndroidDerivativeSourceAccess.readClassification(appContext, sourceSha256) != null) return
 
         var errorType: String? = null
         val classification = try {
@@ -93,12 +83,15 @@ class AndroidLiveDerivationPipeline(context: Context) {
             .put("classifiedAt", Instant.now().toString())
             .put("classification", classification.toJson())
             .put("errorType", errorType ?: JSONObject.NULL)
-        writeDerivativeAtomically(target, envelope.toString(2))
+        AndroidDerivativeStore(appContext).use { store ->
+            store.putClassificationJson(sourceSha256, envelope.toString(2))
+        }
     }
 
     private fun readClassificationOutcome(sourceSha256: String): ClassificationOutcome {
-        val target = File(classificationsDirectory, "$sourceSha256.json")
-        val classification = JSONObject(target.readText()).getJSONObject("classification")
+        val payload = AndroidDerivativeSourceAccess.readClassification(appContext, sourceSha256)
+            ?: error("Classification derivative is not available")
+        val classification = JSONObject(payload).getJSONObject("classification")
         val signals = buildSet {
             val array = classification.getJSONArray("signals")
             for (index in 0 until array.length()) {
@@ -168,29 +161,6 @@ class AndroidLiveDerivationPipeline(context: Context) {
         if ("recognized_message_role" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_recognized_role")
         if ("conversation_graph_shape" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_graph_shape")
         if ("authored_message_shape" in outcome.signals) Log.d(TAG, "BKE DNA derivation: classifier_signal_authored_shape")
-    }
-
-    private fun writeDerivativeAtomically(target: File, text: String) {
-        val temp = File(target.parentFile, ".${target.name}.${System.nanoTime()}.tmp")
-        try {
-            FileOutputStream(temp, false).use { output ->
-                output.write(text.toByteArray(Charsets.UTF_8))
-                output.flush()
-                output.fd.sync()
-            }
-            try {
-                Files.move(
-                    temp.toPath(),
-                    target.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE,
-                )
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            }
-        } finally {
-            if (temp.exists()) temp.delete()
-        }
     }
 
     private data class ClassificationOutcome(

@@ -4,11 +4,6 @@ import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
-import java.io.File
-import java.io.FileOutputStream
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.time.Instant
 
 /**
@@ -18,24 +13,19 @@ import java.time.Instant
  */
 class AndroidMessagesNormalizationEngine(context: android.content.Context) {
     private val appContext = context.applicationContext
-    private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
-    private val classificationsDirectory = File(captureRoot, "classifications")
-    private val normalizedDirectory = File(captureRoot, "normalized").also {
-        check(it.exists() || it.mkdirs()) { "Unable to create Android normalized directory" }
-    }
 
     fun normalizeCandidate(sourceSha256: String): AndroidNormalizationResult? {
         require(SHA256.matches(sourceSha256)) { "Expected lowercase SHA-256 source identity" }
-        val classificationPath = File(classificationsDirectory, "$sourceSha256.json")
-        if (!classificationPath.isFile) return null
-
-        val classificationRoot = JSONObject(classificationPath.readText())
+        val classificationPayload = AndroidDerivativeSourceAccess.readClassification(appContext, sourceSha256)
+            ?: return null
+        val classificationRoot = JSONObject(classificationPayload)
         if (classificationRoot.getJSONObject("classification").getString("kind") != CANDIDATE_KIND) {
             return null
         }
 
-        val outputPath = File(normalizedDirectory, "$sourceSha256.json")
-        if (outputPath.isFile) return readExistingResult(outputPath, sourceSha256)
+        AndroidDerivativeSourceAccess.readNormalized(appContext, sourceSha256)?.let { payload ->
+            return readExistingResult(payload, sourceSha256)
+        }
 
         val rawBytes = try {
             AndroidRawSourceAccess.readAllBytes(appContext, sourceSha256, MAX_BODY_BYTES)
@@ -105,9 +95,11 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
             .put("nodes", JSONArray(nodes.map { it.toJson() }))
             .put("normalizedAt", Instant.now().toString())
 
-        writeDerivativeAtomically(outputPath, normalized.toString(2))
+        AndroidDerivativeStore(appContext).use { store ->
+            store.putNormalizedJson(sourceSha256, normalized.toString(2))
+        }
         Log.d(TAG, "BKE DNA normalization: messages_array_normalization_complete")
-        return AndroidNormalizationResult(sourceSha256, conversationNativeId, outputPath)
+        return AndroidNormalizationResult(sourceSha256, conversationNativeId, null)
     }
 
     private fun parseMessage(message: JSONObject): NormalizedMessageNode? {
@@ -129,35 +121,12 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         )
     }
 
-    private fun readExistingResult(path: File, sourceSha256: String): AndroidNormalizationResult? {
-        val root = runCatching { JSONObject(path.readText()) }.getOrNull() ?: return null
+    private fun readExistingResult(payloadJson: String, sourceSha256: String): AndroidNormalizationResult? {
+        val root = runCatching { JSONObject(payloadJson) }.getOrNull() ?: return null
         if (root.optString("sourceSha256") != sourceSha256) return null
         val conversationNativeId = scalarToString(root.opt("conversationNativeId"))?.takeIf { it.isNotBlank() }
             ?: return null
-        return AndroidNormalizationResult(sourceSha256, conversationNativeId, path)
-    }
-
-    private fun writeDerivativeAtomically(target: File, text: String) {
-        val temp = File(target.parentFile, ".${target.name}.${System.nanoTime()}.tmp")
-        try {
-            FileOutputStream(temp, false).use { output ->
-                output.write(text.toByteArray(Charsets.UTF_8))
-                output.flush()
-                output.fd.sync()
-            }
-            try {
-                Files.move(
-                    temp.toPath(),
-                    target.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE,
-                )
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            }
-        } finally {
-            if (temp.exists()) temp.delete()
-        }
+        return AndroidNormalizationResult(sourceSha256, conversationNativeId, null)
     }
 
     private fun stringArray(array: JSONArray?): List<String> {

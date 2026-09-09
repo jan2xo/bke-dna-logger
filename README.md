@@ -113,16 +113,20 @@ Already proven/implemented:
 - Raw capture writes are incrementally SHA-256 hashed and content-addressed.
 - GeckoSession stays alive while Working Data UI is open.
 - Semantic derivation is moved off the capture-end acknowledgement path.
+- Exact RAW is stored as independently compressed, byte-for-byte verifiable chunks inside Working Data SQLite after crash-safe staging.
+- Classification and normalized derivative JSON for new sources are stored inside Working Data SQLite rather than as permanent loose files.
+- Derivative reads/reconciliation federate Latest plus saved read-only Working Data generations, with loose-file fallback for pre-migration generations.
+- CLEAN is paged from SQLite normalized conversation rows and RAW is read through a bounded SQLite-first source pager.
 - Unified multi-SQLite conversation listing/search exists.
+- Manual `.dna` export remains portable by materializing SQLite RAW/derivatives only into export-temporary files.
 
 Still transitional and scheduled for refactor:
 
-- Exact RAW body currently remains in SHA-addressed files outside SQLite.
-- Observation, classification, normalized and logical conversation-state files still exist outside SQLite.
-- SQLite is currently a projection/index rather than the complete RAW DNA store.
+- Capture observation JSON, logical conversation-state JSON, title-catalog JSON and some reconciliation/witness metadata still exist outside SQLite.
+- SQLite still contains transitional JSON derivative envelopes alongside normalized logical rows; later work may collapse more derivative structure into direct relational projections/checkpoints.
 - Deep semantic parsing still has a conservative large-body boundary in alpha.2.
-- Reader rendering still needs true incremental/paged loading.
-- Existing `.dna`-gated raw purge behavior belongs to alpha.2 and will be superseded by the accepted SQLite Working Data lifecycle above.
+- Working Data backup/generation deletion and the old `.dna`-gated raw purge UI still need to converge on the accepted generation-level SQLite lifecycle.
+- Compact queue/profile UI and ordinary Gecko photo/camera/file selection support remain scheduled follow-up work.
 
 ## UI direction
 

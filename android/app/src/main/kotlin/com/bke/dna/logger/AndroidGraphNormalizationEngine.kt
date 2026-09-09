@@ -5,34 +5,23 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.io.File
-import java.io.FileOutputStream
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.time.Instant
 
 /** Native Kotlin parity for the desktop generic mapping-graph normalizer. */
 class AndroidGraphNormalizationEngine(context: android.content.Context) {
     private val appContext = context.applicationContext
-    private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
-    private val classificationsDirectory = File(captureRoot, "classifications")
-    private val normalizedDirectory = File(captureRoot, "normalized").also {
-        check(it.exists() || it.mkdirs()) { "Unable to create Android normalized directory" }
-    }
 
     fun normalizeCandidate(sourceSha256: String): AndroidNormalizationResult? {
         require(SHA256.matches(sourceSha256)) { "Expected lowercase SHA-256 source identity" }
-        val classificationPath = File(classificationsDirectory, "$sourceSha256.json")
-        if (!classificationPath.isFile) return null
-
-        val classificationRoot = JSONObject(classificationPath.readText())
+        val classificationPayload = AndroidDerivativeSourceAccess.readClassification(appContext, sourceSha256)
+            ?: return null
+        val classificationRoot = JSONObject(classificationPayload)
         if (classificationRoot.getJSONObject("classification").getString("kind") != CANDIDATE_KIND) {
             return null
         }
 
-        val outputPath = File(normalizedDirectory, "$sourceSha256.json")
-        if (outputPath.isFile) {
-            val existing = readExistingResult(outputPath, sourceSha256)
+        AndroidDerivativeSourceAccess.readNormalized(appContext, sourceSha256)?.let { payload ->
+            val existing = readExistingResult(payload, sourceSha256)
             if (existing == null) {
                 Log.d(TAG, "BKE DNA normalization: normalization_skip_existing_result_unusable")
             }
@@ -128,12 +117,14 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
             .put("nodes", JSONArray(nodes.map { it.toJson() }))
             .put("normalizedAt", normalizedAt)
 
-        writeDerivativeAtomically(outputPath, normalized.toString(2))
         if (conversationNativeId.isNullOrBlank()) {
             Log.d(TAG, "BKE DNA normalization: normalization_skip_missing_conversation_id")
             return null
         }
-        return AndroidNormalizationResult(sourceSha256, conversationNativeId, outputPath)
+        AndroidDerivativeStore(appContext).use { store ->
+            store.putNormalizedJson(sourceSha256, normalized.toString(2))
+        }
+        return AndroidNormalizationResult(sourceSha256, conversationNativeId, null)
     }
 
     private fun logCandidateStructure(rootValue: Any?) {
@@ -239,12 +230,12 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
         }
     }
 
-    private fun readExistingResult(path: File, sourceSha256: String): AndroidNormalizationResult? {
-        val root = runCatching { JSONObject(path.readText()) }.getOrNull() ?: return null
+    private fun readExistingResult(payloadJson: String, sourceSha256: String): AndroidNormalizationResult? {
+        val root = runCatching { JSONObject(payloadJson) }.getOrNull() ?: return null
         if (root.optString("sourceSha256") != sourceSha256) return null
         val conversationNativeId = root.optNullableString("conversationNativeId")?.takeIf { it.isNotBlank() }
             ?: return null
-        return AndroidNormalizationResult(sourceSha256, conversationNativeId, path)
+        return AndroidNormalizationResult(sourceSha256, conversationNativeId, null)
     }
 
     private fun parseNode(nodeNativeId: String, node: JSONObject): NormalizedNode {
@@ -305,29 +296,6 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
         ) return "partial"
         if (rootFound && currentLeafFound) return "complete"
         return "indeterminate"
-    }
-
-    private fun writeDerivativeAtomically(target: File, text: String) {
-        val temp = File(target.parentFile, ".${target.name}.${System.nanoTime()}.tmp")
-        try {
-            FileOutputStream(temp, false).use { output ->
-                output.write(text.toByteArray(Charsets.UTF_8))
-                output.flush()
-                output.fd.sync()
-            }
-            try {
-                Files.move(
-                    temp.toPath(),
-                    target.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE,
-                )
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            }
-        } finally {
-            if (temp.exists()) temp.delete()
-        }
     }
 
     private fun stringArray(array: JSONArray?): List<String> {
@@ -399,7 +367,7 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
 data class AndroidNormalizationResult(
     val sourceSha256: String,
     val conversationNativeId: String,
-    val normalizedFile: File,
+    val normalizedFile: File?,
 )
 
 private fun JSONObject.optNullableString(key: String): String? =
