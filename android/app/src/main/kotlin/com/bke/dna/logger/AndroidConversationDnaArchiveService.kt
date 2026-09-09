@@ -35,9 +35,6 @@ class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
             }
             .forEach(File::delete)
     }
-    private val latestGeneration by lazy {
-        AndroidWorkingDataManager(appContext).generation(AndroidWorkingDataManager.LATEST_ID)
-    }
     private val index = AndroidCaptureIndex(appContext)
 
     fun exportToUri(
@@ -125,8 +122,7 @@ class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
         sources.forEach { sourceSha ->
             val raw = materializeRawSource(sourceSha).also(temporaryEvidence::add)
             val normalizedPayload = AndroidDerivativeSourceAccess.readNormalized(
-                latestGeneration,
-                captureRoot,
+                appContext,
                 sourceSha,
             ) ?: error("Conversation source '$sourceSha' is missing normalized evidence")
             val normalized = materializeDerivativeSource(
@@ -153,8 +149,7 @@ class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
             )
 
             val classificationPayload = AndroidDerivativeSourceAccess.readClassification(
-                latestGeneration,
-                captureRoot,
+                appContext,
                 sourceSha,
             )
             if (classificationPayload != null) {
@@ -299,8 +294,7 @@ class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
             FileOutputStream(temporary, false).use { output ->
                 require(
                     AndroidRawSourceAccess.writeExactSource(
-                        generation = latestGeneration,
-                        captureRoot = captureRoot,
+                        context = appContext,
                         sourceSha256 = sourceSha256,
                         output = output,
                     ),
