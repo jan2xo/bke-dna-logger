@@ -3,23 +3,19 @@ package com.bke.dna.logger
 import android.util.Log
 import org.json.JSONObject
 import org.json.JSONTokener
-import java.io.File
 
 /** Selects a representation-specific normalizer without weakening either parser. */
 class AndroidConversationNormalizationDispatcher(context: android.content.Context) {
     private val appContext = context.applicationContext
-    private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
-    private val classificationsDirectory = File(captureRoot, "classifications")
     private val graphNormalizer = AndroidGraphNormalizationEngine(appContext)
     private val messagesNormalizer = AndroidMessagesNormalizationEngine(appContext)
 
     fun normalizeCandidate(sourceSha256: String): AndroidNormalizationResult? {
         require(SHA256.matches(sourceSha256)) { "Expected lowercase SHA-256 source identity" }
-        val classificationPath = File(classificationsDirectory, "$sourceSha256.json")
-        if (!classificationPath.isFile) return null
-
+        val classificationPayload = AndroidDerivativeSourceAccess.readClassification(appContext, sourceSha256)
+            ?: return null
         val classification = runCatching {
-            JSONObject(classificationPath.readText()).getJSONObject("classification")
+            JSONObject(classificationPayload).getJSONObject("classification")
         }.getOrNull() ?: return null
         if (classification.optString("kind") != CANDIDATE_KIND) return null
 
