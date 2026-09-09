@@ -1,5 +1,6 @@
 package com.bke.dna.logger
 
+import android.util.JsonWriter
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
@@ -24,8 +25,10 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
             return null
         }
 
-        AndroidDerivativeSourceAccess.readNormalized(appContext, sourceSha256)?.let { payload ->
-            return readExistingResult(payload, sourceSha256)
+        AndroidDerivativeSourceAccess.readNormalizedMetadata(appContext, sourceSha256)?.let { existing ->
+            if (existing.sourceSha256 == sourceSha256 && existing.conversationNativeId.isNotBlank()) {
+                return AndroidNormalizationResult(sourceSha256, existing.conversationNativeId, null)
+            }
         }
 
         val rawBytes = try {
@@ -82,40 +85,68 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         } else {
             PARSER_ENVELOPE
         }
-
-        val normalized = JSONObject()
-            .put("sourceSha256", sourceSha256)
-            .put("parser", parser)
-            .put("conversationNativeId", identity.conversationNativeId)
-            .put("conversationIdentityBasis", identity.basis)
-            .put("currentNodeNativeId", currentNodeNativeId ?: JSONObject.NULL)
-            .put("coverageStatus", "indeterminate")
-            .put("coverageBasis", COVERAGE_BASIS)
-            .put("rootFound", false)
-            .put("currentNodeFound", currentNodeFound)
-            .put("currentLeafFound", false)
-            .put("parentChainComplete", false)
-            .put("cycleDetected", false)
-            .put("unresolvedParentNativeIds", JSONArray())
-            .put("unresolvedChildNativeIds", JSONArray())
-            .put("nodes", JSONArray(nodes.map { it.toJson() }))
-            .put("normalizedAt", Instant.now().toString())
+        val normalizedAt = Instant.now().toString()
 
         Log.d(TAG, "BKE DNA normalization: messages_derivative_write_started")
         try {
-            AndroidDerivativeStore(appContext).use { store ->
-                store.putNormalizedJson(sourceSha256, normalized.toString(2))
+            AndroidChunkedNormalizedStore(appContext).use { store ->
+                store.putNormalizedJsonStream(
+                    sourceSha256 = sourceSha256,
+                    conversationNativeId = identity.conversationNativeId,
+                    normalizedAt = normalizedAt,
+                ) { writer ->
+                    writeNormalizedPayload(
+                        writer = writer,
+                        sourceSha256 = sourceSha256,
+                        parser = parser,
+                        identity = identity,
+                        currentNodeNativeId = currentNodeNativeId,
+                        currentNodeFound = currentNodeFound,
+                        nodes = nodes,
+                        normalizedAt = normalizedAt,
+                    )
+                }
             }
         } catch (error: OutOfMemoryError) {
-            // OutOfMemoryError is not an Exception, so the outer derivation
-            // failure handler cannot expose it. Log only the failure class;
-            // never log the normalized payload or any user content.
-            Log.e(TAG, "BKE DNA normalization: messages_derivative_out_of_memory")
+            Log.e(TAG, "BKE DNA normalization: messages_derivative_out_of_memory", error)
             throw error
         }
         Log.d(TAG, "BKE DNA normalization: messages_derivative_write_complete")
         Log.d(TAG, "BKE DNA normalization: messages_array_normalization_complete")
         return AndroidNormalizationResult(sourceSha256, identity.conversationNativeId, null)
+    }
+
+    private fun writeNormalizedPayload(
+        writer: JsonWriter,
+        sourceSha256: String,
+        parser: String,
+        identity: AndroidConversationIdentityResolution,
+        currentNodeNativeId: String?,
+        currentNodeFound: Boolean,
+        nodes: List<NormalizedMessageNode>,
+        normalizedAt: String,
+    ) {
+        writer.beginObject()
+        writer.name("sourceSha256").value(sourceSha256)
+        writer.name("parser").value(parser)
+        writer.name("conversationNativeId").value(identity.conversationNativeId)
+        writer.name("conversationIdentityBasis").value(identity.basis)
+        writer.name("currentNodeNativeId")
+        if (currentNodeNativeId == null) writer.nullValue() else writer.value(currentNodeNativeId)
+        writer.name("coverageStatus").value("indeterminate")
+        writer.name("coverageBasis").value(COVERAGE_BASIS)
+        writer.name("rootFound").value(false)
+        writer.name("currentNodeFound").value(currentNodeFound)
+        writer.name("currentLeafFound").value(false)
+        writer.name("parentChainComplete").value(false)
+        writer.name("cycleDetected").value(false)
+        writer.name("unresolvedParentNativeIds").beginArray().endArray()
+        writer.name("unresolvedChildNativeIds").beginArray().endArray()
+        writer.name("nodes").beginArray()
+        nodes.forEach { it.writeJson(writer) }
+        writer.endArray()
+        writer.name("normalizedAt").value(normalizedAt)
+        writer.endObject()
     }
 
     private fun locateMessagesEnvelope(root: JSONObject): MessageEnvelope? {
@@ -252,14 +283,6 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         )
     }
 
-    private fun readExistingResult(payloadJson: String, sourceSha256: String): AndroidNormalizationResult? {
-        val root = runCatching { JSONObject(payloadJson) }.getOrNull() ?: return null
-        if (root.optString("sourceSha256") != sourceSha256) return null
-        val conversationNativeId = scalarToString(root.opt("conversationNativeId"))?.takeIf { it.isNotBlank() }
-            ?: return null
-        return AndroidNormalizationResult(sourceSha256, conversationNativeId, null)
-    }
-
     private fun stringArray(array: JSONArray?): List<String> {
         if (array == null) return emptyList()
         return buildList {
@@ -297,15 +320,23 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         val textParts: List<String>,
         val contentJson: String?,
     ) {
-        fun toJson(): JSONObject = JSONObject()
-            .put("nodeNativeId", nodeNativeId)
-            .put("messageNativeId", messageNativeId)
-            .put("parentNativeId", JSONObject.NULL)
-            .put("childNativeIds", JSONArray())
-            .put("role", role ?: JSONObject.NULL)
-            .put("createdAt", createdAt ?: JSONObject.NULL)
-            .put("textParts", JSONArray(textParts))
-            .put("contentJson", contentJson ?: JSONObject.NULL)
+        fun writeJson(writer: JsonWriter) {
+            writer.beginObject()
+            writer.name("nodeNativeId").value(nodeNativeId)
+            writer.name("messageNativeId").value(messageNativeId)
+            writer.name("parentNativeId").nullValue()
+            writer.name("childNativeIds").beginArray().endArray()
+            writer.name("role")
+            if (role == null) writer.nullValue() else writer.value(role)
+            writer.name("createdAt")
+            if (createdAt == null) writer.nullValue() else writer.value(createdAt)
+            writer.name("textParts").beginArray()
+            textParts.forEach(writer::value)
+            writer.endArray()
+            writer.name("contentJson")
+            if (contentJson == null) writer.nullValue() else writer.value(contentJson)
+            writer.endObject()
+        }
     }
 
     companion object {
