@@ -9,15 +9,15 @@ import java.security.MessageDigest
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.UUID
 
 /**
  * App-private Working Data generations.
  *
- * Latest is the only writable/live SQLite database. A rotation snapshots the
- * current SQLite projection, including SQLite-backed exact RAW for new
- * generations, plus the small logical conversation-state files, verifies the
- * snapshot, then starts a fresh Latest database. Older saved generations that
- * predate RAW-in-SQLite remain compatible with shared SHA-addressed bodies.
+ * Latest is the only writable/live SQLite database. Saved generations are
+ * verified read-only recovery sources. New generations are self-contained:
+ * exact RAW plus derivatives/logical rows live in their SQLite snapshot, while
+ * the small logical conversation-state JSON remains transitional companion data.
  */
 class AndroidWorkingDataManager(context: Context) {
     private val appContext = context.applicationContext
@@ -42,13 +42,26 @@ class AndroidWorkingDataManager(context: Context) {
             ?: error("Working Data generation does not exist or failed verification")
     }
 
+    /**
+     * Return a generation safe to copy into a backup.
+     *
+     * The caller must hold the storage-mutation pause when backing up Latest so
+     * no capture/derivation write can race the WAL checkpoint and subsequent copy.
+     */
+    fun generationForBackup(id: String): AndroidWorkingDataGeneration {
+        if (id != LATEST_ID) return generation(id)
+        ensureActiveDatabaseCreated()
+        checkpointLatest()
+        return latestGeneration()
+    }
+
     fun savedWorkingDataBytes(): Long = workingDataRoot.walkTopDown()
         .filter { it.isFile }
         .sumOf { it.length() }
 
     /**
      * Save the current Latest generation and start a fresh writable Latest.
-     * The caller must pause live capture before invoking this operation.
+     * The caller must pause live capture/background derivation before invoking.
      */
     fun rotateLatest(): AndroidWorkingDataGeneration {
         val activeDatabase = appContext.getDatabasePath(AndroidCaptureIndex.DATABASE_NAME)
@@ -57,9 +70,8 @@ class AndroidWorkingDataManager(context: Context) {
         require(activeDatabase.isFile) { "Latest Working Data SQLite does not exist" }
 
         val createdAt = Instant.now()
-        val id = GENERATION_FILE_FORMATTER.format(createdAt)
+        val id = nextGenerationId(createdAt)
         val generationDirectory = File(workingDataRoot, id)
-        check(!generationDirectory.exists()) { "Working Data generation already exists" }
         check(generationDirectory.mkdirs()) { "Unable to create Working Data generation" }
 
         var latestRetired = false
@@ -83,27 +95,20 @@ class AndroidWorkingDataManager(context: Context) {
                 copyDurably(source, File(snapshotConversations, source.name))
             }
 
-            val manifest = JSONObject()
-                .put("format", WORKING_DATA_FORMAT)
-                .put("formatVersion", 1)
-                .put("generationId", id)
-                .put("createdAt", createdAt.toString())
-                .put("mode", "read_only_recovery")
-                .put("sqliteFile", SNAPSHOT_DATABASE_NAME)
-                .put("sqliteSha256", databaseSha256)
-                .put("sqliteByteLength", snapshotDatabase.length())
-                .put("conversationCount", summaries.size)
-                .put("conversationStateIncluded", true)
-                .put("rawEvidenceIncluded", true)
-                .put("rawEvidenceSharedBySha", false)
-            writeDurably(File(generationDirectory, MANIFEST_NAME), manifest.toString(2))
+            writeGenerationManifest(
+                directory = generationDirectory,
+                id = id,
+                createdAt = createdAt,
+                database = snapshotDatabase,
+                databaseSha256 = databaseSha256,
+                conversationCount = summaries.size,
+                restoredFromBackup = false,
+                sourceCreatedAt = null,
+            )
 
             val verifiedGeneration = readGeneration(generationDirectory, verify = true)
                 ?: error("Unable to verify saved Working Data generation")
-
-            snapshotDatabase.setReadOnly()
-            snapshotConversations.listFiles().orEmpty().forEach(File::setReadOnly)
-            File(generationDirectory, MANIFEST_NAME).setReadOnly()
+            makeGenerationReadOnly(generationDirectory)
 
             require(appContext.deleteDatabase(AndroidCaptureIndex.DATABASE_NAME)) {
                 "Unable to retire Latest Working Data SQLite after verified snapshot"
@@ -115,9 +120,108 @@ class AndroidWorkingDataManager(context: Context) {
                 snapshotBytes = generationDirectory.walkTopDown().filter { it.isFile }.sumOf { it.length() },
             )
         } catch (error: Throwable) {
-            if (!latestRetired) generationDirectory.deleteRecursively()
+            if (!latestRetired) deleteDirectoryBestEffort(generationDirectory)
             throw error
         }
+    }
+
+    /**
+     * Restore a verified SQLite backup as a separate read-only generation.
+     * Foreign/backup SQLite is never ATTACHed to or merged into Latest.
+     */
+    fun importReadOnlyGeneration(
+        databaseSource: File,
+        conversationStateSource: File,
+        sourceCreatedAt: String?,
+    ): AndroidWorkingDataGeneration {
+        require(databaseSource.isFile) { "Working Data backup lacks SQLite" }
+        require(conversationStateSource.isDirectory) { "Working Data backup lacks conversation state" }
+        require(databaseHasSelfContainedRaw(databaseSource)) {
+            "Working Data backup SQLite is not self-contained RAW evidence"
+        }
+
+        val sourceSummaries = listConversationsFromDatabase(databaseSource)
+        sourceSummaries.forEach { summary ->
+            require(File(conversationStateSource, "${summary.conversationKey}.json").isFile) {
+                "Working Data backup lacks state for '${summary.conversationKey}'"
+            }
+        }
+
+        val createdAt = Instant.now()
+        val id = nextGenerationId(createdAt)
+        val finalDirectory = File(workingDataRoot, id)
+        val stagingDirectory = File(workingDataRoot, ".import-${UUID.randomUUID()}")
+        check(stagingDirectory.mkdirs()) { "Unable to create Working Data restore staging" }
+
+        var promoted = false
+        try {
+            val database = File(stagingDirectory, SNAPSHOT_DATABASE_NAME)
+            copyDurably(databaseSource, database)
+            val databaseSha256 = sha256File(database)
+            require(databaseSha256 == sha256File(databaseSource)) {
+                "Restored Working Data SQLite copy verification failed"
+            }
+
+            val states = File(stagingDirectory, SNAPSHOT_CONVERSATIONS_DIRECTORY)
+            check(states.mkdirs()) { "Unable to create restored conversation-state directory" }
+            sourceSummaries.forEach { summary ->
+                val source = File(conversationStateSource, "${summary.conversationKey}.json")
+                copyDurably(source, File(states, source.name))
+            }
+
+            writeGenerationManifest(
+                directory = stagingDirectory,
+                id = id,
+                createdAt = createdAt,
+                database = database,
+                databaseSha256 = databaseSha256,
+                conversationCount = sourceSummaries.size,
+                restoredFromBackup = true,
+                sourceCreatedAt = sourceCreatedAt,
+            )
+
+            require(databaseHasSelfContainedRaw(database)) {
+                "Restored Working Data lost self-contained RAW evidence"
+            }
+            require(listConversationsFromDatabase(database).size == sourceSummaries.size) {
+                "Restored Working Data conversation verification failed"
+            }
+            makeGenerationReadOnly(stagingDirectory)
+
+            check(!finalDirectory.exists()) { "Restored Working Data generation already exists" }
+            check(stagingDirectory.renameTo(finalDirectory)) {
+                "Unable to promote verified Working Data restore"
+            }
+            promoted = true
+
+            return readGeneration(finalDirectory, verify = true)
+                ?: error("Promoted Working Data restore failed final verification")
+        } catch (error: Throwable) {
+            if (promoted) deleteDirectoryBestEffort(finalDirectory) else deleteDirectoryBestEffort(stagingDirectory)
+            throw error
+        }
+    }
+
+    /** Delete one saved read-only generation. Latest can never be deleted here. */
+    fun deleteSavedGeneration(id: String, confirmation: String): AndroidWorkingDataDeleteResult {
+        require(confirmation == DELETE_CONFIRMATION_TEXT) {
+            "Type exact confirmation '$DELETE_CONFIRMATION_TEXT'"
+        }
+        require(id != LATEST_ID) { "Latest Working Data cannot be deleted" }
+        val verified = generation(id)
+        require(verified.isReadOnly && !verified.isLatest) { "Only saved Working Data can be deleted" }
+
+        val directory = File(workingDataRoot, id)
+        val bytes = directory.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        makeWritableRecursively(directory)
+        check(directory.deleteRecursively() && !directory.exists()) {
+            "Unable to delete saved Working Data '$id'"
+        }
+        return AndroidWorkingDataDeleteResult(
+            generationId = id,
+            bytesReclaimed = bytes,
+            deletedAt = Instant.now().toString(),
+        )
     }
 
     fun listConversations(generation: AndroidWorkingDataGeneration): List<AndroidConversationSummary> {
@@ -145,6 +249,7 @@ class AndroidWorkingDataManager(context: Context) {
             databaseFile = database,
             conversationStateDirectory = File(captureRoot, "conversations"),
             snapshotBytes = databaseRelatedBytes(database),
+            rawEvidenceIncluded = true,
         )
     }
 
@@ -176,6 +281,11 @@ class AndroidWorkingDataManager(context: Context) {
             summaries.forEach { summary ->
                 require(File(states, "${summary.conversationKey}.json").isFile)
             }
+            if (rawEvidenceIncluded) {
+                require(databaseHasSelfContainedRaw(database)) {
+                    "Working Data declares SQLite RAW but is not self-contained"
+                }
+            }
         }
 
         val createdAt = Instant.parse(manifest.getString("createdAt"))
@@ -189,8 +299,39 @@ class AndroidWorkingDataManager(context: Context) {
             conversationStateDirectory = states,
             snapshotBytes = manifest.optLong("sqliteByteLength", database.length()) +
                 states.listFiles().orEmpty().filter { it.isFile }.sumOf { it.length() } + manifestFile.length(),
+            rawEvidenceIncluded = rawEvidenceIncluded,
         )
     }.getOrNull()
+
+    private fun writeGenerationManifest(
+        directory: File,
+        id: String,
+        createdAt: Instant,
+        database: File,
+        databaseSha256: String,
+        conversationCount: Int,
+        restoredFromBackup: Boolean,
+        sourceCreatedAt: String?,
+    ) {
+        val manifest = JSONObject()
+            .put("format", WORKING_DATA_FORMAT)
+            .put("formatVersion", 1)
+            .put("generationId", id)
+            .put("createdAt", createdAt.toString())
+            .put("mode", "read_only_recovery")
+            .put("sqliteFile", SNAPSHOT_DATABASE_NAME)
+            .put("sqliteSha256", databaseSha256)
+            .put("sqliteByteLength", database.length())
+            .put("conversationCount", conversationCount)
+            .put("conversationStateIncluded", true)
+            .put("rawEvidenceIncluded", true)
+            .put("rawEvidenceSharedBySha", false)
+            .put("restoredFromBackup", restoredFromBackup)
+        if (!sourceCreatedAt.isNullOrBlank()) {
+            manifest.put("sourceCreatedAt", sourceCreatedAt)
+        }
+        writeDurably(File(directory, MANIFEST_NAME), manifest.toString(2))
+    }
 
     private fun checkpointLatest() {
         val index = AndroidCaptureIndex(appContext)
@@ -211,6 +352,32 @@ class AndroidWorkingDataManager(context: Context) {
         } finally {
             index.close()
         }
+    }
+
+    private fun databaseHasSelfContainedRaw(databaseFile: File): Boolean {
+        if (!databaseFile.isFile) return false
+        return runCatching {
+            SQLiteDatabase.openDatabase(
+                databaseFile.absolutePath,
+                null,
+                SQLiteDatabase.OPEN_READONLY,
+            ).use { database ->
+                if (!hasTable(database, "raw_source") || !hasTable(database, "raw_source_chunk")) {
+                    return@use false
+                }
+                database.rawQuery(
+                    """
+                    SELECT COUNT(*)
+                    FROM conversation_source cs
+                    LEFT JOIN raw_source rs ON rs.source_sha256 = cs.source_sha256
+                    WHERE rs.source_sha256 IS NULL
+                    """.trimIndent(),
+                    null,
+                ).use { cursor ->
+                    cursor.moveToFirst() && cursor.getLong(0) == 0L
+                }
+            }
+        }.getOrDefault(false)
     }
 
     private fun listConversationsFromDatabase(databaseFile: File): List<AndroidConversationSummary> {
@@ -276,6 +443,11 @@ class AndroidWorkingDataManager(context: Context) {
         return false
     }
 
+    private fun hasTable(database: SQLiteDatabase, table: String): Boolean = database.rawQuery(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        arrayOf(table),
+    ).use { it.moveToFirst() }
+
     private fun copyDurably(source: File, destination: File) {
         destination.parentFile?.let { check(it.exists() || it.mkdirs()) }
         source.inputStream().use { input ->
@@ -293,6 +465,31 @@ class AndroidWorkingDataManager(context: Context) {
             output.write(text.toByteArray(Charsets.UTF_8))
             output.flush()
             output.fd.sync()
+        }
+    }
+
+    private fun makeGenerationReadOnly(directory: File) {
+        directory.walkBottomUp().filter { it.isFile }.forEach(File::setReadOnly)
+    }
+
+    private fun makeWritableRecursively(directory: File) {
+        directory.walkTopDown().forEach { path ->
+            if (path.isDirectory) path.setWritable(true, true) else path.setWritable(true, true)
+        }
+    }
+
+    private fun deleteDirectoryBestEffort(directory: File) {
+        if (!directory.exists()) return
+        makeWritableRecursively(directory)
+        directory.deleteRecursively()
+    }
+
+    private fun nextGenerationId(seed: Instant): String {
+        var candidate = seed
+        while (true) {
+            val id = GENERATION_FILE_FORMATTER.format(candidate)
+            if (!File(workingDataRoot, id).exists()) return id
+            candidate = candidate.plusMillis(1)
         }
     }
 
@@ -315,6 +512,7 @@ class AndroidWorkingDataManager(context: Context) {
 
     companion object {
         const val LATEST_ID = "latest"
+        const val DELETE_CONFIRMATION_TEXT = "jan2x"
         private const val WORKING_DATA_FORMAT = "bke-dna-working-data"
         private const val SNAPSHOT_DATABASE_NAME = "working.sqlite"
         private const val SNAPSHOT_CONVERSATIONS_DIRECTORY = "conversations"
@@ -335,4 +533,11 @@ data class AndroidWorkingDataGeneration(
     val databaseFile: File,
     val conversationStateDirectory: File,
     val snapshotBytes: Long,
+    val rawEvidenceIncluded: Boolean = true,
+)
+
+data class AndroidWorkingDataDeleteResult(
+    val generationId: String,
+    val bytesReclaimed: Long,
+    val deletedAt: String,
 )

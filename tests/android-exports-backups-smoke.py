@@ -18,7 +18,6 @@ titles = (base / "AndroidConversationTitleCatalog.kt").read_text()
 main = (base / "MainActivity.kt").read_text()
 runtime = (base / "AndroidCaptureRuntime.kt").read_text()
 queue = (base / "AndroidDerivationQueue.kt").read_text()
-purge = (base / "AndroidPurgeService.kt").read_text()
 human = (base / "AndroidHumanExportService.kt").read_text()
 working_data = (base / "AndroidWorkingDataManager.kt").read_text()
 paths = (base / "AndroidDnaPaths.kt").read_text()
@@ -50,19 +49,28 @@ for forbidden in [
 ]:
     assert forbidden not in archive, forbidden
 
-# Working Data remains timestamped/read-only outside Latest. New saved SQLite
-# generations contain exact RAW and PR5 derivative tables automatically because
-# the complete active database is checkpointed and copied.
+# Working Data: Latest is the only writable generation. New/saved/restored
+# generations are verified read-only SQLite recovery sources with self-contained
+# RAW. Restore is staged before promotion and never merges foreign SQLite into Latest.
 for token in [
     'Latest — Active', 'read_only_recovery', 'working.sqlite',
     'PRAGMA wal_checkpoint(TRUNCATE)', 'SQLiteDatabase.OPEN_READONLY',
     '.put("rawEvidenceIncluded", true)', '.put("rawEvidenceSharedBySha", false)',
     'manifest.optBoolean("rawEvidenceIncluded", false)',
     'manifest.optBoolean("rawEvidenceSharedBySha", !rawEvidenceIncluded)',
-    'conversationStateIncluded', 'snapshotDatabase.setReadOnly()',
+    'conversationStateIncluded', 'makeGenerationReadOnly(',
+    'fun generationForBackup(', 'fun importReadOnlyGeneration(',
+    'fun deleteSavedGeneration(', 'DELETE_CONFIRMATION_TEXT = "jan2x"',
+    'databaseHasSelfContainedRaw(', 'File(workingDataRoot, ".import-${UUID.randomUUID()}")',
+    'stagingDirectory.renameTo(finalDirectory)',
+    'Latest Working Data cannot be deleted', 'Only saved Working Data can be deleted',
 ]:
     assert token in working_data, token
+for forbidden in ['ATTACH DATABASE', 'MERGE INTO LATEST']:
+    assert forbidden not in working_data.upper(), forbidden
 assert 'dna/working-data' in paths
+
+# PR5 derivative tables remain inside SQLite Working Data.
 for token in [
     'CREATE TABLE IF NOT EXISTS derivative_classification (',
     'CREATE TABLE IF NOT EXISTS derivative_normalized (',
@@ -96,7 +104,8 @@ for token in [
 ]:
     assert token in derivative_access, token
 
-# Management no longer destroys/reloads ChatGPT. Storage mutation pauses capture only.
+# Management never destroys/reloads ChatGPT. Storage mutations pause capture and
+# derivation without killing GeckoSession.
 assert 'startActivity(Intent(this@MainActivity, AndroidExportsBackupsActivity::class.java))' in main
 assert 'capturePausedForWorkingData' not in main
 assert 'override fun onResume()' not in main
@@ -139,8 +148,7 @@ for token in [
 for forbidden in ['AndroidHumanExportService', '.readText(']:
     assert forbidden not in unified, forbidden
 
-# PR6 keeps Working Data + conversation management compact and exposes the
-# existing durable queue/profile controls without creating another scheduler.
+# PR6 compact queue/profile UI remains intact while PR8 changes lifecycle actions.
 for token in [
     'Working Data & Conversations', 'Processing', 'All Conversations', 'Search conversation titles',
     'SEARCH', 'CLEAR', 'LOAD MORE', 'library.search(searchQuery, libraryLimit)',
@@ -151,44 +159,61 @@ for token in [
     'compactButton("CLEAN")', 'compactButton("RAW")', 'compactButton("MORE")',
     'PopupMenu(this, anchor)', 'setOnClickListener { openConversation(summary) }',
     'contentDescription = "Read ${summary.displayTitle}"',
-    'Tap a conversation row to read it', 'archival/purge actions live under MORE',
+    'Tap a conversation row to read it', 'portable .dna export lives under MORE',
 ]:
     assert token in ui, token
 for token in ['SLOW(500L)', 'BALANCED(150L)', 'FAST(25L)', 'fun snapshot(context: Context)']:
     assert token in queue, token
 for forbidden in ['actionButton("Read conversation")', 'actionButton("Export CLEAN.md")', 'actionButton("Export RAW.md")']:
     assert forbidden not in ui, forbidden
-conversation_loop = ui[ui.index('conversations.forEach'):ui.index('private fun refreshQueueStatus')]
+conversation_loop = ui[ui.index('conversations.forEach'):ui.index('private fun prepareWorkingDataBackup')]
 assert 'human.describe' not in conversation_loop
 assert 'conversationWorkingBytes' not in conversation_loop
 assert 'summary.displayTitle' in conversation_loop
 assert 'summary.generationCount' in conversation_loop
 
-# Transitional purge may still clean legacy loose derivative files but must not
-# delete Working Data SQLite or PR5 derivative rows.
+# PR8 backup is the actual self-contained SQLite generation, not a loose-evidence
+# archive. Written output is re-opened and verified. Restore becomes read-only.
 for token in [
-    'CONFIRMATION_TEXT = "jan2x"',
-    'conversationArchived', 'sources.any { !it.archived }', 'archiveId', 'archiveSha256',
-    'conversation_source cs', 'lc.conversation_native_id <> ?',
-    'Unable to prove source exclusivity across every Working Data generation',
-    'bodies/$sourceSha256.body', 'normalized/$sourceSha256.json',
-    'classifications/$sourceSha256.json', 'observations',
-    'logicalStateRetained', 'sqliteRetained', 'bytesReclaimed',
+    'BACKUP_FORMAT = "bke-dna-working-sqlite-backup"', 'BACKUP_VERSION = 2',
+    'generationForBackup(generationId)', '"sqliteIncluded", true',
+    '"sqliteMergeAllowed", false', '"restoreMode", "read_only_generation"',
+    '"rawEvidenceIncluded", true', '"conversationStateIncluded", true',
+    'SQLITE_PATH = "working.sqlite"', 'CHECKSUMS_PATH = "SHA256SUMS"',
+    'resolver.openInputStream(destinationUri)', 'verifyBackup(verificationCopy)',
+    'manager.importReadOnlyGeneration(', 'extractVerified(',
 ]:
-    assert token in purge, token
+    assert token in backup, token
+for forbidden in [
+    '"sqliteIncluded", false', 'EVIDENCE_DIRECTORIES',
+    'AndroidConversationAggregationEngine', 'bodies', 'normalized', 'classifications',
+    'ATTACH DATABASE',
+]:
+    assert forbidden not in backup.upper() if forbidden == 'ATTACH DATABASE' else forbidden not in backup, forbidden
+
+# PR8 deletion is whole-generation, owner-directed, and independent from .dna.
+assert not (base / "AndroidPurgeService.kt").exists()
 for token in [
-    'PURGE ALL VERIFIED RAW', 'PURGE VERIFIED RAW', 'Type exact confirmation: jan2x',
-    'setBackgroundColor(Color.rgb(183, 28, 28))', 'setTextColor(Color.WHITE)',
+    'dangerButton("DELETE")', 'confirmDeleteGeneration(',
+    'deleteSavedGeneration(', 'AndroidWorkingDataManager.DELETE_CONFIRMATION_TEXT',
+    'Type exact confirmation: jan2x',
+    'This does not touch Latest and does not require a .dna export.',
+    'Working Data restored as read-only generation',
+    'Working Data SQLite backup exported and verified',
 ]:
     assert token in ui, token
-assert 'deleteDatabase' not in purge
-assert 'conversations/' not in purge
-assert 'derivative_classification' not in purge
-assert 'derivative_normalized' not in purge
+for forbidden in [
+    'PURGE ALL VERIFIED RAW', 'PURGE VERIFIED RAW', 'AndroidPurgeService',
+    'LOCAL RAW PURGED', 'Verified .dna is the durability gate',
+]:
+    assert forbidden not in ui, forbidden
+assert '.dna' not in working_data[working_data.index('fun deleteSavedGeneration'):working_data.index('fun listConversations')]
 
+# .dna export remains Latest-only because it mutates Latest durability metadata.
 assert 'Historical Working Data cannot mutate Latest .dna durability state' in ui
 assert 'pendingWorkingDataId == AndroidWorkingDataManager.LATEST_ID' in ui
 
+# Reader stays lazy/paged.
 for token in [
     'Executors.newSingleThreadExecutor', '"bke-dna-reader-io"',
     'AndroidUnifiedConversationLibrary(this)', 'AndroidCleanConversationPager(',
@@ -235,9 +260,6 @@ for forbidden in ['conversationNativeId', 'sourceSha256', 'nodeNativeId', 'conte
 
 assert '@android:style/Theme.Material.NoActionBar' in manifest
 assert 'Theme.Material.Light.NoActionBar' not in manifest
-for token in ['bke-dna-working-backup', '"sqliteIncluded", false', 'MERGE_SQLITE_ACROSS_DEVICES']:
-    assert token in backup, token
-assert 'ATTACH DATABASE' not in backup.upper()
 assert 'STORAGE_WARNING_BYTES = 1_073_741_824L' in contract
 assert 'AUTOMATIC_DNA_EXPORT = false' in contract
 assert 'AUTOMATIC_MARKDOWN_EXPORT = false' in contract
@@ -255,4 +277,4 @@ identity = '\n'.join(f'{p}\t{s}\t{n}\t{src}' for p, s, n, src in sorted(evidence
 archive_id = 'dna-conversation-v2-' + hashlib.sha256(identity.encode()).hexdigest()
 assert len(archive_id) == len('dna-conversation-v2-') + 64
 
-print('android compact queue UI + SQLite RAW/derivative Working Data guardrails smoke PASS')
+print('android SQLite Working Data backup + generation deletion guardrails smoke PASS')

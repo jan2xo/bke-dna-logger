@@ -16,188 +16,210 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * Manual working-evidence backup.
+ * Manual Working Data SQLite backup.
  *
- * SQLite is deliberately excluded: it is a rebuildable local projection and
- * cross-device SQLite merging is forbidden. Backups contain the evidence needed
- * to rebuild normalized/logical state on another BKE DNA Logger installation.
+ * A backup is one self-contained SQLite generation plus the small transitional
+ * conversation-state companions required by the current reader/export layer.
+ * Restore never merges/ATTACHes foreign SQLite into Latest; it creates a new
+ * verified read-only Working Data generation through AndroidWorkingDataManager.
  */
 class AndroidWorkingBackupService(context: Context) {
     private val appContext = context.applicationContext
-    private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
+    private val manager = AndroidWorkingDataManager(appContext)
 
-    fun backupToUri(resolver: ContentResolver, destinationUri: Uri): AndroidWorkingBackupResult {
-        val files = collectEvidenceFiles()
-        val entries = files.map { file ->
-            val relative = file.relativeTo(captureRoot).invariantSeparatorsPath
-            BackupEntry(
-                archivePath = "working/$relative",
-                file = file,
-                sha256 = backupSha256File(file),
-                byteLength = file.length(),
-            )
-        }.sortedBy { it.archivePath }
+    fun backupToUri(
+        resolver: ContentResolver,
+        destinationUri: Uri,
+        generationId: String = AndroidWorkingDataManager.LATEST_ID,
+    ): AndroidWorkingBackupResult {
+        val generation = manager.generationForBackup(generationId)
+        require(generation.rawEvidenceIncluded) {
+            "This legacy Working Data generation is not self-contained in SQLite"
+        }
 
-        val manifest = JSONObject()
-            .put("format", BACKUP_FORMAT)
-            .put("formatVersion", 1)
-            .put("createdAt", Instant.now().toString())
-            .put("sqliteIncluded", false)
-            .put("sqliteMergeAllowed", DnaReconciliationContract.MERGE_SQLITE_ACROSS_DEVICES)
-            .put("fileCount", entries.size)
-            .put(
-                "files",
-                JSONArray(
-                    entries.map {
-                        JSONObject()
-                            .put("path", it.archivePath)
-                            .put("sha256", it.sha256)
-                            .put("byteLength", it.byteLength)
-                    },
+        val summaries = manager.listConversations(generation)
+        val entries = buildList {
+            add(
+                BackupEntry(
+                    archivePath = SQLITE_PATH,
+                    file = generation.databaseFile,
+                    sha256 = backupSha256File(generation.databaseFile),
+                    byteLength = generation.databaseFile.length(),
                 ),
             )
+            summaries.forEach { summary ->
+                val state = File(generation.conversationStateDirectory, "${summary.conversationKey}.json")
+                require(state.isFile) {
+                    "Working Data lacks conversation state '${summary.conversationKey}'"
+                }
+                add(
+                    BackupEntry(
+                        archivePath = "$CONVERSATIONS_PATH/${state.name}",
+                        file = state,
+                        sha256 = backupSha256File(state),
+                        byteLength = state.length(),
+                    ),
+                )
+            }
+        }.sortedBy { it.archivePath }
+
+        val createdAt = Instant.now().toString()
+        val manifest = JSONObject()
+            .put("format", BACKUP_FORMAT)
+            .put("formatVersion", BACKUP_VERSION)
+            .put("createdAt", createdAt)
+            .put("generationId", generation.id)
+            .put("sqliteIncluded", true)
+            .put("sqliteMergeAllowed", false)
+            .put("restoreMode", "read_only_generation")
+            .put("rawEvidenceIncluded", true)
+            .put("conversationStateIncluded", true)
+            .put("conversationCount", summaries.size)
+            .put("fileCount", entries.size)
+        generation.createdAt?.let { manifest.put("sourceCreatedAt", it) }
+        manifest.put(
+            "files",
+            JSONArray(
+                entries.map { entry ->
+                    JSONObject()
+                        .put("path", entry.archivePath)
+                        .put("sha256", entry.sha256)
+                        .put("byteLength", entry.byteLength)
+                },
+            ),
+        )
+
         val manifestBytes = manifest.toString(2).toByteArray(Charsets.UTF_8)
         val checksums = sortedMapOf<String, String>()
         entries.forEach { checksums[it.archivePath] = it.sha256 }
-        checksums["manifest.json"] = backupSha256Bytes(manifestBytes)
+        checksums[MANIFEST_PATH] = backupSha256Bytes(manifestBytes)
         val sums = (checksums.entries.joinToString("\n") { "${it.value}  ${it.key}" } + "\n")
             .toByteArray(Charsets.UTF_8)
 
-        resolver.openOutputStream(destinationUri, "w")?.let { rawOutput ->
-            rawOutput.use { output ->
-                ZipOutputStream(output).use { zip ->
-                    entries.forEach { writeBackupFile(zip, it.archivePath, it.file) }
-                    writeBackupBytes(zip, "manifest.json", manifestBytes)
-                    writeBackupBytes(zip, "SHA256SUMS", sums)
-                }
+        resolver.openOutputStream(destinationUri, "w")?.use { output ->
+            ZipOutputStream(output).use { zip ->
+                entries.forEach { writeBackupFile(zip, it.archivePath, it.file) }
+                writeBackupBytes(zip, MANIFEST_PATH, manifestBytes)
+                writeBackupBytes(zip, CHECKSUMS_PATH, sums)
             }
-        } ?: error("Unable to open backup destination")
+        } ?: error("Unable to open Working Data backup destination")
 
-        val archiveSha256 = resolver.openInputStream(destinationUri)?.use(::backupSha256Stream)
-            ?: error("Unable to verify written backup")
-        return AndroidWorkingBackupResult(
-            destinationUri = destinationUri.toString(),
-            archiveSha256 = archiveSha256,
-            fileCount = entries.size,
-            byteCount = entries.sumOf { it.byteLength },
-        )
-    }
-
-    fun importFromUri(resolver: ContentResolver, sourceUri: Uri): AndroidWorkingBackupImportResult {
-        val temp = File(appContext.cacheDir, "dna-backup-import-${UUID.randomUUID()}.zip")
+        val verificationCopy = File(appContext.cacheDir, "working-backup-verify-${UUID.randomUUID()}.zip")
         try {
-            resolver.openInputStream(sourceUri)?.use { input ->
-                FileOutputStream(temp, false).use { output ->
-                    input.copyTo(output, 128 * 1024)
+            resolver.openInputStream(destinationUri)?.use { input ->
+                FileOutputStream(verificationCopy, false).use { output ->
+                    input.copyTo(output, COPY_BUFFER_BYTES)
                     output.flush()
                     output.fd.sync()
                 }
-            } ?: error("Unable to open working backup")
-
-            val verified = verifyBackup(temp)
-            val staging = File(captureRoot, "import-staging/backup-${UUID.randomUUID()}")
-            check(staging.mkdirs()) { "Unable to create backup import staging directory" }
-            try {
-                val staged = mutableListOf<StagedBackupFile>()
-                ZipFile(temp).use { zip ->
-                    verified.files.forEach { item ->
-                        val relative = item.path.removePrefix("working/")
-                        require(isAllowedEvidenceRelativePath(relative)) {
-                            "Working backup contains unsupported evidence path '$relative'"
-                        }
-                        val stage = File(staging, UUID.randomUUID().toString())
-                        zip.getInputStream(zip.getEntry(item.path)).use { input ->
-                            FileOutputStream(stage, false).use { output ->
-                                input.copyTo(output, 128 * 1024)
-                                output.flush()
-                                output.fd.sync()
-                            }
-                        }
-                        require(backupSha256File(stage) == item.sha256)
-                        staged += StagedBackupFile(relative, stage, item.sha256)
-                    }
-                }
-
-                var imported = 0
-                var deduplicated = 0
-                staged.sortedBy { it.relativePath }.forEach { item ->
-                    val target = File(captureRoot, item.relativePath).canonicalFile
-                    val root = captureRoot.canonicalFile
-                    require(target.path.startsWith(root.path + File.separator)) {
-                        "Working backup target escaped capture root"
-                    }
-                    target.parentFile?.let { check(it.exists() || it.mkdirs()) }
-                    if (target.exists()) {
-                        require(backupSha256File(target) == item.sha256) {
-                            "Existing local evidence conflicts with backup '${item.relativePath}'"
-                        }
-                        item.stage.delete()
-                        deduplicated += 1
-                    } else {
-                        check(item.stage.renameTo(target)) { "Unable to promote backup evidence" }
-                        imported += 1
-                    }
-                }
-
-                val conversations = AndroidConversationAggregationEngine(appContext).use { it.aggregateAll() }
-                return AndroidWorkingBackupImportResult(
-                    importedFileCount = imported,
-                    deduplicatedFileCount = deduplicated,
-                    conversationCount = conversations.size,
-                )
-            } finally {
-                staging.deleteRecursively()
-            }
+            } ?: error("Unable to re-open written Working Data backup")
+            val verified = verifyBackup(verificationCopy)
+            require(verified.conversationCount == summaries.size)
+            require(verified.generationId == generation.id)
+            return AndroidWorkingBackupResult(
+                destinationUri = destinationUri.toString(),
+                archiveSha256 = backupSha256File(verificationCopy),
+                generationId = generation.id,
+                fileCount = entries.size,
+                byteCount = entries.sumOf { it.byteLength },
+            )
         } finally {
-            temp.delete()
+            verificationCopy.delete()
         }
     }
 
-    private fun collectEvidenceFiles(): List<File> = EVIDENCE_DIRECTORIES.flatMap { directoryName ->
-        val directory = File(captureRoot, directoryName)
-        if (!directory.isDirectory) emptyList() else directory.walkTopDown()
-            .filter { it.isFile }
-            .toList()
+    fun importFromUri(
+        resolver: ContentResolver,
+        sourceUri: Uri,
+    ): AndroidWorkingBackupImportResult {
+        val archive = File(appContext.cacheDir, "working-backup-import-${UUID.randomUUID()}.zip")
+        val staging = File(appContext.cacheDir, "working-backup-stage-${UUID.randomUUID()}")
+        try {
+            resolver.openInputStream(sourceUri)?.use { input ->
+                FileOutputStream(archive, false).use { output ->
+                    input.copyTo(output, COPY_BUFFER_BYTES)
+                    output.flush()
+                    output.fd.sync()
+                }
+            } ?: error("Unable to open Working Data backup")
+
+            val verified = verifyBackup(archive)
+            check(staging.mkdirs()) { "Unable to create Working Data restore staging" }
+            val database = File(staging, SQLITE_PATH)
+            val states = File(staging, CONVERSATIONS_PATH).also {
+                check(it.mkdirs()) { "Unable to create restored conversation-state staging" }
+            }
+
+            ZipFile(archive).use { zip ->
+                verified.files.forEach { item ->
+                    val destination = when {
+                        item.path == SQLITE_PATH -> database
+                        item.path.startsWith("$CONVERSATIONS_PATH/") ->
+                            File(states, item.path.removePrefix("$CONVERSATIONS_PATH/"))
+                        else -> error("Unsupported verified Working Data backup path '${item.path}'")
+                    }
+                    extractVerified(zip, item, destination)
+                }
+            }
+
+            val restored = manager.importReadOnlyGeneration(
+                databaseSource = database,
+                conversationStateSource = states,
+                sourceCreatedAt = verified.sourceCreatedAt ?: verified.createdAt,
+            )
+            return AndroidWorkingBackupImportResult(
+                generationId = restored.id,
+                conversationCount = verified.conversationCount,
+                restoredBytes = restored.snapshotBytes,
+            )
+        } finally {
+            staging.deleteRecursively()
+            archive.delete()
+        }
     }
 
     private fun verifyBackup(archive: File): VerifiedBackup {
+        require(archive.isFile) { "Working Data backup does not exist" }
         ZipFile(archive).use { zip ->
             val names = linkedSetOf<String>()
-            val entries = zip.entries()
-            while (entries.hasMoreElements()) {
-                val entry = entries.nextElement()
-                require(!entry.isDirectory)
-                require(isSafeBackupPath(entry.name))
-                require(names.add(entry.name)) { "Duplicate working backup path" }
+            val archiveEntries = zip.entries()
+            while (archiveEntries.hasMoreElements()) {
+                val entry = archiveEntries.nextElement()
+                require(!entry.isDirectory) { "Working Data backup contains directory entries" }
+                require(isSafeBackupPath(entry.name)) { "Unsafe Working Data backup path" }
+                require(names.add(entry.name)) { "Duplicate Working Data backup path" }
             }
-            val manifestEntry = zip.getEntry("manifest.json") ?: error("Backup lacks manifest.json")
-            val sumsEntry = zip.getEntry("SHA256SUMS") ?: error("Backup lacks SHA256SUMS")
+
+            val manifestEntry = zip.getEntry(MANIFEST_PATH) ?: error("Backup lacks $MANIFEST_PATH")
+            val sumsEntry = zip.getEntry(CHECKSUMS_PATH) ?: error("Backup lacks $CHECKSUMS_PATH")
             val manifest = JSONObject(zip.getInputStream(manifestEntry).bufferedReader().use { it.readText() })
             require(manifest.getString("format") == BACKUP_FORMAT)
-            require(manifest.getInt("formatVersion") == 1)
-            require(!manifest.getBoolean("sqliteIncluded")) {
-                "Cross-device working backups must not import SQLite"
-            }
-            require(!manifest.getBoolean("sqliteMergeAllowed")) {
-                "Cross-device SQLite merging must remain disabled"
-            }
+            require(manifest.getInt("formatVersion") == BACKUP_VERSION)
+            require(manifest.getBoolean("sqliteIncluded")) { "Working Data backup must include SQLite" }
+            require(!manifest.getBoolean("sqliteMergeAllowed")) { "Foreign SQLite merging must remain disabled" }
+            require(manifest.getString("restoreMode") == "read_only_generation")
+            require(manifest.getBoolean("rawEvidenceIncluded"))
+            require(manifest.getBoolean("conversationStateIncluded"))
 
             val checksums = mutableMapOf<String, String>()
             zip.getInputStream(sumsEntry).bufferedReader().useLines { lines ->
                 lines.filter { it.isNotBlank() }.forEach { line ->
                     val split = line.indexOf("  ")
-                    require(split == 64)
+                    require(split == 64) { "Malformed Working Data checksum line" }
                     val sha = line.substring(0, split).lowercase()
                     val path = line.substring(split + 2)
-                    require(sha.matches(Regex("[0-9a-f]{64}")))
+                    require(sha.matches(SHA256_REGEX))
                     require(isSafeBackupPath(path))
-                    require(checksums.put(path, sha) == null)
+                    require(checksums.put(path, sha) == null) { "Duplicate Working Data checksum" }
                 }
             }
-            require(names.filter { it != "SHA256SUMS" }.sorted() == checksums.keys.sorted())
+            require(names.filter { it != CHECKSUMS_PATH }.sorted() == checksums.keys.sorted()) {
+                "Working Data backup checksum inventory mismatch"
+            }
             checksums.forEach { (path, expected) ->
-                val actual = zip.getInputStream(zip.getEntry(path)).use(::backupSha256Stream)
-                require(actual == expected) { "Working backup checksum mismatch for '$path'" }
+                val entry = zip.getEntry(path) ?: error("Working Data backup lacks '$path'")
+                val actual = zip.getInputStream(entry).use(::backupSha256Stream)
+                require(actual == expected) { "Working Data backup checksum mismatch for '$path'" }
             }
 
             val filesArray = manifest.getJSONArray("files")
@@ -207,22 +229,42 @@ class AndroidWorkingBackupService(context: Context) {
                     val path = item.getString("path")
                     val sha = item.getString("sha256").lowercase()
                     val byteLength = item.getLong("byteLength")
-                    require(path.startsWith("working/") && isSafeBackupPath(path))
+                    require(isAllowedGenerationPath(path)) { "Unsupported Working Data backup path '$path'" }
                     require(checksums[path] == sha)
-                    require(zip.getEntry(path)?.size == byteLength)
-                    add(VerifiedBackupFile(path, sha))
+                    val entry = zip.getEntry(path) ?: error("Working Data backup lacks '$path'")
+                    require(entry.size == byteLength) { "Working Data backup byte length mismatch for '$path'" }
+                    add(VerifiedBackupFile(path, sha, byteLength))
                 }
             }
             require(files.size == manifest.getInt("fileCount"))
-            require((files.map { it.path } + "manifest.json").sorted() == names.filter { it != "SHA256SUMS" }.sorted())
-            return VerifiedBackup(files)
+            require(files.count { it.path == SQLITE_PATH } == 1) { "Working Data backup must contain one SQLite file" }
+            require(files.count { it.path.startsWith("$CONVERSATIONS_PATH/") } == manifest.getInt("conversationCount"))
+            require((files.map { it.path } + MANIFEST_PATH).sorted() == names.filter { it != CHECKSUMS_PATH }.sorted())
+
+            return VerifiedBackup(
+                generationId = manifest.getString("generationId"),
+                createdAt = manifest.getString("createdAt"),
+                sourceCreatedAt = manifest.optString("sourceCreatedAt").takeIf { it.isNotBlank() },
+                conversationCount = manifest.getInt("conversationCount"),
+                files = files,
+            )
         }
     }
 
-    private fun isAllowedEvidenceRelativePath(relativePath: String): Boolean {
-        if (!isSafeBackupPath(relativePath)) return false
-        val first = relativePath.substringBefore('/')
-        return first in EVIDENCE_DIRECTORIES && '/' in relativePath
+    private fun extractVerified(zip: ZipFile, item: VerifiedBackupFile, destination: File) {
+        destination.parentFile?.let { check(it.exists() || it.mkdirs()) }
+        val entry = zip.getEntry(item.path) ?: error("Working Data backup lacks '${item.path}'")
+        zip.getInputStream(entry).use { input ->
+            FileOutputStream(destination, false).use { output ->
+                input.copyTo(output, COPY_BUFFER_BYTES)
+                output.flush()
+                output.fd.sync()
+            }
+        }
+        require(destination.length() == item.byteLength)
+        require(backupSha256File(destination) == item.sha256) {
+            "Restored Working Data file checksum mismatch for '${item.path}'"
+        }
     }
 
     private data class BackupEntry(
@@ -232,25 +274,29 @@ class AndroidWorkingBackupService(context: Context) {
         val byteLength: Long,
     )
 
-    private data class StagedBackupFile(
-        val relativePath: String,
-        val stage: File,
-        val sha256: String,
+    private data class VerifiedBackup(
+        val generationId: String,
+        val createdAt: String,
+        val sourceCreatedAt: String?,
+        val conversationCount: Int,
+        val files: List<VerifiedBackupFile>,
     )
 
-    private data class VerifiedBackup(val files: List<VerifiedBackupFile>)
-    private data class VerifiedBackupFile(val path: String, val sha256: String)
+    private data class VerifiedBackupFile(
+        val path: String,
+        val sha256: String,
+        val byteLength: Long,
+    )
 
     companion object {
-        const val BACKUP_FORMAT = "bke-dna-working-backup"
-        private val EVIDENCE_DIRECTORIES = setOf(
-            "bodies",
-            "observations",
-            "normalized",
-            "classifications",
-            "witnesses",
-            "reconciliations",
-        )
+        const val BACKUP_FORMAT = "bke-dna-working-sqlite-backup"
+        const val BACKUP_VERSION = 2
+        private const val SQLITE_PATH = "working.sqlite"
+        private const val CONVERSATIONS_PATH = "conversations"
+        private const val MANIFEST_PATH = "manifest.json"
+        private const val CHECKSUMS_PATH = "SHA256SUMS"
+        private const val COPY_BUFFER_BYTES = 128 * 1024
+        private val SHA256_REGEX = Regex("[0-9a-f]{64}")
     }
 }
 
@@ -276,14 +322,15 @@ object AndroidWorkingStorage {
 data class AndroidWorkingBackupResult(
     val destinationUri: String,
     val archiveSha256: String,
+    val generationId: String,
     val fileCount: Int,
     val byteCount: Long,
 )
 
 data class AndroidWorkingBackupImportResult(
-    val importedFileCount: Int,
-    val deduplicatedFileCount: Int,
+    val generationId: String,
     val conversationCount: Int,
+    val restoredBytes: Long,
 )
 
 private const val BACKUP_ZIP_TIME_MS = 315532800000L
@@ -294,6 +341,14 @@ private fun isSafeBackupPath(path: String): Boolean =
         !path.startsWith('\\') &&
         !path.contains('\\') &&
         path.split('/').none { it.isBlank() || it == "." || it == ".." }
+
+private fun isAllowedGenerationPath(path: String): Boolean {
+    if (!isSafeBackupPath(path)) return false
+    if (path == "working.sqlite") return true
+    if (!path.startsWith("conversations/")) return false
+    val name = path.removePrefix("conversations/")
+    return '/' !in name && name.matches(Regex("[0-9a-f]{64}\\.json"))
+}
 
 private fun writeBackupFile(zip: ZipOutputStream, path: String, file: File) {
     require(isSafeBackupPath(path))
