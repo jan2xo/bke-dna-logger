@@ -34,7 +34,7 @@ require(WORKFLOW, 'BKE_ANDROID_RELEASE_STORE_PASSWORD', '.github/workflows/andro
 require(WORKFLOW, 'BKE_ANDROID_RELEASE_KEY_ALIAS', '.github/workflows/android-release.yml')
 require(WORKFLOW, 'BKE_ANDROID_RELEASE_KEY_PASSWORD', '.github/workflows/android-release.yml')
 require(WORKFLOW, 'apksigner', '.github/workflows/android-release.yml')
-require(WORKFLOW, 'CN=Android Debug,O=Android,C=US', '.github/workflows/android-release.yml')
+require(WORKFLOW, 'CN=Android Debug', '.github/workflows/android-release.yml')
 require(WORKFLOW, 'release-signing.txt', '.github/workflows/android-release.yml')
 require(WORKFLOW, 'BKE-DNA-Logger-Android-0.1.0-alpha.3.apk', '.github/workflows/android-release.yml')
 forbid(WORKFLOW, ':app:assembleDebug', '.github/workflows/android-release.yml')

@@ -76,7 +76,7 @@ jobs:
             --verbose \
             --print-certs \
             "${RELEASE_APK}" | tee android/app/build/reports/release-signing.txt
-          if grep -Fq 'CN=Android Debug,O=Android,C=US' android/app/build/reports/release-signing.txt; then
+          if grep -Fq 'CN=Android Debug' android/app/build/reports/release-signing.txt; then
             echo "Refusing to publish an APK signed with the Android debug certificate." >&2
             exit 1
           fi

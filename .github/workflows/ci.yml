@@ -97,8 +97,8 @@ jobs:
             --verbose \
             --print-certs \
             android/app/build/outputs/apk/release/app-release.apk | tee android/app/build/reports/ci-release-signing.txt
-          grep -Fq 'CN=BKE DNA Logger CI,O=BKE,C=PH' android/app/build/reports/ci-release-signing.txt
-          if grep -Fq 'CN=Android Debug,O=Android,C=US' android/app/build/reports/ci-release-signing.txt; then
+          grep -Fq 'Signer #1 certificate DN: CN=BKE DNA Logger CI, O=BKE, C=PH' android/app/build/reports/ci-release-signing.txt
+          if grep -Fq 'CN=Android Debug' android/app/build/reports/ci-release-signing.txt; then
             echo "CI release APK unexpectedly used the Android debug certificate." >&2
             exit 1
           fi
