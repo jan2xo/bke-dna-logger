@@ -121,6 +121,8 @@ Already proven/implemented:
 - Manual `.dna` export remains portable by materializing SQLite RAW/derivatives only into export-temporary files.
 - Working Data & Conversations uses compact utility actions, tappable conversation rows, immediate CLEAN/RAW actions and a secondary MORE menu.
 - The existing durable derivation queue is visible through a live compact monitor with current stage/counts and persisted `Slow` / `Balanced` / `Fast` breathing controls.
+- Gecko file prompts support ordinary document/gallery selection, multiple files, folders and camera image/video capture through user-controlled Android pickers.
+- User-selected gallery/document URIs pass directly back to Gecko; camera output uses temporary app cache and is not automatically duplicated into DNA evidence.
 
 Still transitional and scheduled for refactor:
 
@@ -128,7 +130,6 @@ Still transitional and scheduled for refactor:
 - SQLite still contains transitional JSON derivative envelopes alongside normalized logical rows; later work may collapse more derivative structure into direct relational projections/checkpoints.
 - Deep semantic parsing still has a conservative large-body boundary in alpha.2.
 - Working Data backup/generation deletion and the old `.dna`-gated raw purge UI still need to converge on the accepted generation-level SQLite lifecycle.
-- Ordinary Gecko photo/camera/file selection support remains scheduled follow-up work.
 
 ## UI direction
 
@@ -136,7 +137,7 @@ Still transitional and scheduled for refactor:
 - Conversation rows prioritize title, date/status and compact actions; tapping the row opens the reader.
 - Primary actions remain CLEAN and RAW; secondary `.dna`/purge actions belong in the compact MORE menu.
 - Processing queue/status and `Slow` / `Balanced` / `Fast` controls are visible without dominating the conversation list.
-- GeckoView should support normal ChatGPT user actions such as photo/gallery, camera and file selection without coupling those user-selected inputs to automatic DNA evidence duplication.
+- GeckoView supports normal ChatGPT user actions such as photo/gallery, camera and file selection without coupling those user-selected inputs to automatic DNA evidence duplication.
 
 ## Legacy checkpoint
 

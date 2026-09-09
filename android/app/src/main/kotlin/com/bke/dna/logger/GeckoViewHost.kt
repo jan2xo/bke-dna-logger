@@ -1,6 +1,11 @@
 package com.bke.dna.logger
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.MediaStore
 import android.util.Log
 import org.json.JSONObject
 import org.mozilla.geckoview.GeckoResult
@@ -12,7 +17,7 @@ import java.nio.charset.StandardCharsets
 
 /** Owns GeckoView and routes DNA WebExtension messages into native Android ingress. */
 class GeckoViewHost(
-    activity: Activity,
+    private val activity: Activity,
     private val view: GeckoView,
 ) {
     companion object {
@@ -21,6 +26,7 @@ class GeckoViewHost(
         private const val EXTENSION_URI = "resource://android/assets/dna-extension/"
         private const val EXTENSION_ID = "bke-dna-logger@jl-bke.com"
         private const val NATIVE_APP = "bke.dna.logger"
+        private const val FILE_PROMPT_REQUEST = 4701
 
         private const val ROUTE_CONVERSATION = "capture_route_conversation"
         private const val ROUTE_CONVERSATIONS_LIST = "capture_route_conversations_list"
@@ -77,6 +83,7 @@ class GeckoViewHost(
     private val runtime = GeckoRuntimeProvider.get(appContext)
     private val session = GeckoSession()
     private var started = false
+    private var pendingFilePrompt: PendingFilePrompt? = null
 
     private val messageDelegate = object : WebExtension.MessageDelegate {
         override fun onMessage(
@@ -120,6 +127,35 @@ class GeckoViewHost(
         }
     }
 
+    private val promptDelegate = object : GeckoSession.PromptDelegate {
+        override fun onFilePrompt(
+            session: GeckoSession,
+            prompt: GeckoSession.PromptDelegate.FilePrompt,
+        ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+            dismissPendingFilePrompt()
+            AndroidUserSelectedFileProvider.cleanupStaleFiles(appContext)
+
+            val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+            val launch = runCatching { buildFilePromptLaunch(prompt) }.getOrElse { error ->
+                Log.e(TAG, "Unable to prepare Gecko file prompt", error)
+                result.complete(prompt.dismiss())
+                return result
+            }
+            pendingFilePrompt = PendingFilePrompt(prompt, result, launch.cameraUri)
+
+            return try {
+                activity.startActivityForResult(launch.intent, FILE_PROMPT_REQUEST)
+                result
+            } catch (error: Exception) {
+                Log.e(TAG, "Unable to launch Gecko file prompt", error)
+                cleanupCameraGrant(launch.cameraUri, deleteFile = true)
+                pendingFilePrompt = null
+                result.complete(prompt.dismiss())
+                result
+            }
+        }
+    }
+
     private fun handleDiagnostic(message: JSONObject) {
         val keys = buildSet {
             val iterator = message.keys()
@@ -145,6 +181,7 @@ class GeckoViewHost(
         AndroidCaptureRuntime.start(appContext)
 
         session.setContentDelegate(object : GeckoSession.ContentDelegate {})
+        session.setPromptDelegate(promptDelegate)
         session.open(runtime)
         view.setSession(session)
 
@@ -170,12 +207,182 @@ class GeckoViewHost(
             )
     }
 
+    fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (requestCode != FILE_PROMPT_REQUEST) return false
+        val pending = pendingFilePrompt ?: return true
+        pendingFilePrompt = null
+
+        val selected = if (resultCode == Activity.RESULT_OK) collectSelectedUris(data) else emptyList()
+        val cameraUri = pending.cameraUri
+        val finalUris = if (selected.isEmpty() && resultCode == Activity.RESULT_OK && cameraUri != null) {
+            listOf(cameraUri)
+        } else {
+            selected
+        }
+
+        cleanupCameraGrant(
+            cameraUri,
+            deleteFile = cameraUri != null && cameraUri !in finalUris,
+        )
+
+        val response = runCatching {
+            when {
+                finalUris.isEmpty() -> pending.prompt.dismiss()
+                pending.prompt.type == GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE ->
+                    pending.prompt.confirm(appContext, finalUris.toTypedArray())
+                else -> pending.prompt.confirm(appContext, finalUris.first())
+            }
+        }.getOrElse { error ->
+            Log.e(TAG, "Unable to resolve Gecko file prompt", error)
+            if (!pending.prompt.isComplete) pending.prompt.dismiss() else throw error
+        }
+        pending.result.complete(response)
+        return true
+    }
+
     fun stop() {
         if (!started) return
 
+        dismissPendingFilePrompt()
         view.releaseSession()
         if (session.isOpen) session.close()
         AndroidCaptureRuntime.stop()
         started = false
     }
+
+    private fun buildFilePromptLaunch(
+        prompt: GeckoSession.PromptDelegate.FilePrompt,
+    ): FilePromptLaunch {
+        if (prompt.type == GeckoSession.PromptDelegate.FilePrompt.Type.FOLDER) {
+            return FilePromptLaunch(
+                intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),
+                cameraUri = null,
+            )
+        }
+
+        val mimeTypes = prompt.mimeTypes
+            ?.filter { it.isNotBlank() }
+            ?.distinct()
+            .orEmpty()
+        val documentIntent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = primaryMimeType(mimeTypes)
+            if (mimeTypes.size > 1) {
+                putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.toTypedArray())
+            }
+            putExtra(
+                Intent.EXTRA_ALLOW_MULTIPLE,
+                prompt.type == GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE,
+            )
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        val cameraMime = supportedCameraMimeType(mimeTypes)
+        val cameraLaunch = cameraMime?.let(::buildCameraLaunch)
+        if (prompt.capture != GeckoSession.PromptDelegate.FilePrompt.Capture.NONE && cameraLaunch != null) {
+            return cameraLaunch
+        }
+        if (cameraLaunch == null) {
+            return FilePromptLaunch(
+                Intent.createChooser(documentIntent, prompt.title ?: "Choose file"),
+                null,
+            )
+        }
+
+        val chooser = Intent.createChooser(documentIntent, prompt.title ?: "Choose file").apply {
+            putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(cameraLaunch.intent))
+        }
+        return FilePromptLaunch(chooser, cameraLaunch.cameraUri)
+    }
+
+    private fun buildCameraLaunch(mimeType: String): FilePromptLaunch? {
+        val cameraUri = AndroidUserSelectedFileProvider.createCameraUri(appContext, mimeType)
+        val action = if (mimeType.startsWith("video/")) {
+            MediaStore.ACTION_VIDEO_CAPTURE
+        } else {
+            MediaStore.ACTION_IMAGE_CAPTURE
+        }
+        val intent = Intent(action).apply {
+            putExtra(MediaStore.EXTRA_OUTPUT, cameraUri)
+            clipData = ClipData.newRawUri("BKE user-selected upload", cameraUri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+        val handlers = activity.packageManager.queryIntentActivities(
+            intent,
+            PackageManager.MATCH_DEFAULT_ONLY,
+        )
+        if (handlers.isEmpty()) {
+            AndroidUserSelectedFileProvider.deleteIfOwned(appContext, cameraUri)
+            return null
+        }
+        val grantFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        handlers.forEach { resolveInfo ->
+            activity.grantUriPermission(resolveInfo.activityInfo.packageName, cameraUri, grantFlags)
+        }
+        return FilePromptLaunch(intent, cameraUri)
+    }
+
+    private fun collectSelectedUris(data: Intent?): List<Uri> {
+        val uris = linkedSetOf<Uri>()
+        data?.clipData?.let { clip ->
+            for (index in 0 until clip.itemCount) {
+                clip.getItemAt(index).uri?.let(uris::add)
+            }
+        }
+        data?.data?.let(uris::add)
+        return uris.toList()
+    }
+
+    private fun dismissPendingFilePrompt() {
+        val pending = pendingFilePrompt ?: return
+        pendingFilePrompt = null
+        cleanupCameraGrant(pending.cameraUri, deleteFile = true)
+        if (!pending.prompt.isComplete) {
+            runCatching { pending.result.complete(pending.prompt.dismiss()) }
+                .onFailure { Log.w(TAG, "Unable to dismiss stale Gecko file prompt", it) }
+        }
+    }
+
+    private fun cleanupCameraGrant(cameraUri: Uri?, deleteFile: Boolean) {
+        if (cameraUri == null) return
+        runCatching {
+            activity.revokeUriPermission(
+                cameraUri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }
+        if (deleteFile) {
+            AndroidUserSelectedFileProvider.deleteIfOwned(appContext, cameraUri)
+        }
+    }
+
+    private fun supportedCameraMimeType(mimeTypes: List<String>): String? {
+        val acceptsImage = mimeTypes.any { it == "image/*" || it == "image/jpeg" || it == "image/jpg" }
+        val acceptsVideo = mimeTypes.any { it == "video/*" || it == "video/mp4" }
+        return when {
+            acceptsImage -> "image/jpeg"
+            acceptsVideo -> "video/mp4"
+            else -> null
+        }
+    }
+
+    private fun primaryMimeType(mimeTypes: List<String>): String {
+        if (mimeTypes.isEmpty()) return "*/*"
+        if (mimeTypes.size == 1) return mimeTypes.single()
+        val majorTypes = mimeTypes.mapNotNull { type ->
+            type.substringBefore('/', missingDelimiterValue = "").takeIf { it.isNotBlank() }
+        }.distinct()
+        return if (majorTypes.size == 1) "${majorTypes.single()}/*" else "*/*"
+    }
+
+    private data class FilePromptLaunch(
+        val intent: Intent,
+        val cameraUri: Uri?,
+    )
+
+    private data class PendingFilePrompt(
+        val prompt: GeckoSession.PromptDelegate.FilePrompt,
+        val result: GeckoResult<GeckoSession.PromptDelegate.PromptResponse>,
+        val cameraUri: Uri?,
+    )
 }

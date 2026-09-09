@@ -86,6 +86,14 @@ class MainActivity : Activity() {
         geckoHost.start()
     }
 
+    @Deprecated("Activity result API retained for GeckoView file-prompt compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (::geckoHost.isInitialized) {
+            geckoHost.onActivityResult(requestCode, resultCode, data)
+        }
+    }
+
     override fun onDestroy() {
         if (::geckoHost.isInitialized) {
             geckoHost.stop()
