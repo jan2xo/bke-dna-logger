@@ -56,7 +56,11 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
             Log.d(TAG, "BKE DNA normalization: normalization_skip_no_unambiguous_messages_envelope")
             return null
         }
+        Log.d(TAG, "BKE DNA normalization: messages_envelope_found")
+
         val identity = resolveConversationIdentity(root, envelope.container, sourceSha256) ?: return null
+        Log.d(TAG, "BKE DNA normalization: messages_identity_resolved")
+
         val sourceCurrentNodeId = scalarToString(envelope.container.opt("current_node"))
             ?.takeIf { it.isNotBlank() }
             ?: scalarToString(root.opt("current_node"))?.takeIf { it.isNotBlank() }
@@ -64,6 +68,7 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         val nodes = messageObjects(envelope.messages)
             .mapNotNull(::parseMessage)
             .distinctBy { it.nodeNativeId }
+        Log.d(TAG, "BKE DNA normalization: messages_nodes_parsed_${nodes.size}")
         if (nodes.isEmpty()) {
             Log.d(TAG, "BKE DNA normalization: normalization_skip_no_identified_messages")
             return null
@@ -96,9 +101,11 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
             .put("nodes", JSONArray(nodes.map { it.toJson() }))
             .put("normalizedAt", Instant.now().toString())
 
+        Log.d(TAG, "BKE DNA normalization: messages_derivative_write_started")
         AndroidDerivativeStore(appContext).use { store ->
             store.putNormalizedJson(sourceSha256, normalized.toString(2))
         }
+        Log.d(TAG, "BKE DNA normalization: messages_derivative_write_complete")
         Log.d(TAG, "BKE DNA normalization: messages_array_normalization_complete")
         return AndroidNormalizationResult(sourceSha256, identity.conversationNativeId, null)
     }
