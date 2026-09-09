@@ -2,6 +2,7 @@ package com.bke.dna.logger
 
 import android.content.Context
 import java.io.File
+import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
 
@@ -42,6 +43,29 @@ object AndroidRawSourceAccess {
             }
         }
         return readLegacyAllBytes(File(captureRoot, "bodies/$sourceSha256.body"), maxBytes)
+    }
+
+    /**
+     * Keeps the backing RAW store open for the entire callback so large sources
+     * can be consumed incrementally without ever materializing the whole body.
+     */
+    fun <T> withExactInputStream(
+        context: Context,
+        sourceSha256: String,
+        block: (InputStream) -> T,
+    ): T? {
+        val appContext = context.applicationContext
+        AndroidRawEvidenceStore(appContext).use { store ->
+            if (store.contains(sourceSha256)) {
+                store.openExactInputStream(sourceSha256).use { input ->
+                    return block(input)
+                }
+            }
+        }
+
+        val body = File(AndroidDnaPaths.capturesRoot(appContext), "bodies/$sourceSha256.body")
+        if (!body.isFile) return null
+        body.inputStream().buffered().use { input -> return block(input) }
     }
 
     fun readPage(
