@@ -17,11 +17,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: android-v0.1.0-alpha.4
-      APK_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.4.apk
-      CHECKSUM_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.4.apk.sha256
-      SIZE_REPORT_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.4.apk-size.json
-      SIGNING_REPORT_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.4.signing.txt
+      RELEASE_TAG: android-v0.1.0-alpha.5
+      APK_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.5.apk
+      CHECKSUM_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.5.apk.sha256
+      SIZE_REPORT_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.5.apk-size.json
+      SIGNING_REPORT_NAME: BKE-DNA-Logger-Android-0.1.0-alpha.5.signing.txt
       RELEASE_APK: android/app/build/outputs/apk/release/app-release.apk
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +90,7 @@ jobs:
           python3 tests/android-dna-reconciliation-import-smoke.py
           python3 tests/android-conversation-reconciliation-smoke.py
           python3 tests/android-live-normalization-smoke.py
+          python3 tests/android-modern-conversation-coverage-smoke.py
           python3 tests/android-sqlite-normalization-recovery-smoke.py
           python3 tests/android-exports-backups-smoke.py
           python3 tests/android-foundation-smoke.py
@@ -112,7 +113,7 @@ jobs:
       - name: Preserve production release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bke-dna-logger-android-0.1.0-alpha.4
+          name: bke-dna-logger-android-0.1.0-alpha.5
           path: |
             release/${{ env.APK_NAME }}
             release/${{ env.CHECKSUM_NAME }}
@@ -130,15 +131,23 @@ jobs:
           fi
 
           cat > release/RELEASE_NOTES.md <<'EOF'
-          # BKE DNA Logger Android 0.1.0-alpha.4
+          # BKE DNA Logger Android 0.1.0-alpha.5
 
-          Production-signed normalization recovery hotfix for the SQLite-first Android Working Data architecture.
+          Production-signed conversation representation coverage hotfix for the SQLite-first Android DNA pipeline.
 
           ## Fixed
 
-          - Fixes a stale normalization-dispatcher lookup that still expected retired loose `captures/classifications/<sha>.json` files after classification derivatives moved into SQLite.
-          - Adds a one-shot repair for alpha.3 Working Data: DONE conversation candidates with SQLite classification but no normalized derivative are re-armed and processed from already verified SQLite RAW. No recapture is required.
-          - Working Data now distinguishes physical compressed storage from the exact RAW byte volume represented, including verified RAW source count and compressed RAW payload size.
+          - Restores normalization for legitimate modern ChatGPT message payloads that are classified as conversation candidates but omit a root `conversation_id`.
+          - Conversation identity may be recovered only from exact request/page metadata persisted for the same RAW source SHA; conflicting metadata fails closed.
+          - Supports one unambiguous nested `messages` envelope and object-backed message collections without inventing graph edges.
+          - Adds an explicit `text/event-stream` conversation normalizer for new-chat/incremental responses. Later stream observations of the same message id replace earlier incremental versions.
+          - Re-arms alpha.4 DONE conversation candidates that still have no normalized derivative so already verified SQLite RAW can be retried without recapture.
+
+          ## Unchanged guardrails
+
+          - Classifier admission remains `score >= 28`; high confidence remains `score >= 55`.
+          - Deep semantic parsing remains capped at 16 MiB. Larger bodies remain preserved as exact RAW.
+          - No fabricated parent/child graph edges, no fabricated conversation ids, no RAW deletion, and no foreign SQLite merge.
 
           ## Release identity
 
@@ -146,12 +155,6 @@ jobs:
           - Signed with the repository production Android signing identity supplied through GitHub Actions secrets.
           - The workflow verifies the APK signature with `apksigner` and refuses the standard Android debug certificate.
           - arm64-v8a only.
-
-          ## Evidence safety
-
-          Exact RAW remains the authority. Existing RAW is re-read from SQLite and verified by byte length + SHA-256 before semantic recovery proceeds. This hotfix does not weaken classifier thresholds, does not delete RAW, and does not merge foreign SQLite generations.
-
-          Deep JSON classifier/normalizer work retains the conservative 16 MiB semantic parsing limit. Larger payloads remain preserved as immutable exact RAW.
           EOF
 
           gh release create "${RELEASE_TAG}" \
@@ -160,6 +163,6 @@ jobs:
             "release/${SIZE_REPORT_NAME}" \
             "release/${SIGNING_REPORT_NAME}" \
             --target "${GITHUB_SHA}" \
-            --title "BKE DNA Logger Android 0.1.0-alpha.4" \
+            --title "BKE DNA Logger Android 0.1.0-alpha.5" \
             --notes-file release/RELEASE_NOTES.md \
             --prerelease
