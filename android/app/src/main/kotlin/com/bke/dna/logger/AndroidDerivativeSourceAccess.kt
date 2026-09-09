@@ -1,16 +1,17 @@
 package com.bke.dna.logger
 
 import android.content.Context
+import android.util.JsonReader
+import org.json.JSONObject
 import java.io.File
+import java.io.StringReader
 
 /**
  * SQLite-first derivative access with transitional loose-file fallback.
  *
- * New captures write only to Working Data SQLite. Context-level reads federate
- * Latest plus every saved read-only generation so reconciliation keeps the
- * same multi-snapshot behavior that the former shared loose directories had.
- * Pre-PR5 generations remain readable from shared classification and normalized
- * JSON files if those legacy files still exist.
+ * New large normalized conversation derivatives may use bounded SQLite chunks.
+ * Existing PR5 inline TEXT rows and pre-PR5 loose JSON remain readable so saved
+ * Working Data generations stay migration-safe.
  */
 object AndroidDerivativeSourceAccess {
     fun readClassification(context: Context, sourceSha256: String): String? {
@@ -31,6 +32,63 @@ object AndroidDerivativeSourceAccess {
         return null
     }
 
+    fun readNormalizedMetadata(
+        context: Context,
+        sourceSha256: String,
+    ): AndroidNormalizedDerivativeMetadata? {
+        val appContext = context.applicationContext
+        val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
+        for (generation in AndroidWorkingDataManager(appContext).listWorkingData()) {
+            AndroidChunkedNormalizedStore(generation).use { store ->
+                store.metadata(sourceSha256)?.let { metadata ->
+                    return AndroidNormalizedDerivativeMetadata(
+                        sourceSha256 = metadata.sourceSha256,
+                        conversationNativeId = metadata.conversationNativeId,
+                        normalizedAt = metadata.normalizedAt,
+                        storage = "sqlite-chunked-v1",
+                    )
+                }
+            }
+            AndroidDerivativeStore(generation).use { store ->
+                store.normalizedJson(sourceSha256)?.let { payload ->
+                    parseNormalizedMetadata(payload)?.let { return it.copy(storage = "sqlite-inline-v1") }
+                }
+            }
+            legacyDerivative(captureRoot, "normalized", sourceSha256)?.let { payload ->
+                parseNormalizedMetadata(payload)?.let { return it.copy(storage = "legacy-file-v1") }
+            }
+        }
+        return null
+    }
+
+    fun <T> withNormalizedJsonReader(
+        context: Context,
+        sourceSha256: String,
+        block: (JsonReader) -> T,
+    ): T? {
+        val appContext = context.applicationContext
+        val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
+        for (generation in AndroidWorkingDataManager(appContext).listWorkingData()) {
+            AndroidChunkedNormalizedStore(generation).use { store ->
+                if (store.hasPayload(sourceSha256)) {
+                    return store.withJsonReader(sourceSha256, block)
+                }
+            }
+            AndroidDerivativeStore(generation).use { store ->
+                store.normalizedJson(sourceSha256)?.let { payload ->
+                    return JsonReader(StringReader(payload)).use(block)
+                }
+            }
+            val legacy = File(captureRoot, "normalized/$sourceSha256.json")
+            if (legacy.isFile) {
+                legacy.bufferedReader(Charsets.UTF_8).use { reader ->
+                    return JsonReader(reader).use(block)
+                }
+            }
+        }
+        return null
+    }
+
     fun readClassification(
         generation: AndroidWorkingDataGeneration,
         captureRoot: File,
@@ -47,6 +105,9 @@ object AndroidDerivativeSourceAccess {
         captureRoot: File,
         sourceSha256: String,
     ): String? {
+        AndroidChunkedNormalizedStore(generation).use { store ->
+            store.normalizedJson(sourceSha256)?.let { return it }
+        }
         AndroidDerivativeStore(generation).use { store ->
             store.normalizedJson(sourceSha256)?.let { return it }
         }
@@ -68,6 +129,9 @@ object AndroidDerivativeSourceAccess {
         captureRoot: File,
     ): List<String> {
         val sources = linkedSetOf<String>()
+        AndroidChunkedNormalizedStore(generation).use { store ->
+            sources += store.listSourceSha256s()
+        }
         AndroidDerivativeStore(generation).use { store ->
             sources += store.listNormalizedSourceSha256s()
         }
@@ -78,6 +142,21 @@ object AndroidDerivativeSourceAccess {
             .sorted()
             .forEach(sources::add)
         return sources.sorted()
+    }
+
+    private fun parseNormalizedMetadata(payload: String): AndroidNormalizedDerivativeMetadata? {
+        val root = runCatching { JSONObject(payload) }.getOrNull() ?: return null
+        val sourceSha256 = root.optString("sourceSha256").takeIf(SHA256::matches) ?: return null
+        val conversationNativeId = root.optString("conversationNativeId").trim().takeIf { it.isNotBlank() }
+            ?: return null
+        val normalizedAt = root.optString("normalizedAt").trim().takeIf { it.isNotBlank() }
+            ?: return null
+        return AndroidNormalizedDerivativeMetadata(
+            sourceSha256 = sourceSha256,
+            conversationNativeId = conversationNativeId,
+            normalizedAt = normalizedAt,
+            storage = "unknown",
+        )
     }
 
     private fun legacyDerivative(
@@ -92,3 +171,10 @@ object AndroidDerivativeSourceAccess {
 
     private val SHA256 = Regex("[0-9a-f]{64}")
 }
+
+data class AndroidNormalizedDerivativeMetadata(
+    val sourceSha256: String,
+    val conversationNativeId: String,
+    val normalizedAt: String,
+    val storage: String,
+)
