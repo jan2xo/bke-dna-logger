@@ -8,6 +8,8 @@ capture_index = (kotlin / "AndroidCaptureIndex.kt").read_text(encoding="utf-8")
 capture_store = (kotlin / "AndroidCaptureStore.kt").read_text(encoding="utf-8")
 runtime = (kotlin / "AndroidCaptureRuntime.kt").read_text(encoding="utf-8")
 derivative_store = (kotlin / "AndroidDerivativeStore.kt").read_text(encoding="utf-8")
+derivative_source = (kotlin / "AndroidDerivativeSourceAccess.kt").read_text(encoding="utf-8")
+chunked_store = (kotlin / "AndroidChunkedNormalizedStore.kt").read_text(encoding="utf-8")
 pipeline = (kotlin / "AndroidLiveDerivationPipeline.kt").read_text(encoding="utf-8")
 
 # Live Working Data owns exactly one process-wide SQLiteOpenHelper/pool. Public
@@ -56,9 +58,68 @@ for token in (
 ):
     assert capture_store.index(token, end_start) < finished, token
 
-# Derivative immutability remains the default. The sole mutation escape hatch is
-# the obsolete pre-streaming classification_size_limit row; no RAW or normalized
-# derivative table is deleted by this method.
+# Large normalized derivatives must never hold one SQLite writer transaction
+# across the complete JsonWriter stream. Chunks are short autocommit writes;
+# metadata is the publish marker and is inserted only after exact verification.
+stream_start = chunked_store.index("fun putNormalizedJsonStream(")
+stream_end = chunked_store.index("fun normalizedJson(", stream_start)
+stream_method = chunked_store[stream_start:stream_end]
+assert "database.beginTransaction()" not in stream_method
+for token in (
+    "deleteUnpublishedChunks(sourceSha256)",
+    "val sink = ChunkOutputStream(database, sourceSha256)",
+    "verifyStoredPayload(sourceSha256, identity)",
+    "database.insertOrThrow(TABLE_METADATA, null, values)",
+):
+    assert token in stream_method, token
+assert stream_method.index("deleteUnpublishedChunks(sourceSha256)") < stream_method.index(
+    "val sink = ChunkOutputStream(database, sourceSha256)"
+)
+assert stream_method.index("verifyStoredPayload(sourceSha256, identity)") < stream_method.index(
+    "database.insertOrThrow(TABLE_METADATA, null, values)"
+)
+
+# Crash recovery may discard only unpublished chunk rows for the exact source;
+# a published metadata row remains immutable.
+cleanup_start = chunked_store.index("private fun deleteUnpublishedChunks(")
+cleanup_end = chunked_store.index("private fun verifyStoredPayload(", cleanup_start)
+cleanup = chunked_store[cleanup_start:cleanup_end]
+for token in (
+    "check(!hasPayload(sourceSha256))",
+    "TABLE_CHUNK",
+    '"source_sha256 = ?"',
+):
+    assert token in cleanup, token
+assert "TABLE_METADATA" not in cleanup
+
+flush_start = chunked_store.index("private fun flushChunk()")
+flush_end = chunked_store.index("private class SQLiteChunkInputStream", flush_start)
+flush = chunked_store[flush_start:flush_end]
+assert "database.insertOrThrow(TABLE_CHUNK, null, values)" in flush
+assert "database.beginTransaction()" not in flush
+
+# Context-based derivative federation sees Latest first, but Latest must use the
+# shared active AndroidCaptureIndex pool. Standalone generation constructors are
+# reserved here for saved read-only generations.
+for token in (
+    "if (generation.isLatest)",
+    "AndroidChunkedNormalizedStore(appContext)",
+    "AndroidDerivativeStore(appContext)",
+    "AndroidChunkedNormalizedStore(generation)",
+    "AndroidDerivativeStore(generation)",
+):
+    assert token in derivative_source, token
+classification_context = derivative_source[
+    derivative_source.index("fun readClassification(context: Context"):
+    derivative_source.index("fun readNormalized(context: Context")
+]
+assert "if (generation.isLatest)" in classification_context
+assert "AndroidDerivativeStore(appContext)" in classification_context
+assert "readClassification(generation, captureRoot, sourceSha256)" in classification_context
+
+# Derivative immutability remains the default. The sole published-row mutation
+# escape hatch is the obsolete pre-streaming classification_size_limit row; no
+# RAW or normalized derivative table is deleted by this method.
 for token in (
     "fun invalidateLegacyClassificationSizeLimit(",
     'LEGACY_CLASSIFICATION_SIZE_LIMIT_SIGNAL = "classification_size_limit"',
