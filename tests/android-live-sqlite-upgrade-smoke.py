@@ -60,37 +60,41 @@ for token in (
 
 # Large normalized derivatives must never hold one SQLite writer transaction
 # across the complete JsonWriter stream. Chunks are short autocommit writes;
-# metadata is the publish marker and is inserted only after exact verification.
+# after exact verification a tiny metadata-only transaction publishes the row.
 stream_start = chunked_store.index("fun putNormalizedJsonStream(")
 stream_end = chunked_store.index("fun normalizedJson(", stream_start)
 stream_method = chunked_store[stream_start:stream_end]
-assert "database.beginTransaction()" not in stream_method
 for token in (
     "deleteUnpublishedChunks(sourceSha256)",
     "val sink = ChunkOutputStream(database, sourceSha256)",
     "verifyStoredPayload(sourceSha256, identity)",
+    "database.beginTransaction()",
     "database.insertOrThrow(TABLE_METADATA, null, values)",
+    "database.setTransactionSuccessful()",
+    "database.endTransaction()",
 ):
     assert token in stream_method, token
-assert stream_method.index("deleteUnpublishedChunks(sourceSha256)") < stream_method.index(
-    "val sink = ChunkOutputStream(database, sourceSha256)"
-)
-assert stream_method.index("verifyStoredPayload(sourceSha256, identity)") < stream_method.index(
-    "database.insertOrThrow(TABLE_METADATA, null, values)"
-)
+cleanup = stream_method.index("deleteUnpublishedChunks(sourceSha256)")
+writer = stream_method.index("val sink = ChunkOutputStream(database, sourceSha256)")
+verify = stream_method.index("verifyStoredPayload(sourceSha256, identity)")
+publish_begin = stream_method.index("database.beginTransaction()")
+publish_insert = stream_method.index("database.insertOrThrow(TABLE_METADATA, null, values)")
+publish_success = stream_method.index("database.setTransactionSuccessful()")
+assert cleanup < writer < verify < publish_begin < publish_insert < publish_success
+assert stream_method[:verify].find("database.beginTransaction()") == -1
 
 # Crash recovery may discard only unpublished chunk rows for the exact source;
 # a published metadata row remains immutable.
 cleanup_start = chunked_store.index("private fun deleteUnpublishedChunks(")
 cleanup_end = chunked_store.index("private fun verifyStoredPayload(", cleanup_start)
-cleanup = chunked_store[cleanup_start:cleanup_end]
+cleanup_method = chunked_store[cleanup_start:cleanup_end]
 for token in (
     "check(!hasPayload(sourceSha256))",
     "TABLE_CHUNK",
     '"source_sha256 = ?"',
 ):
-    assert token in cleanup, token
-assert "TABLE_METADATA" not in cleanup
+    assert token in cleanup_method, token
+assert "TABLE_METADATA" not in cleanup_method
 
 flush_start = chunked_store.index("private fun flushChunk()")
 flush_end = chunked_store.index("private class SQLiteChunkInputStream", flush_start)
