@@ -144,9 +144,10 @@ class AndroidDerivativeStore private constructor(
     private fun readPayload(table: String, sourceSha256: String): String? {
         requireSha(sourceSha256)
         if (!tableExists(table)) return null
-        database.query(
+
+        val metadata = database.query(
             table,
-            arrayOf("payload_json", "payload_sha256", "byte_length"),
+            arrayOf("payload_sha256", "byte_length"),
             "source_sha256 = ?",
             arrayOf(sourceSha256),
             null,
@@ -155,16 +156,44 @@ class AndroidDerivativeStore private constructor(
             "1",
         ).use { cursor ->
             if (!cursor.moveToFirst()) return null
-            val payload = cursor.getString(0)
-            val bytes = payload.toByteArray(Charsets.UTF_8)
-            require(bytes.size.toLong() == cursor.getLong(2)) {
-                "Derivative SQLite byte-length mismatch"
-            }
-            require(sha256(bytes) == cursor.getString(1)) {
-                "Derivative SQLite SHA-256 mismatch"
-            }
-            return payload
+            cursor.getString(0) to cursor.getLong(1)
         }
+
+        // Android CursorWindow cannot materialize multi-megabyte TEXT rows on
+        // many devices. Read only bounded substrings through the window, then
+        // preserve the existing exact byte-length + SHA-256 verification over
+        // the reconstructed serialized payload.
+        val payload = buildString {
+            var payloadOffset = 1
+            while (true) {
+                val chunk = database.rawQuery(
+                    "SELECT substr(payload_json, ?, ?) FROM $table " +
+                        "WHERE source_sha256 = ? LIMIT 1",
+                    arrayOf(
+                        payloadOffset.toString(),
+                        PAYLOAD_READ_CHUNK_CHARS.toString(),
+                        sourceSha256,
+                    ),
+                ).use { cursor ->
+                    check(cursor.moveToFirst()) {
+                        "Derivative row disappeared during payload read"
+                    }
+                    cursor.getString(0)
+                }
+                if (chunk.isEmpty()) break
+                append(chunk)
+                payloadOffset += PAYLOAD_READ_CHUNK_CHARS
+            }
+        }
+
+        val bytes = payload.toByteArray(Charsets.UTF_8)
+        require(bytes.size.toLong() == metadata.second) {
+            "Derivative SQLite byte-length mismatch"
+        }
+        require(sha256(bytes) == metadata.first) {
+            "Derivative SQLite SHA-256 mismatch"
+        }
+        return payload
     }
 
     private fun tableExists(table: String): Boolean = database.rawQuery(
@@ -177,6 +206,7 @@ class AndroidDerivativeStore private constructor(
     companion object {
         private const val TABLE_CLASSIFICATION = "derivative_classification"
         private const val TABLE_NORMALIZED = "derivative_normalized"
+        private const val PAYLOAD_READ_CHUNK_CHARS = 128 * 1024
         private val SHA256 = Regex("[0-9a-f]{64}")
 
         fun createSchema(database: SQLiteDatabase) {
