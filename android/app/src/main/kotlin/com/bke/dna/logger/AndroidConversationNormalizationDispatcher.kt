@@ -69,7 +69,7 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
             root.optJSONArray("messages") != null ||
                 root.optJSONObject("messages") != null ||
                 "messages" in classifierSignals -> {
-                Log.d(TAG, "BKE DNA normalization: normalization_representation_messages_candidate")
+                Log.d(TAG, "BKE DNA normalization: normalization_representation_messages_array")
                 messagesNormalizer.normalizeCandidate(sourceSha256)
             }
             else -> {
