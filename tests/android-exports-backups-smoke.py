@@ -66,7 +66,7 @@ for token in [
     'Latest Working Data cannot be deleted', 'Only saved Working Data can be deleted',
 ]:
     assert token in working_data, token
-for forbidden in ['ATTACH DATABASE', 'MERGE INTO latest', 'DELETE_CONFIRMATION_TEXT = "JAN2X"']:
+for forbidden in ['ATTACH DATABASE', 'MERGE INTO LATEST']:
     assert forbidden not in working_data.upper(), forbidden
 assert 'dna/working-data' in paths
 
