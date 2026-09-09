@@ -12,7 +12,10 @@ contract = (base / "DnaReconciliationContract.kt").read_text()
 aggregation_tokens = [
     "groupBy { it.conversationNativeId }",
     "AndroidDerivativeSourceAccess.listNormalizedSourceSha256s(appContext)",
-    "AndroidDerivativeSourceAccess.readNormalized(appContext, sourceSha256)",
+    "AndroidDerivativeSourceAccess.readNormalizedMetadata(appContext, sourceSha256)",
+    "AndroidDerivativeSourceAccess.withNormalizedJsonReader(",
+    "readSnapshot(reader, observedAtBySource)",
+    "JsonReader",
     "getOrPut(node.nodeNativeId)",
     "messageNativeIds",
     "parentNativeIds",
@@ -31,12 +34,16 @@ aggregation_tokens = [
     "unresolvedParentNativeIds",
     "unresolvedChildNativeIds",
     'val relativePath = "conversations/$conversationKey.json"',
+    "writeState(File(captureRoot, relativePath), state)",
+    "JsonWriter(OutputStreamWriter(output, Charsets.UTF_8))",
     "output.fd.sync()",
     "StandardCopyOption.ATOMIC_MOVE",
     "index.replaceLogicalConversation",
 ]
 for token in aggregation_tokens:
     assert token in aggregation, token
+assert "AndroidDerivativeSourceAccess.readNormalized(appContext, sourceSha256)" not in aggregation
+assert "state.toJson().toString(2)" not in aggregation
 assert "normalizedDirectory" not in aggregation
 
 # Context-level derivative enumeration federates Latest + saved read-only
@@ -45,6 +52,8 @@ for token in [
     "AndroidWorkingDataManager(appContext).listWorkingData()",
     "sources += listNormalizedSourceSha256s(generation, captureRoot)",
     "return sources.sorted()",
+    "AndroidChunkedNormalizedStore(generation)",
+    "withNormalizedJsonReader(",
 ]:
     assert token in derivative_access, token
 
