@@ -45,6 +45,8 @@ jobs:
         run: python3 tests/android-conversation-reconciliation-smoke.py
       - name: Android live classification and normalization smoke
         run: python3 tests/android-live-normalization-smoke.py
+      - name: Android live SQLite ownership and upgrade migration smoke
+        run: python3 tests/android-live-sqlite-upgrade-smoke.py
       - name: Android modern conversation representation coverage smoke
         run: python3 tests/android-modern-conversation-coverage-smoke.py
       - name: Android SQLite normalization recovery smoke
@@ -117,6 +119,8 @@ jobs:
         run: python3 tests/android-conversation-reconciliation-smoke.py
       - name: Android live classification and normalization smoke
         run: python3 tests/android-live-normalization-smoke.py
+      - name: Android live SQLite ownership and upgrade migration smoke
+        run: python3 tests/android-live-sqlite-upgrade-smoke.py
       - name: Android modern conversation representation coverage smoke
         run: python3 tests/android-modern-conversation-coverage-smoke.py
       - name: Android SQLite normalization recovery smoke
