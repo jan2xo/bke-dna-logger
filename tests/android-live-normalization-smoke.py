@@ -251,11 +251,16 @@ for token in (
 ):
     assert token in runtime, token
 
-# Reconciliation consumes federated normalized derivatives rather than the
-# permanent normalized directory and preserves graphless messages semantics.
+# Reconciliation now reads normalized derivatives through JsonReader and writes
+# logical state through JsonWriter, so large snapshots are not reconstructed as
+# one monolithic JSON String at either boundary.
 for token in (
     'AndroidDerivativeSourceAccess.listNormalizedSourceSha256s(appContext)',
-    'AndroidDerivativeSourceAccess.readNormalized(appContext, sourceSha256)',
+    'AndroidDerivativeSourceAccess.readNormalizedMetadata(appContext, sourceSha256)',
+    'AndroidDerivativeSourceAccess.withNormalizedJsonReader(',
+    'readSnapshot(reader, observedAtBySource)',
+    'JsonReader', 'JsonWriter',
+    'writeState(File(captureRoot, relativePath), state)',
     'GRAPH_COVERAGE_BASIS = "structural_graph_closure_only"',
     'LOGICAL_GRAPH_COVERAGE_BASIS = "multi_snapshot_structural_union"',
     'MESSAGES_COVERAGE_BASIS = "messages_array_no_graph_edges"',
@@ -265,6 +270,8 @@ for token in (
     'parentChainComplete = false',
 ):
     assert token in aggregation, token
+assert 'AndroidDerivativeSourceAccess.readNormalized(appContext, sourceSha256)' not in aggregation
+assert 'state.toJson().toString(2)' not in aggregation
 assert 'normalizedDirectory' not in aggregation
 assert 'fun aggregateConversation(conversationNativeId: String)' in aggregation
 assert 'aggregateConversationState(conversationNativeId, snapshots)' in aggregation
