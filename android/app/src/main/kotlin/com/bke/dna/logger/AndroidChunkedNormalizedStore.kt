@@ -143,10 +143,15 @@ class AndroidChunkedNormalizedStore private constructor(
             put("chunk_count", identity.chunkCount)
             put("stored_at", Instant.now().toString())
         }
-        // Single-row autocommit is the publication boundary. A crash before this
-        // point leaves only invisible orphan chunks; a crash after it leaves a
-        // fully verified immutable derivative.
-        database.insertOrThrow(TABLE_METADATA, null, values)
+        // Keep the final publication transaction explicit but tiny: it contains
+        // only the metadata marker, never the multi-megabyte JsonWriter stream.
+        database.beginTransaction()
+        try {
+            database.insertOrThrow(TABLE_METADATA, null, values)
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
     }
 
     fun normalizedJson(sourceSha256: String): String? {
