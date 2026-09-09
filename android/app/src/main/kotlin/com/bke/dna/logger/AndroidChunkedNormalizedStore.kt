@@ -18,8 +18,10 @@ import java.time.Instant
  *
  * PR5's original inline TEXT rows remain readable for compatibility. New large
  * messages-array derivatives are serialized directly through JsonWriter into
- * bounded UTF-8 SQLite BLOB chunks, with SHA-256 + byte-length verification
- * before commit. Exact RAW evidence is unaffected.
+ * bounded UTF-8 SQLite BLOB chunks. Chunks are committed independently so a
+ * large derivative never monopolizes the live Working Data writer. The metadata
+ * row is the publish marker and is written only after exact SHA/length/chunk
+ * verification succeeds. Exact RAW evidence is unaffected.
  */
 class AndroidChunkedNormalizedStore private constructor(
     private val handle: DatabaseHandle,
@@ -115,31 +117,36 @@ class AndroidChunkedNormalizedStore private constructor(
             "Conflicting immutable derivative for source '$sourceSha256'"
         }
 
-        database.beginTransaction()
-        try {
-            val sink = ChunkOutputStream(database, sourceSha256)
-            JsonWriter(OutputStreamWriter(sink, Charsets.UTF_8)).use { writer ->
-                writer.setIndent("  ")
-                writePayload(writer)
-            }
-            val identity = sink.identity()
-            require(identity.chunkCount > 0) { "Normalized derivative produced no payload chunks" }
+        // A process death before metadata publication may leave committed chunks.
+        // They are not a visible derivative because readers require metadata.
+        // Remove only those unpublished chunks before rebuilding this exact SHA.
+        deleteUnpublishedChunks(sourceSha256)
 
-            val values = ContentValues().apply {
-                put("source_sha256", sourceSha256)
-                put("conversation_native_id", conversationNativeId)
-                put("normalized_at", normalizedAt)
-                put("payload_sha256", identity.sha256)
-                put("byte_length", identity.byteLength)
-                put("chunk_count", identity.chunkCount)
-                put("stored_at", Instant.now().toString())
-            }
-            database.insertOrThrow(TABLE_METADATA, null, values)
-            verifyStoredPayload(sourceSha256, identity)
-            database.setTransactionSuccessful()
-        } finally {
-            database.endTransaction()
+        val sink = ChunkOutputStream(database, sourceSha256)
+        JsonWriter(OutputStreamWriter(sink, Charsets.UTF_8)).use { writer ->
+            writer.setIndent("  ")
+            writePayload(writer)
         }
+        val identity = sink.identity()
+        require(identity.chunkCount > 0) { "Normalized derivative produced no payload chunks" }
+
+        // Every chunk is already durable in its own short SQLite write. Verify
+        // the complete representation before making it visible to readers.
+        verifyStoredPayload(sourceSha256, identity)
+
+        val values = ContentValues().apply {
+            put("source_sha256", sourceSha256)
+            put("conversation_native_id", conversationNativeId)
+            put("normalized_at", normalizedAt)
+            put("payload_sha256", identity.sha256)
+            put("byte_length", identity.byteLength)
+            put("chunk_count", identity.chunkCount)
+            put("stored_at", Instant.now().toString())
+        }
+        // Single-row autocommit is the publication boundary. A crash before this
+        // point leaves only invisible orphan chunks; a crash after it leaves a
+        // fully verified immutable derivative.
+        database.insertOrThrow(TABLE_METADATA, null, values)
     }
 
     fun normalizedJson(sourceSha256: String): String? {
@@ -185,6 +192,17 @@ class AndroidChunkedNormalizedStore private constructor(
         requireSha(sourceSha256)
         val input = SQLiteChunkInputStream(database, sourceSha256)
         input.use { return block(it) }
+    }
+
+    private fun deleteUnpublishedChunks(sourceSha256: String) {
+        check(!hasPayload(sourceSha256)) {
+            "Published normalized derivative chunks cannot be discarded"
+        }
+        database.delete(
+            TABLE_CHUNK,
+            "source_sha256 = ?",
+            arrayOf(sourceSha256),
+        )
     }
 
     private fun verifyStoredPayload(sourceSha256: String, expected: PayloadIdentity) {
@@ -297,6 +315,9 @@ class AndroidChunkedNormalizedStore private constructor(
                 put("chunk_index", chunkIndex)
                 put("payload_utf8", buffer.copyOf(bufferLength))
             }
+            // Intentionally autocommit each bounded chunk. Capture ingress shares
+            // this live pool and must never wait behind a multi-megabyte write
+            // transaction just to persist capture_end.
             database.insertOrThrow(TABLE_CHUNK, null, values)
             chunkIndex += 1
             bufferLength = 0
