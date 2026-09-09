@@ -9,6 +9,7 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
     private val appContext = context.applicationContext
     private val graphNormalizer = AndroidGraphNormalizationEngine(appContext)
     private val messagesNormalizer = AndroidMessagesNormalizationEngine(appContext)
+    private val streamingMessagesNormalizer = AndroidStreamingMessagesNormalizationEngine(appContext)
     private val eventStreamNormalizer = AndroidEventStreamNormalizationEngine(appContext)
 
     fun normalizeCandidate(sourceSha256: String): AndroidNormalizationResult? {
@@ -19,8 +20,45 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
         val classification = classificationRoot.optJSONObject("classification") ?: return null
         if (classification.optString("kind") != CANDIDATE_KIND) return null
 
+        val contentType = classificationRoot.opt("contentType")
+            ?.takeUnless { it == JSONObject.NULL }
+            ?.toString()
+        val classifierSignals = buildSet {
+            val array = classification.optJSONArray("signals")
+            if (array != null) {
+                for (index in 0 until array.length()) add(array.optString(index))
+            }
+        }
+        val byteLength = classificationRoot.optLong("byteLength", -1L)
+
+        // Large modern messages payloads are classified and normalized from RAW
+        // streams. The 16 MiB value now selects the legacy materialized parser;
+        // it is no longer a semantic rejection limit.
+        if (byteLength > MATERIALIZED_BODY_BYTES) {
+            return when {
+                contentType?.contains("text/event-stream", ignoreCase = true) == true -> {
+                    Log.d(TAG, "BKE DNA normalization: normalization_representation_event_stream")
+                    eventStreamNormalizer.normalizeCandidate(sourceSha256)
+                }
+                "messages" in classifierSignals -> {
+                    Log.d(TAG, "BKE DNA normalization: normalization_representation_messages_array")
+                    streamingMessagesNormalizer.normalizeCandidate(sourceSha256)
+                }
+                "mapping" in classifierSignals -> {
+                    // generic-mapping-graph-v0 remains independently strict and
+                    // bounded until its own streaming parser is certified.
+                    Log.d(TAG, "BKE DNA normalization: normalization_representation_mapping_graph")
+                    graphNormalizer.normalizeCandidate(sourceSha256)
+                }
+                else -> {
+                    Log.d(TAG, "BKE DNA normalization: normalization_skip_unsupported_representation")
+                    null
+                }
+            }
+        }
+
         val rawBytes = try {
-            AndroidRawSourceAccess.readAllBytes(appContext, sourceSha256, MAX_BODY_BYTES)
+            AndroidRawSourceAccess.readAllBytes(appContext, sourceSha256, MATERIALIZED_BODY_BYTES)
         } catch (_: IllegalArgumentException) {
             Log.d(TAG, "BKE DNA normalization: normalization_skip_body_oversize")
             return null
@@ -31,9 +69,6 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
         }
 
         val rawText = String(rawBytes, Charsets.UTF_8)
-        val contentType = classificationRoot.opt("contentType")
-            ?.takeUnless { it == JSONObject.NULL }
-            ?.toString()
         if (contentType?.contains("text/event-stream", ignoreCase = true) == true ||
             looksLikeEventStream(rawText)
         ) {
@@ -52,13 +87,6 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
         } catch (_: Exception) {
             Log.d(TAG, "BKE DNA normalization: normalization_skip_unsupported_representation")
             return null
-        }
-
-        val classifierSignals = buildSet {
-            val array = classification.optJSONArray("signals")
-            if (array != null) {
-                for (index in 0 until array.length()) add(array.optString(index))
-            }
         }
 
         return when {
@@ -87,7 +115,7 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
 
     companion object {
         private const val TAG = "BkeDnaNormalizer"
-        private const val MAX_BODY_BYTES = 16L * 1024 * 1024
+        private const val MATERIALIZED_BODY_BYTES = 16L * 1024 * 1024
         private const val CANDIDATE_KIND = "conversation_payload_candidate"
         private val SHA256 = Regex("[0-9a-f]{64}")
     }
