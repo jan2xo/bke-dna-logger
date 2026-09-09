@@ -76,6 +76,7 @@ jobs:
           KEYSTORE_PATH="${RUNNER_TEMP}/bke-dna-ci-release.jks"
           keytool -genkeypair \
             -keystore "${KEYSTORE_PATH}" \
+            -storetype JKS \
             -storepass ci-store-password \
             -keypass ci-key-password \
             -alias ci-release \
