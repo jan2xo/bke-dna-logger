@@ -67,7 +67,10 @@ object AndroidDerivationScheduler {
         val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
         val relativePath = bodyFile.relativeTo(captureRoot).invariantSeparatorsPath
         AndroidDerivationQueueStore(appContext).use { store ->
-            store.enqueue(
+            // A recapture of a SHA that was already DONE still has a fresh
+            // durable staging file to verify/remove. Re-arm RAW_INGEST now
+            // instead of leaving that staging file orphaned until restart.
+            store.requeueForRawIngest(
                 AndroidDerivationJob(
                     sourceSha256 = sourceSha256,
                     bodyPath = relativePath,
@@ -107,10 +110,6 @@ object AndroidDerivationScheduler {
     fun snapshot(context: Context): AndroidDerivationQueueSnapshot =
         AndroidDerivationQueueStore(context.applicationContext).use { it.snapshot() }
 
-    /**
-     * Storage mutations call this after capture ingress is paused. The single
-     * executor barrier runs only after the current queue drain has finished.
-     */
     fun awaitIdle(context: Context) {
         val appContext = context.applicationContext
         start(appContext)
@@ -193,8 +192,6 @@ object AndroidDerivationScheduler {
                 continue
             }
 
-            // RAW is now exact and verified inside SQLite. Staging is no longer
-            // required by semantic consumers; they resolve bytes by source SHA.
             breathe(context)
             var firstStage = true
             val success = AndroidLiveDerivationPipeline(context).processCompletedCapture(
@@ -259,7 +256,6 @@ data class AndroidDerivationQueueSnapshot(
     val currentStage: String?,
 )
 
-/** SQLite access for the derivation queue. Uses the same Working Data DB. */
 private class AndroidDerivationQueueStore(context: Context) : AutoCloseable {
     private val index = AndroidCaptureIndex(context.applicationContext)
     private val db: SQLiteDatabase
@@ -316,11 +312,6 @@ private class AndroidDerivationQueueStore(context: Context) : AutoCloseable {
         )
     }
 
-    /**
-     * Completed staging is itself a crash-recovery signal. Re-arm an existing
-     * terminal/waiting row or insert a missing row so RAW_INGEST can verify the
-     * source before staging is removed.
-     */
     fun requeueForRawIngest(job: AndroidDerivationJob) {
         enqueue(job)
         val values = ContentValues().apply {
