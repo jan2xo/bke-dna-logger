@@ -39,7 +39,7 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
                     Log.d(TAG, "BKE DNA normalization: normalization_representation_event_stream")
                     eventStreamNormalizer.normalizeCandidate(sourceSha256)
                 }
-                "messages" in classifierSignals -> {
+                hasMessagesSignal(classifierSignals) -> {
                     Log.d(TAG, "BKE DNA normalization: normalization_representation_messages_array")
                     streamingMessagesNormalizer.normalizeCandidate(sourceSha256)
                 }
@@ -105,6 +105,8 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
             }
         }
     }
+
+    private fun hasMessagesSignal(signals: Set<String>): Boolean = signals.contains("messages")
 
     private fun looksLikeEventStream(text: String): Boolean = text.lineSequence()
         .firstOrNull { it.isNotBlank() }
