@@ -168,17 +168,16 @@ class AndroidChunkedNormalizedStore private constructor(
 
     fun <T> withJsonReader(sourceSha256: String, block: (JsonReader) -> T): T? {
         val expected = metadata(sourceSha256) ?: return null
+        verifyStoredPayload(
+            sourceSha256,
+            PayloadIdentity(
+                sha256 = expected.payloadSha256,
+                byteLength = expected.byteLength,
+                chunkCount = expected.chunkCount,
+            ),
+        )
         return withJsonReaderSource(sourceSha256) { input ->
-            val verifyingInput = VerifyingInputStream(input)
-            val result = JsonReader(InputStreamReader(verifyingInput, Charsets.UTF_8)).use(block)
-            val actual = verifyingInput.finish()
-            require(
-                actual.sha256 == expected.payloadSha256 &&
-                    actual.byteLength == expected.byteLength
-            ) {
-                "Chunked normalized derivative integrity mismatch"
-            }
-            result
+            JsonReader(InputStreamReader(input, Charsets.UTF_8)).use(block)
         }
     }
 
@@ -356,51 +355,11 @@ class AndroidChunkedNormalizedStore private constructor(
         override fun close() = cursor.close()
     }
 
-    private class VerifyingInputStream(
-        private val source: InputStream,
-    ) : InputStream() {
-        private val digest = MessageDigest.getInstance("SHA-256")
-        private var byteLength = 0L
-        private var finished = false
-
-        override fun read(): Int {
-            val value = source.read()
-            if (value >= 0) {
-                digest.update(value.toByte())
-                byteLength += 1
-            }
-            return value
-        }
-
-        override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
-            val count = source.read(bytes, offset, length)
-            if (count > 0) {
-                digest.update(bytes, offset, count)
-                byteLength += count.toLong()
-            }
-            return count
-        }
-
-        fun finish(): PayloadIdentity {
-            check(!finished) { "Chunked normalized verification already finished" }
-            while (read(DRAIN_BUFFER, 0, DRAIN_BUFFER.size) >= 0) {
-                // Drain any unread bytes so integrity covers the exact payload.
-            }
-            finished = true
-            return PayloadIdentity(hex(digest.digest()), byteLength, -1)
-        }
-
-        override fun close() = source.close()
-
-        companion object {
-            private val DRAIN_BUFFER = ByteArray(16 * 1024)
-        }
-    }
-
     companion object {
         private const val TABLE_METADATA = "derivative_normalized_chunked"
         private const val TABLE_CHUNK = "derivative_normalized_chunk"
         private const val PAYLOAD_CHUNK_BYTES = 64 * 1024
+        private const val PAYLOAD_HASH_CHUNK_CHARS = 32 * 1024
         private const val TEXT_READ_BUFFER_CHARS = 16 * 1024
         private val SHA256 = Regex("[0-9a-f]{64}")
 
@@ -439,10 +398,27 @@ class AndroidChunkedNormalizedStore private constructor(
         }
 
         private fun identityOf(payload: String): PayloadIdentity {
-            val bytes = payload.toByteArray(Charsets.UTF_8)
+            val digest = MessageDigest.getInstance("SHA-256")
+            var byteLength = 0L
+            var offset = 0
+            while (offset < payload.length) {
+                var end = minOf(payload.length, offset + PAYLOAD_HASH_CHUNK_CHARS)
+                if (
+                    end < payload.length &&
+                    end > offset &&
+                    Character.isHighSurrogate(payload[end - 1]) &&
+                    Character.isLowSurrogate(payload[end])
+                ) {
+                    end -= 1
+                }
+                val bytes = payload.substring(offset, end).toByteArray(Charsets.UTF_8)
+                digest.update(bytes)
+                byteLength += bytes.size.toLong()
+                offset = end
+            }
             return PayloadIdentity(
-                sha256 = hex(MessageDigest.getInstance("SHA-256").digest(bytes)),
-                byteLength = bytes.size.toLong(),
+                sha256 = hex(digest.digest()),
+                byteLength = byteLength,
                 chunkCount = -1,
             )
         }
