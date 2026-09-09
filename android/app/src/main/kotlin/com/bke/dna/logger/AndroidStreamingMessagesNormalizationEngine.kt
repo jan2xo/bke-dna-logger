@@ -131,7 +131,7 @@ class AndroidStreamingMessagesNormalizationEngine(context: android.content.Conte
         require(depth <= MAX_JSON_DEPTH) { "JSON nesting exceeds normalizer limit" }
         var conversationId: String? = null
         var currentNodeId: String? = null
-        var messagesNodes: List<NormalizedMessageNode>? = null
+        var messagesNodes: List<ParsedNode>? = null
         var messagesWasArray = false
 
         reader.beginObject()
