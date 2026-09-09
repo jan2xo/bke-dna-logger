@@ -82,6 +82,41 @@ class AndroidDerivativeStore private constructor(
         )
     }
 
+    /**
+     * Narrow upgrade migration for the pre-streaming oversized-RAW rejection.
+     *
+     * Classification rows remain immutable except for this one explicitly
+     * obsolete derivative state. RAW and normalized derivatives are untouched.
+     * The caller is responsible for limiting this migration to oversized RAW.
+     */
+    fun invalidateLegacyClassificationSizeLimit(sourceSha256: String): Boolean {
+        check(writable) { "Classification derivative invalidation requires writable Working Data" }
+        requireSha(sourceSha256)
+        val payload = classificationJson(sourceSha256) ?: return false
+        val classification = runCatching {
+            JSONObject(payload).getJSONObject("classification")
+        }.getOrNull() ?: return false
+        val signals = classification.optJSONArray("signals") ?: return false
+        val isLegacySizeLimit = (0 until signals.length()).any { index ->
+            signals.optString(index) == LEGACY_CLASSIFICATION_SIZE_LIMIT_SIGNAL
+        }
+        if (!isLegacySizeLimit) return false
+
+        database.beginTransaction()
+        try {
+            val deleted = database.delete(
+                TABLE_CLASSIFICATION,
+                "source_sha256 = ?",
+                arrayOf(sourceSha256),
+            )
+            check(deleted == 1) { "Legacy classification derivative disappeared during migration" }
+            database.setTransactionSuccessful()
+            return true
+        } finally {
+            database.endTransaction()
+        }
+    }
+
     fun putNormalizedJson(sourceSha256: String, payloadJson: String) {
         check(writable) { "Normalized derivative write requires writable Working Data" }
         requireSha(sourceSha256)
@@ -379,6 +414,7 @@ class AndroidDerivativeStore private constructor(
     companion object {
         private const val TABLE_CLASSIFICATION = "derivative_classification"
         private const val TABLE_NORMALIZED = "derivative_normalized"
+        private const val LEGACY_CLASSIFICATION_SIZE_LIMIT_SIGNAL = "classification_size_limit"
         private const val PAYLOAD_READ_CHUNK_CHARS = 128 * 1024
         private const val PAYLOAD_HASH_CHUNK_CHARS = 64 * 1024
         private val SHA256 = Regex("[0-9a-f]{64}")
