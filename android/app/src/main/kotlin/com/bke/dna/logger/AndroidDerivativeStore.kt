@@ -85,22 +85,25 @@ class AndroidDerivativeStore private constructor(
     fun putNormalizedJson(sourceSha256: String, payloadJson: String) {
         check(writable) { "Normalized derivative write requires writable Working Data" }
         requireSha(sourceSha256)
-        val root = JSONObject(payloadJson)
-        require(root.getString("sourceSha256") == sourceSha256) {
+
+        // Normalized payloads can be tens of megabytes. Do not parse the whole
+        // serialized derivative into a second JSONObject merely to recover the
+        // three top-level identity fields needed for SQLite columns.
+        val metadata = readNormalizedMetadata(payloadJson)
+        require(metadata.sourceSha256 == sourceSha256) {
             "Normalized derivative source identity mismatch"
         }
-        val conversationNativeId = root.optString("conversationNativeId").trim()
-        require(conversationNativeId.isNotBlank()) {
+        require(metadata.conversationNativeId.isNotBlank()) {
             "Normalized derivative lacks conversation identity"
         }
-        val normalizedAt = root.getString("normalizedAt")
+
         putImmutablePayload(
             table = TABLE_NORMALIZED,
             sourceSha256 = sourceSha256,
             payloadJson = payloadJson,
             extraValues = ContentValues().apply {
-                put("conversation_native_id", conversationNativeId)
-                put("normalized_at", normalizedAt)
+                put("conversation_native_id", metadata.conversationNativeId)
+                put("normalized_at", metadata.normalizedAt)
             },
         )
     }
@@ -111,30 +114,32 @@ class AndroidDerivativeStore private constructor(
         payloadJson: String,
         extraValues: ContentValues,
     ) {
-        val bytes = payloadJson.toByteArray(Charsets.UTF_8)
-        val payloadSha256 = sha256(bytes)
-        val existing = readPayload(table, sourceSha256)
+        // Hash UTF-8 incrementally so a large derivative never needs a second
+        // full-size ByteArray beside the already serialized String.
+        val expected = identityOf(payloadJson)
+        val existing = readPayloadIdentity(table, sourceSha256)
         if (existing != null) {
-            require(existing == payloadJson) {
+            require(existing == expected) {
                 "Conflicting immutable derivative for source '$sourceSha256'"
             }
+            verifyStoredPayload(table, sourceSha256, expected)
             return
         }
 
         val values = ContentValues(extraValues).apply {
             put("source_sha256", sourceSha256)
             put("payload_json", payloadJson)
-            put("payload_sha256", payloadSha256)
-            put("byte_length", bytes.size.toLong())
+            put("payload_sha256", expected.sha256)
+            put("byte_length", expected.byteLength)
             put("stored_at", Instant.now().toString())
         }
 
         database.beginTransaction()
         try {
             database.insertOrThrow(table, null, values)
-            val committed = readPayload(table, sourceSha256)
-                ?: error("Derivative row was not readable inside transaction")
-            require(committed == payloadJson) { "Derivative SQLite round-trip mismatch" }
+            // Verify the committed TEXT in bounded substrings rather than
+            // rebuilding another full payload String inside the transaction.
+            verifyStoredPayload(table, sourceSha256, expected)
             database.setTransactionSuccessful()
         } finally {
             database.endTransaction()
@@ -144,8 +149,30 @@ class AndroidDerivativeStore private constructor(
     private fun readPayload(table: String, sourceSha256: String): String? {
         requireSha(sourceSha256)
         if (!tableExists(table)) return null
+        val expected = readPayloadIdentity(table, sourceSha256) ?: return null
 
-        val metadata = database.query(
+        val digest = MessageDigest.getInstance("SHA-256")
+        var byteLength = 0L
+        val payload = StringBuilder()
+        forEachStoredPayloadChunk(table, sourceSha256) { chunk ->
+            payload.append(chunk)
+            val bytes = chunk.toByteArray(Charsets.UTF_8)
+            digest.update(bytes)
+            byteLength += bytes.size.toLong()
+        }
+
+        require(byteLength == expected.byteLength) {
+            "Derivative SQLite byte-length mismatch"
+        }
+        require(hex(digest.digest()) == expected.sha256) {
+            "Derivative SQLite SHA-256 mismatch"
+        }
+        return payload.toString()
+    }
+
+    private fun readPayloadIdentity(table: String, sourceSha256: String): PayloadIdentity? {
+        if (!tableExists(table)) return null
+        return database.query(
             table,
             arrayOf("payload_sha256", "byte_length"),
             "source_sha256 = ?",
@@ -156,44 +183,174 @@ class AndroidDerivativeStore private constructor(
             "1",
         ).use { cursor ->
             if (!cursor.moveToFirst()) return null
-            cursor.getString(0) to cursor.getLong(1)
+            PayloadIdentity(
+                sha256 = cursor.getString(0),
+                byteLength = cursor.getLong(1),
+            )
         }
+    }
 
-        // Android CursorWindow cannot materialize multi-megabyte TEXT rows on
-        // many devices. Read only bounded substrings through the window, then
-        // preserve the existing exact byte-length + SHA-256 verification over
-        // the reconstructed serialized payload.
-        val payload = buildString {
-            var payloadOffset = 1
-            while (true) {
-                val chunk = database.rawQuery(
-                    "SELECT substr(payload_json, ?, ?) FROM $table " +
-                        "WHERE source_sha256 = ? LIMIT 1",
-                    arrayOf(
-                        payloadOffset.toString(),
-                        PAYLOAD_READ_CHUNK_CHARS.toString(),
-                        sourceSha256,
-                    ),
-                ).use { cursor ->
-                    check(cursor.moveToFirst()) {
-                        "Derivative row disappeared during payload read"
-                    }
-                    cursor.getString(0)
+    private fun verifyStoredPayload(
+        table: String,
+        sourceSha256: String,
+        expected: PayloadIdentity,
+    ) {
+        val committed = readPayloadIdentity(table, sourceSha256)
+            ?: error("Derivative row was not readable inside transaction")
+        require(committed == expected) { "Derivative SQLite round-trip mismatch" }
+
+        val digest = MessageDigest.getInstance("SHA-256")
+        var byteLength = 0L
+        forEachStoredPayloadChunk(table, sourceSha256) { chunk ->
+            val bytes = chunk.toByteArray(Charsets.UTF_8)
+            digest.update(bytes)
+            byteLength += bytes.size.toLong()
+        }
+        require(
+            byteLength == expected.byteLength &&
+                hex(digest.digest()) == expected.sha256
+        ) {
+            "Derivative SQLite round-trip mismatch"
+        }
+    }
+
+    private inline fun forEachStoredPayloadChunk(
+        table: String,
+        sourceSha256: String,
+        block: (String) -> Unit,
+    ) {
+        var payloadOffset = 1
+        while (true) {
+            val chunk = database.rawQuery(
+                "SELECT substr(payload_json, ?, ?) FROM $table " +
+                    "WHERE source_sha256 = ? LIMIT 1",
+                arrayOf(
+                    payloadOffset.toString(),
+                    PAYLOAD_READ_CHUNK_CHARS.toString(),
+                    sourceSha256,
+                ),
+            ).use { cursor ->
+                check(cursor.moveToFirst()) {
+                    "Derivative row disappeared during payload read"
                 }
-                if (chunk.isEmpty()) break
-                append(chunk)
-                payloadOffset += PAYLOAD_READ_CHUNK_CHARS
+                cursor.getString(0)
+            }
+            if (chunk.isEmpty()) return
+            block(chunk)
+            payloadOffset += PAYLOAD_READ_CHUNK_CHARS
+        }
+    }
+
+    private fun identityOf(payload: String): PayloadIdentity {
+        val digest = MessageDigest.getInstance("SHA-256")
+        var byteLength = 0L
+        var offset = 0
+        while (offset < payload.length) {
+            var end = minOf(payload.length, offset + PAYLOAD_HASH_CHUNK_CHARS)
+            // Keep a UTF-16 surrogate pair in the same bounded encoding chunk.
+            if (
+                end < payload.length &&
+                end > offset &&
+                Character.isHighSurrogate(payload[end - 1]) &&
+                Character.isLowSurrogate(payload[end])
+            ) {
+                end -= 1
+            }
+            val bytes = payload.substring(offset, end).toByteArray(Charsets.UTF_8)
+            digest.update(bytes)
+            byteLength += bytes.size.toLong()
+            offset = end
+        }
+        return PayloadIdentity(hex(digest.digest()), byteLength)
+    }
+
+    private fun readNormalizedMetadata(payload: String): NormalizedMetadata {
+        val wanted = setOf("sourceSha256", "conversationNativeId", "normalizedAt")
+        val values = linkedMapOf<String, String>()
+        var objectDepth = 0
+        var index = 0
+
+        while (index < payload.length && values.size < wanted.size) {
+            when (payload[index]) {
+                '{' -> {
+                    objectDepth += 1
+                    index += 1
+                }
+                '}' -> {
+                    objectDepth -= 1
+                    index += 1
+                }
+                '"' -> {
+                    val key = readJsonString(payload, index)
+                    if (objectDepth != 1) {
+                        index = key.nextIndex
+                        continue
+                    }
+
+                    val colon = skipWhitespace(payload, key.nextIndex)
+                    if (colon >= payload.length || payload[colon] != ':') {
+                        index = key.nextIndex
+                        continue
+                    }
+
+                    val valueStart = skipWhitespace(payload, colon + 1)
+                    if (key.value in wanted && valueStart < payload.length && payload[valueStart] == '"') {
+                        val value = readJsonString(payload, valueStart)
+                        values[key.value] = value.value
+                        index = value.nextIndex
+                    } else {
+                        index = key.nextIndex
+                    }
+                }
+                else -> index += 1
             }
         }
 
-        val bytes = payload.toByteArray(Charsets.UTF_8)
-        require(bytes.size.toLong() == metadata.second) {
-            "Derivative SQLite byte-length mismatch"
+        return NormalizedMetadata(
+            sourceSha256 = values["sourceSha256"]
+                ?: error("Normalized derivative lacks source identity"),
+            conversationNativeId = values["conversationNativeId"]
+                ?: error("Normalized derivative lacks conversation identity"),
+            normalizedAt = values["normalizedAt"]
+                ?: error("Normalized derivative lacks normalized timestamp"),
+        )
+    }
+
+    private fun readJsonString(payload: String, startIndex: Int): JsonStringToken {
+        require(payload[startIndex] == '"') { "Expected JSON string" }
+        val value = StringBuilder()
+        var index = startIndex + 1
+        while (index < payload.length) {
+            when (val char = payload[index++]) {
+                '"' -> return JsonStringToken(value.toString(), index)
+                '\\' -> {
+                    require(index < payload.length) { "Invalid JSON escape" }
+                    when (val escaped = payload[index++]) {
+                        '"', '\\', '/' -> value.append(escaped)
+                        'b' -> value.append('\b')
+                        'f' -> value.append('\u000c')
+                        'n' -> value.append('\n')
+                        'r' -> value.append('\r')
+                        't' -> value.append('\t')
+                        'u' -> {
+                            require(index + 4 <= payload.length) { "Invalid JSON unicode escape" }
+                            val codeUnit = payload.substring(index, index + 4).toInt(16)
+                            value.append(codeUnit.toChar())
+                            index += 4
+                        }
+                        else -> error("Invalid JSON escape '$escaped'")
+                    }
+                }
+                else -> value.append(char)
+            }
         }
-        require(sha256(bytes) == metadata.first) {
-            "Derivative SQLite SHA-256 mismatch"
-        }
-        return payload
+        error("Unterminated JSON string")
+    }
+
+    private fun skipWhitespace(payload: String, startIndex: Int): Int {
+        var index = startIndex
+        while (index < payload.length && payload[index].isWhitespace()) index += 1
+        return index
     }
 
     private fun tableExists(table: String): Boolean = database.rawQuery(
@@ -203,10 +360,27 @@ class AndroidDerivativeStore private constructor(
 
     override fun close() = handle.close()
 
+    private data class PayloadIdentity(
+        val sha256: String,
+        val byteLength: Long,
+    )
+
+    private data class NormalizedMetadata(
+        val sourceSha256: String,
+        val conversationNativeId: String,
+        val normalizedAt: String,
+    )
+
+    private data class JsonStringToken(
+        val value: String,
+        val nextIndex: Int,
+    )
+
     companion object {
         private const val TABLE_CLASSIFICATION = "derivative_classification"
         private const val TABLE_NORMALIZED = "derivative_normalized"
         private const val PAYLOAD_READ_CHUNK_CHARS = 128 * 1024
+        private const val PAYLOAD_HASH_CHUNK_CHARS = 64 * 1024
         private val SHA256 = Regex("[0-9a-f]{64}")
 
         fun createSchema(database: SQLiteDatabase) {
@@ -245,9 +419,8 @@ class AndroidDerivativeStore private constructor(
             require(SHA256.matches(sourceSha256)) { "Expected lowercase SHA-256 source identity" }
         }
 
-        private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
-            .digest(bytes)
-            .joinToString("") { "%02x".format(it) }
+        private fun hex(bytes: ByteArray): String =
+            bytes.joinToString("") { "%02x".format(it) }
     }
 
     private class DatabaseHandle(
