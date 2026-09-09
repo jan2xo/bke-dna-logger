@@ -11,8 +11,8 @@ import java.nio.file.StandardCopyOption
 import java.time.Instant
 
 /**
- * Derivative live pipeline invoked only after raw body, observation, and SQLite
- * capture projection are durable. Failures here never invalidate raw evidence.
+ * Derivative live pipeline invoked only after exact RAW is verified inside
+ * Working Data SQLite. Failures here never invalidate RAW evidence.
  *
  * The scheduler owns pacing. This pipeline exposes coarse stages so the single
  * derivation lane can persist progress and deliberately breathe between them.
@@ -26,7 +26,6 @@ class AndroidLiveDerivationPipeline(context: Context) {
     private val normalizer = AndroidConversationNormalizationDispatcher(appContext)
 
     fun processCompletedCapture(
-        bodyFile: File,
         sourceSha256: String,
         byteLength: Long,
         contentType: String?,
@@ -36,7 +35,7 @@ class AndroidLiveDerivationPipeline(context: Context) {
             Log.d(TAG, "BKE DNA derivation: started")
 
             onStage(STAGE_CLASSIFYING)
-            ensureClassification(bodyFile, sourceSha256, byteLength, contentType)
+            ensureClassification(sourceSha256, byteLength, contentType)
             logClassificationOutcome(readClassificationOutcome(sourceSha256))
 
             onStage(STAGE_NORMALIZING)
@@ -56,14 +55,13 @@ class AndroidLiveDerivationPipeline(context: Context) {
             }
         } catch (_: Exception) {
             // Classification, normalization, and aggregation are derivatives.
-            // Raw evidence and its immutable observation are already durable.
+            // Exact RAW evidence is already verified inside Working Data SQLite.
             Log.d(TAG, "BKE DNA derivation: derivative_failed")
             false
         }
     }
 
     private fun ensureClassification(
-        bodyFile: File,
         sourceSha256: String,
         byteLength: Long,
         contentType: String?,
@@ -76,7 +74,12 @@ class AndroidLiveDerivationPipeline(context: Context) {
             if (byteLength > MAX_CLASSIFICATION_BYTES) {
                 AndroidPayloadClassification.other("classification_size_limit")
             } else {
-                AndroidConversationPayloadClassifier.classify(bodyFile.readBytes(), contentType)
+                val bytes = AndroidRawSourceAccess.readAllBytes(
+                    appContext,
+                    sourceSha256,
+                    MAX_CLASSIFICATION_BYTES,
+                ) ?: error("RAW source is not available")
+                AndroidConversationPayloadClassifier.classify(bytes, contentType)
             }
         } catch (error: Exception) {
             errorType = error.javaClass.simpleName
