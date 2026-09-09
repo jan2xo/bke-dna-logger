@@ -44,10 +44,13 @@ class AndroidLiveDerivationPipeline(context: Context) {
                 Log.d(TAG, "BKE DNA derivation: reconciliation_complete")
                 true
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
             // Classification, normalization, and aggregation are derivatives.
             // Exact RAW evidence is already verified inside Working Data SQLite.
-            Log.d(TAG, "BKE DNA derivation: derivative_failed")
+            // Log only the exception class and stack trace; never log RAW payloads.
+            val errorType = error.javaClass.simpleName.ifBlank { "Exception" }
+            Log.d(TAG, "BKE DNA derivation: derivative_failed_$errorType")
+            Log.d(TAG, "BKE DNA derivation: derivative_failed", error)
             false
         }
     }
