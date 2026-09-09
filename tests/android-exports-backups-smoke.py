@@ -17,6 +17,7 @@ unified = (base / "AndroidUnifiedConversationLibrary.kt").read_text()
 titles = (base / "AndroidConversationTitleCatalog.kt").read_text()
 main = (base / "MainActivity.kt").read_text()
 runtime = (base / "AndroidCaptureRuntime.kt").read_text()
+queue = (base / "AndroidDerivationQueue.kt").read_text()
 purge = (base / "AndroidPurgeService.kt").read_text()
 human = (base / "AndroidHumanExportService.kt").read_text()
 working_data = (base / "AndroidWorkingDataManager.kt").read_text()
@@ -99,7 +100,11 @@ for token in [
 assert 'startActivity(Intent(this@MainActivity, AndroidExportsBackupsActivity::class.java))' in main
 assert 'capturePausedForWorkingData' not in main
 assert 'override fun onResume()' not in main
-button = main[main.index('text = "Working Data & Exports"'):main.index('root.addView', main.index('text = "Working Data & Exports"'))]
+button_start = main.index('text = "Working Data & Exports"')
+button = main[button_start:main.index('geckoView = GeckoView(this)', button_start)]
+for token in ['textSize = 12f', 'minHeight = 0', 'ViewGroup.LayoutParams.WRAP_CONTENT']:
+    assert token in button, token
+assert 'ViewGroup.LayoutParams.MATCH_PARENT' not in button
 assert 'geckoHost.stop()' not in button
 assert 'geckoHost.stop()' in main
 for token in ['withStorageMutationPause', 'pauseForStorageMutation', 'resumeAfterStorageMutation', 'awaitBackgroundDerivationIdle']:
@@ -134,13 +139,25 @@ for token in [
 for forbidden in ['AndroidHumanExportService', '.readText(']:
     assert forbidden not in unified, forbidden
 
+# PR6 keeps Working Data + conversation management compact and exposes the
+# existing durable queue/profile controls without creating another scheduler.
 for token in [
-    'Working Data & Conversations', 'All Conversations', 'Search conversation titles',
+    'Working Data & Conversations', 'Processing', 'All Conversations', 'Search conversation titles',
     'SEARCH', 'CLEAR', 'LOAD MORE', 'library.search(searchQuery, libraryLimit)',
-    'Read conversation', 'Export .dna', 'Export CLEAN.md', 'Export RAW.md',
+    'Handler(Looper.getMainLooper())', 'QUEUE_REFRESH_MS = 1_500L',
+    'AndroidDerivationScheduler.start(this)', 'AndroidDerivationScheduler.snapshot(this)',
+    'AndroidDerivationScheduler.getProfile(this)', 'AndroidDerivationScheduler.setProfile(this, profile)',
+    'AndroidProcessingProfile.entries', 'profileLabel(profile)',
+    'compactButton("CLEAN")', 'compactButton("RAW")', 'compactButton("MORE")',
+    'PopupMenu(this, anchor)', 'panel.setOnClickListener { openConversation(summary) }',
+    'Tap a conversation row to read it', 'archival/purge actions live under MORE',
 ]:
     assert token in ui, token
-conversation_loop = ui[ui.index('conversations.forEach'):ui.index('private fun preparePurge')]
+for token in ['SLOW(500L)', 'BALANCED(150L)', 'FAST(25L)', 'fun snapshot(context: Context)']:
+    assert token in queue, token
+for forbidden in ['actionButton("Read conversation")', 'actionButton("Export CLEAN.md")', 'actionButton("Export RAW.md")']:
+    assert forbidden not in ui, forbidden
+conversation_loop = ui[ui.index('conversations.forEach'):ui.index('private fun refreshQueueStatus')]
 assert 'human.describe' not in conversation_loop
 assert 'conversationWorkingBytes' not in conversation_loop
 assert 'summary.displayTitle' in conversation_loop
@@ -237,4 +254,4 @@ identity = '\n'.join(f'{p}\t{s}\t{n}\t{src}' for p, s, n, src in sorted(evidence
 archive_id = 'dna-conversation-v2-' + hashlib.sha256(identity.encode()).hexdigest()
 assert len(archive_id) == len('dna-conversation-v2-') + 64
 
-print('android SQLite RAW + derivative export, Working Data and guardrails smoke PASS')
+print('android compact queue UI + SQLite RAW/derivative Working Data guardrails smoke PASS')
