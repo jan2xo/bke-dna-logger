@@ -24,6 +24,10 @@ class AndroidLiveDerivationPipeline(context: Context) {
     ): Boolean {
         return try {
             Log.d(TAG, "BKE DNA derivation: started")
+            Log.d(
+                TAG,
+                "BKE DNA derivation: source_${sourceSha256.take(SOURCE_PREFIX_LENGTH)} bytes_$byteLength",
+            )
 
             onStage(STAGE_CLASSIFYING)
             ensureClassification(sourceSha256, byteLength, contentType)
@@ -181,6 +185,7 @@ class AndroidLiveDerivationPipeline(context: Context) {
 
         private const val TAG = "BkeDnaDerivation"
         private const val CANDIDATE_KIND = "conversation_payload_candidate"
+        private const val SOURCE_PREFIX_LENGTH = 8
         private const val MAX_CLASSIFICATION_BYTES = 16L * 1024 * 1024
     }
 }
