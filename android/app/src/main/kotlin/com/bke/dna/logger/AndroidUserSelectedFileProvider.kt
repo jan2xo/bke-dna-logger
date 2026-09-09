@@ -15,7 +15,7 @@ import java.util.UUID
  * Temporary content provider for user-initiated camera uploads.
  *
  * These files are browser upload plumbing, not DNA evidence. They live only in
- * app cache, are never passed to AndroidCaptureRuntime, and are opportunistically
+ * app cache, never enter the DNA capture runtime, and are opportunistically
  * removed after one day. Gallery/document selections are never copied here.
  */
 class AndroidUserSelectedFileProvider : ContentProvider() {
@@ -41,16 +41,16 @@ class AndroidUserSelectedFileProvider : ContentProvider() {
     ): Cursor {
         val file = resolveFile(uri)
         val columns = projection ?: arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)
+        val row = arrayOfNulls<Any>(columns.size)
+        columns.forEachIndexed { index, column ->
+            row[index] = when (column) {
+                OpenableColumns.DISPLAY_NAME -> file.name
+                OpenableColumns.SIZE -> file.length()
+                else -> null
+            }
+        }
         return MatrixCursor(columns, 1).apply {
-            addRow(
-                columns.map { column ->
-                    when (column) {
-                        OpenableColumns.DISPLAY_NAME -> file.name
-                        OpenableColumns.SIZE -> file.length()
-                        else -> null
-                    }
-                }.toTypedArray(),
-            )
+            addRow(row)
         }
     }
 
