@@ -14,10 +14,50 @@ import java.io.File
  * Raw files and logical conversation JSON remain evidence/derivative files on
  * disk; SQLite exists for fast library/index queries and never replaces `.dna`
  * durability verification.
+ *
+ * Every public AndroidCaptureIndex is a lightweight lease over one process-wide
+ * SQLiteOpenHelper owner for bke-dna-live.db. That keeps capture ingress, RAW,
+ * derivatives, queueing, and aggregation on one SQLite connection pool while
+ * retaining the existing AndroidCaptureIndex(context) API at call sites.
  */
-class AndroidCaptureIndex(context: Context) :
-    SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
+class AndroidCaptureIndex private constructor(
+    context: Context,
+    private val ownsSharedDatabase: Boolean,
+) : SQLiteOpenHelper(context.applicationContext, DATABASE_NAME, null, DATABASE_VERSION) {
     private val appContext = context.applicationContext
+    private var closed = false
+    private val sharedOwner: AndroidCaptureIndex? =
+        if (ownsSharedDatabase) null else SharedDatabasePool.acquire(appContext)
+
+    constructor(context: Context) : this(context.applicationContext, false)
+
+    override fun getWritableDatabase(): SQLiteDatabase {
+        check(!closed) { "AndroidCaptureIndex is closed" }
+        return if (ownsSharedDatabase) {
+            super.getWritableDatabase()
+        } else {
+            checkNotNull(sharedOwner).writableDatabase
+        }
+    }
+
+    override fun getReadableDatabase(): SQLiteDatabase {
+        check(!closed) { "AndroidCaptureIndex is closed" }
+        return if (ownsSharedDatabase) {
+            super.getReadableDatabase()
+        } else {
+            checkNotNull(sharedOwner).readableDatabase
+        }
+    }
+
+    override fun close() {
+        if (closed) return
+        closed = true
+        if (ownsSharedDatabase) {
+            super.close()
+        } else {
+            SharedDatabasePool.release(checkNotNull(sharedOwner))
+        }
+    }
 
     override fun onCreate(db: SQLiteDatabase) {
         createCaptureSchema(db)
@@ -486,6 +526,53 @@ class AndroidCaptureIndex(context: Context) :
         const val DATABASE_NAME = "bke-dna-live.db"
         private const val DATABASE_VERSION = 4
         private const val DISPLAY_TITLE_LIMIT = 120
+
+        /**
+         * Storage-mutation guardrail. Call only after capture ingress is closed
+         * and background derivation is idle. A non-zero lease count means some
+         * live component still owns Working Data and mutation must fail closed.
+         */
+        fun closeSharedDatabaseForStorageMutation() {
+            SharedDatabasePool.closeForStorageMutation()
+        }
+
+        private object SharedDatabasePool {
+            private val lock = Any()
+            private var owner: AndroidCaptureIndex? = null
+            private var leases = 0
+
+            fun acquire(context: Context): AndroidCaptureIndex = synchronized(lock) {
+                val active = owner ?: AndroidCaptureIndex(
+                    context.applicationContext,
+                    ownsSharedDatabase = true,
+                ).also { owner = it }
+                leases += 1
+                active
+            }
+
+            fun release(releasedOwner: AndroidCaptureIndex) {
+                synchronized(lock) {
+                    check(leases > 0) { "Android live SQLite lease underflow" }
+                    check(owner === releasedOwner) { "Android live SQLite owner changed while leased" }
+                    leases -= 1
+                    if (leases == 0) {
+                        owner = null
+                        releasedOwner.close()
+                    }
+                }
+            }
+
+            fun closeForStorageMutation() {
+                synchronized(lock) {
+                    check(leases == 0) {
+                        "Cannot mutate Working Data while $leases live SQLite lease(s) remain"
+                    }
+                    val active = owner ?: return
+                    owner = null
+                    active.close()
+                }
+            }
+        }
     }
 }
 
