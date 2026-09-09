@@ -12,6 +12,8 @@ store = (kotlin / "AndroidCaptureStore.kt").read_text(encoding="utf-8")
 queue = (kotlin / "AndroidDerivationQueue.kt").read_text(encoding="utf-8")
 raw_store = (kotlin / "AndroidRawEvidenceStore.kt").read_text(encoding="utf-8")
 raw_access = (kotlin / "AndroidRawSourceAccess.kt").read_text(encoding="utf-8")
+derivative_store = (kotlin / "AndroidDerivativeStore.kt").read_text(encoding="utf-8")
+derivative_access = (kotlin / "AndroidDerivativeSourceAccess.kt").read_text(encoding="utf-8")
 runtime = (kotlin / "AndroidCaptureRuntime.kt").read_text(encoding="utf-8")
 aggregation = (kotlin / "AndroidConversationAggregationEngine.kt").read_text(encoding="utf-8")
 contract = (kotlin / "DnaReconciliationContract.kt").read_text(encoding="utf-8")
@@ -25,19 +27,21 @@ for token in (
 ):
     assert token in classifier, token
 
-# generic-mapping-graph-v0 remains strict and independently implemented. PR4
-# changes only the RAW source backend, not graph semantics or parser limits.
+# generic-mapping-graph-v0 remains strict and independently implemented.
 for token in (
     'MAX_BODY_BYTES = 16L * 1024 * 1024', 'PARSER = "generic-mapping-graph-v0"',
     'COVERAGE_BASIS = "structural_graph_closure_only"',
     'AndroidRawSourceAccess.readAllBytes', 'JSONTokener(String(rawBytes, Charsets.UTF_8))',
+    'AndroidDerivativeSourceAccess.readClassification', 'AndroidDerivativeSourceAccess.readNormalized',
+    'store.putNormalizedJson(sourceSha256, normalized.toString(2))',
     'root.optJSONObject("mapping")', 'root.opt("conversation_id")', 'root.opt("current_node")',
     'message.opt("create_time")', 'message.opt("id")', 'message.optJSONObject("author")',
     'content.optJSONArray("parts")', '"parentNativeId"', '"childNativeIds"',
     '"BKE DNA normalization: normalization_skip_no_root_mapping"',
 ):
     assert token in graph_normalizer, token
-assert 'bodiesDirectory' not in graph_normalizer
+for forbidden in ('bodiesDirectory', 'classificationsDirectory', 'normalizedDirectory', 'writeDerivativeAtomically'):
+    assert forbidden not in graph_normalizer, forbidden
 
 # Runtime-observed messages array diagnostics remain fixed.
 for token in (
@@ -52,6 +56,8 @@ for token in (
 for token in (
     'PARSER = "messages-array-v0"', 'COVERAGE_BASIS = "messages_array_no_graph_edges"',
     'AndroidRawSourceAccess.readAllBytes', 'JSONTokener(String(rawBytes, Charsets.UTF_8))',
+    'AndroidDerivativeSourceAccess.readClassification', 'AndroidDerivativeSourceAccess.readNormalized',
+    'store.putNormalizedJson(sourceSha256, normalized.toString(2))',
     'root.optJSONArray("messages")', 'root.opt("conversation_id")', 'root.opt("current_node")',
     'message.opt("id")', 'message.optJSONObject("author")', 'message.opt("create_time")',
     'message.opt("content")', 'content.optJSONArray("parts")',
@@ -62,7 +68,10 @@ for token in (
     '"BKE DNA normalization: messages_array_normalization_complete"',
 ):
     assert token in messages_normalizer, token
-for forbidden in ('optJSONObject("mapping")', 'message.opt("parent")', 'message.optJSONArray("children")', 'bodiesDirectory'):
+for forbidden in (
+    'optJSONObject("mapping")', 'message.opt("parent")', 'message.optJSONArray("children")',
+    'bodiesDirectory', 'classificationsDirectory', 'normalizedDirectory', 'writeDerivativeAtomically',
+):
     assert forbidden not in messages_normalizer, forbidden
 
 # Representation dispatcher remains explicit and reads the same bounded RAW
@@ -88,9 +97,8 @@ for source in (graph_normalizer, messages_normalizer, dispatcher):
     ):
         assert forbidden not in source, forbidden
 
-# Exact RAW is now consolidated into Working Data SQLite as independent 256 KiB
-# compressed chunks. Import is not committed until SQLite reconstruction has
-# passed byte-length + SHA verification.
+# Exact RAW remains consolidated into Working Data SQLite as independently
+# compressed chunks with round-trip verification before commit.
 for token in (
     'CREATE TABLE IF NOT EXISTS raw_source (',
     'CREATE TABLE IF NOT EXISTS raw_source_chunk (',
@@ -103,8 +111,8 @@ for token in (
     assert token in raw_store, token
 assert raw_store.index('verifySource(sourceSha256, expectedByteLength)') < raw_store.index('database.setTransactionSuccessful()', raw_store.index('verifySource(sourceSha256, expectedByteLength)'))
 
-# Storage consumers resolve by source SHA. SQLite is preferred; legacy shared
-# bodies are only a fallback for pre-PR4 read-only generations.
+# RAW consumers resolve by source SHA. SQLite is preferred; legacy shared bodies
+# are only a fallback for pre-PR4 read-only generations.
 for token in (
     'object AndroidRawSourceAccess',
     'AndroidRawEvidenceStore(appContext)',
@@ -115,13 +123,41 @@ for token in (
 ):
     assert token in raw_access, token
 
-# Live derivative semantics remain ordered and bounded, but the classifier now
-# consumes RAW by source SHA after RAW_INGEST verification.
+# PR5 collapses classification + normalized JSON into the same Working Data
+# SQLite. Exact serialized derivative payloads have integrity metadata and are
+# immutable per source SHA; conflicting rewrites fail closed.
+for token in (
+    'CREATE TABLE IF NOT EXISTS derivative_classification (',
+    'CREATE TABLE IF NOT EXISTS derivative_normalized (',
+    'payload_json TEXT NOT NULL', 'payload_sha256 TEXT NOT NULL', 'byte_length INTEGER NOT NULL',
+    'fun putClassificationJson(', 'fun putNormalizedJson(',
+    '"Conflicting immutable derivative for source',
+    '"Derivative SQLite round-trip mismatch"',
+    'database.setTransactionSuccessful()',
+):
+    assert token in derivative_store, token
+
+# Derivative reads are SQLite-first, federated across Latest + saved Working
+# Data, and retain only a legacy loose-file fallback for pre-PR5 generations.
+for token in (
+    'object AndroidDerivativeSourceAccess',
+    'AndroidWorkingDataManager(appContext).listWorkingData()',
+    'AndroidDerivativeStore(generation)',
+    'store.classificationJson(sourceSha256)', 'store.normalizedJson(sourceSha256)',
+    'store.listNormalizedSourceSha256s()',
+    'File(captureRoot, "$directoryName/$sourceSha256.json")',
+):
+    assert token in derivative_access, token
+
+# Live derivative semantics remain ordered and bounded. New classifications are
+# written/read through SQLite and no classification directory is created.
 for token in (
     'MAX_CLASSIFICATION_BYTES = 16L * 1024 * 1024',
     'CANDIDATE_KIND = "conversation_payload_candidate"',
     'AndroidRawSourceAccess.readAllBytes',
     'AndroidConversationPayloadClassifier.classify',
+    'AndroidDerivativeSourceAccess.readClassification(appContext, sourceSha256)',
+    'store.putClassificationJson(sourceSha256, envelope.toString(2))',
     'AndroidConversationNormalizationDispatcher(appContext)',
     'engine.aggregateConversation(normalized.conversationNativeId)',
     'classification_size_limit', 'classifier_error',
@@ -139,7 +175,8 @@ for token in (
     'const val STAGE_RECONCILING = "RECONCILING"',
 ):
     assert token in pipeline, token
-assert 'bodyFile.readBytes()' not in pipeline
+for forbidden in ('bodyFile.readBytes()', 'classificationsDirectory', 'writeDerivativeAtomically', 'FileOutputStream'):
+    assert forbidden not in pipeline, forbidden
 assert pipeline.index('ensureClassification(') < pipeline.index('readClassificationOutcome(sourceSha256)')
 assert pipeline.index('readClassificationOutcome(sourceSha256)') < pipeline.index('normalizer.normalizeCandidate(sourceSha256)')
 assert pipeline.index('normalizer.normalizeCandidate(sourceSha256)') < pipeline.index('engine.aggregateConversation(normalized.conversationNativeId)')
@@ -162,9 +199,8 @@ assert 'DERIVATION_EXECUTOR' not in store
 assert 'AndroidLiveDerivationPipeline(appContext).processCompletedCapture(' not in store
 assert store.index('index.record(') < store.index('AndroidDerivationScheduler.enqueue(')
 
-# Durable queue lives in the same Working Data SQLite, recovers interrupted
-# PROCESSING rows and surviving staging files, and performs RAW_INGEST before
-# semantic stages. Staging deletion is after verified SQLite import.
+# Durable queue remains RAW_INGEST -> semantic stages; staging deletion follows
+# verified SQLite RAW import.
 for token in (
     'CREATE TABLE IF NOT EXISTS derivation_queue',
     'source_sha256 TEXT PRIMARY KEY',
@@ -186,16 +222,17 @@ assert 'newCachedThreadPool' not in queue
 assert queue.index('rawStore.importVerified(') < queue.index('stagedRaw.delete()')
 assert queue.index('stagedRaw.delete()') < queue.index('AndroidLiveDerivationPipeline(context).processCompletedCapture(')
 
-# Runtime startup performs queue recovery; storage mutation drains semantic work
-# without destroying the Gecko session.
 for token in (
     'AndroidDerivationScheduler.start(appContext)',
     'AndroidCaptureStore.awaitBackgroundDerivationIdle(appContext)',
 ):
     assert token in runtime, token
 
-# Reconciliation must not reinterpret graphless messages as a complete graph.
+# Reconciliation consumes federated normalized derivatives rather than the
+# permanent normalized directory and preserves graphless messages semantics.
 for token in (
+    'AndroidDerivativeSourceAccess.listNormalizedSourceSha256s(appContext)',
+    'AndroidDerivativeSourceAccess.readNormalized(appContext, sourceSha256)',
     'GRAPH_COVERAGE_BASIS = "structural_graph_closure_only"',
     'LOGICAL_GRAPH_COVERAGE_BASIS = "multi_snapshot_structural_union"',
     'MESSAGES_COVERAGE_BASIS = "messages_array_no_graph_edges"',
@@ -205,16 +242,15 @@ for token in (
     'parentChainComplete = false',
 ):
     assert token in aggregation, token
+assert 'normalizedDirectory' not in aggregation
 assert 'fun aggregateConversation(conversationNativeId: String)' in aggregation
 assert 'aggregateConversationState(conversationNativeId, snapshots)' in aggregation
 
-# Owner-controlled export/storage semantics remain untouched in this PR.
 assert 'AUTOMATIC_DNA_EXPORT = false' in contract
 assert 'AUTOMATIC_MARKDOWN_EXPORT = false' in contract
 assert 'MERGE_SQLITE_ACROSS_DEVICES = false' in contract
 assert 'STORAGE_WARNING_BYTES = 1_073_741_824L' in contract
 
-# Fixtures pin identity/graphlessness expectations.
 mapping_fixture = {
     "conversation_id": "conv-live-1",
     "current_node": "node-assistant",
@@ -249,4 +285,4 @@ assert messages_fixture["messages"][1]["id"] == messages_fixture["current_node"]
 assert "parent" not in messages_fixture["messages"][0]
 assert "children" not in messages_fixture["messages"][0]
 
-print("android SQLite RAW ingest + durable breathing derivation smoke PASS")
+print("android SQLite RAW + derivative collapse derivation smoke PASS")
