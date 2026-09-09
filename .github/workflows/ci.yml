@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - 'feat/**'
+      - 'release/**'
   pull_request:
 
 jobs:
@@ -53,6 +54,8 @@ jobs:
         run: python3 tests/android-native-ingress-smoke.py
       - name: Android APK size audit self-test
         run: python3 tests/android-apk-size-audit.py --self-test
+      - name: Android production release signing contract smoke
+        run: python3 tests/android-release-signing-smoke.py
 
   android:
     runs-on: ubuntu-latest
@@ -68,10 +71,39 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.0'
-      - name: Build Kotlin Android APK with stable GeckoView
-        run: gradle -p android :app:assembleDebug --stacktrace
-      - name: Audit Android APK size composition
-        run: python3 tests/android-apk-size-audit.py android/app/build/outputs/apk/debug/app-debug.apk --json-out android/app/build/reports/apk-size.json
+      - name: Prepare CI-only release signing identity
+        run: |
+          KEYSTORE_PATH="${RUNNER_TEMP}/bke-dna-ci-release.jks"
+          keytool -genkeypair \
+            -keystore "${KEYSTORE_PATH}" \
+            -storetype JKS \
+            -storepass ci-store-password \
+            -keypass ci-key-password \
+            -alias ci-release \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 1 \
+            -dname "CN=BKE DNA Logger CI,O=BKE,C=PH"
+          echo "BKE_ANDROID_RELEASE_KEYSTORE_PATH=${KEYSTORE_PATH}" >> "${GITHUB_ENV}"
+      - name: Build Kotlin Android release APK with stable GeckoView
+        env:
+          BKE_ANDROID_RELEASE_STORE_PASSWORD: ci-store-password
+          BKE_ANDROID_RELEASE_KEY_ALIAS: ci-release
+          BKE_ANDROID_RELEASE_KEY_PASSWORD: ci-key-password
+        run: gradle -p android :app:assembleRelease --stacktrace
+      - name: Verify CI release APK signature
+        run: |
+          "${ANDROID_HOME}/build-tools/36.0.0/apksigner" verify \
+            --verbose \
+            --print-certs \
+            android/app/build/outputs/apk/release/app-release.apk | tee android/app/build/reports/ci-release-signing.txt
+          grep -Fq 'Signer #1 certificate DN: CN=BKE DNA Logger CI, O=BKE, C=PH' android/app/build/reports/ci-release-signing.txt
+          if grep -Fq 'CN=Android Debug' android/app/build/reports/ci-release-signing.txt; then
+            echo "CI release APK unexpectedly used the Android debug certificate." >&2
+            exit 1
+          fi
+      - name: Audit Android release APK size composition
+        run: python3 tests/android-apk-size-audit.py android/app/build/outputs/apk/release/app-release.apk --json-out android/app/build/reports/apk-size.json
       - name: Cross-device DNA reconciliation contract smoke
         run: python3 tests/cross-device-reconciliation-smoke.py
       - name: Android DNA reconciliation import smoke
@@ -88,3 +120,5 @@ jobs:
         run: python3 tests/android-geckoview-runtime-smoke.py
       - name: Android native ingress smoke
         run: python3 tests/android-native-ingress-smoke.py
+      - name: Android production release signing contract smoke
+        run: python3 tests/android-release-signing-smoke.py

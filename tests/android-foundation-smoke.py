@@ -123,7 +123,7 @@ for forbidden in ("dotnet workload install android", "BKE.Dna.Logger.GeckoView.B
         raise SystemExit(f"CI still contains retired managed Android path {forbidden!r}")
 for required in (
     'sdkmanager "platforms;android-37.1" "build-tools;36.0.0"',
-    "gradle-version: '9.5.0'", "gradle -p android :app:assembleDebug",
+    "gradle-version: '9.5.0'", "gradle -p android :app:assembleRelease",
 ):
     if required not in ci:
         raise SystemExit(f"CI is missing Kotlin Android build gate {required!r}")
