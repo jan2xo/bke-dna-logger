@@ -13,8 +13,8 @@ import java.time.Instant
 
 /** Native Kotlin parity for the desktop generic mapping-graph normalizer. */
 class AndroidGraphNormalizationEngine(context: android.content.Context) {
-    private val captureRoot = AndroidDnaPaths.capturesRoot(context.applicationContext)
-    private val bodiesDirectory = File(captureRoot, "bodies")
+    private val appContext = context.applicationContext
+    private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
     private val classificationsDirectory = File(captureRoot, "classifications")
     private val normalizedDirectory = File(captureRoot, "normalized").also {
         check(it.exists() || it.mkdirs()) { "Unable to create Android normalized directory" }
@@ -39,18 +39,19 @@ class AndroidGraphNormalizationEngine(context: android.content.Context) {
             return existing
         }
 
-        val bodyPath = File(bodiesDirectory, "$sourceSha256.body")
-        if (!bodyPath.isFile) {
-            Log.d(TAG, "BKE DNA normalization: normalization_skip_body_missing")
+        val rawBytes = try {
+            AndroidRawSourceAccess.readAllBytes(appContext, sourceSha256, MAX_BODY_BYTES)
+        } catch (_: IllegalArgumentException) {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_body_oversize")
             return null
         }
-        if (bodyPath.length() > MAX_BODY_BYTES) {
-            Log.d(TAG, "BKE DNA normalization: normalization_skip_body_oversize")
+        if (rawBytes == null) {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_body_missing")
             return null
         }
 
         val rootValue = try {
-            val tokener = JSONTokener(bodyPath.readText(Charsets.UTF_8))
+            val tokener = JSONTokener(String(rawBytes, Charsets.UTF_8))
             val value = tokener.nextValue()
             if (tokener.nextClean() != '\u0000') {
                 Log.d(TAG, "BKE DNA normalization: normalization_skip_invalid_json")
