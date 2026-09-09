@@ -17,6 +17,7 @@ object AndroidCaptureRuntime {
 
     fun start(context: Context) {
         val appContext = context.applicationContext
+        AndroidNormalizationRecovery.rearmOnce(appContext)
         AndroidDerivationScheduler.start(appContext)
         synchronized(lock) {
             if (pauseDepth == 0 && ingress == null) {
