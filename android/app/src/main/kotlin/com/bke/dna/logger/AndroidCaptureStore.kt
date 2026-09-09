@@ -11,15 +11,15 @@ import java.util.UUID
 
 /**
  * Android counterpart of the desktop CaptureStore.
- * Streams into app-private partial files, hashes raw bytes, deduplicates bodies,
- * persists immutable observations, projects the observation into SQLite, then
- * enqueues classification/normalization/reconciliation in the durable Working
- * Data processing queue.
+ * Streams into app-private partial files, hashes raw bytes, promotes completed
+ * captures only into durable temporary RAW staging, persists immutable
+ * observations + the SQLite capture projection, then enqueues RAW ingestion and
+ * semantic derivation in the durable Working Data queue.
  */
 class AndroidCaptureStore(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val root = AndroidDnaPaths.capturesRoot(appContext)
-    private val bodies = File(root, "bodies").also { it.mkdirs() }
+    private val staging = File(root, "staging").also { it.mkdirs() }
     private val observations = File(root, "observations").also { it.mkdirs() }
     private val partial = File(root, "partial").also { it.mkdirs() }
     private val sessions = mutableMapOf<String, Session>()
@@ -88,12 +88,18 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
             "Capture '$captureId' declared $finalDeclaredLength bytes but received ${result.byteLength}"
         }
 
-        val bodyName = "${result.sha256}.body"
-        val body = File(bodies, bodyName)
-        if (body.exists()) {
-            result.partial.delete()
+        // Completion is represented by a SHA-addressed staging file. It remains
+        // durable across process death until RAW_INGEST has verified exact bytes
+        // from SQLite. No compression happens on this Gecko ACK path.
+        val stagingName = "${result.sha256}.raw"
+        val stagedRaw = File(staging, stagingName)
+        if (stagedRaw.exists()) {
+            require(stagedRaw.length() == result.byteLength) {
+                "Existing RAW staging source length does not match capture"
+            }
+            check(result.partial.delete()) { "Unable to discard duplicate RAW staging capture" }
         } else {
-            check(result.partial.renameTo(body)) { "Unable to promote completed raw capture" }
+            check(result.partial.renameTo(stagedRaw)) { "Unable to promote completed RAW staging capture" }
         }
 
         val storedAt = Instant.now().toString()
@@ -101,7 +107,7 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
             .put("capture", session.start)
             .put("sha256", result.sha256)
             .put("byteLength", result.byteLength)
-            .put("bodyPath", "bodies/$bodyName")
+            .put("bodyPath", "staging/$stagingName")
             .put("storedAt", storedAt)
         File(observations, "$captureId.json").writeText(observation.toString(2))
 
@@ -110,7 +116,7 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
                 captureId = captureId,
                 sha256 = result.sha256,
                 byteLength = result.byteLength,
-                bodyPath = "bodies/$bodyName",
+                bodyPath = "staging/$stagingName",
                 pageUrl = session.start.optNullableString("pageUrl"),
                 requestUrl = session.start.optNullableString("requestUrl"),
                 method = session.start.optNullableString("method"),
@@ -123,12 +129,12 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
             ),
         )
 
-        // Raw bytes + immutable observation + live capture index are durable now.
-        // Queue semantic work in SQLite and ACK Gecko without running the heavy
-        // parser on the native-message path.
+        // Staging + immutable observation + live capture index are durable now.
+        // Queue RAW_INGEST first; the breathing scheduler owns compression,
+        // round-trip verification, staging cleanup and later semantic stages.
         AndroidDerivationScheduler.enqueue(
             context = appContext,
-            bodyFile = body,
+            bodyFile = stagedRaw,
             sourceSha256 = result.sha256,
             byteLength = result.byteLength,
             contentType = session.start.optNullableString("contentType"),

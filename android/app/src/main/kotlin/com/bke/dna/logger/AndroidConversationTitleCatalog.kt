@@ -15,13 +15,15 @@ import java.nio.file.StandardCopyOption
  * Shared derived title index above Working Data generations.
  *
  * Saved SQLite generations remain immutable. Titles are recovered from the
- * immutable raw conversation payload belonging to each normalized source and
- * keyed by conversationNativeId. No user-message title synthesis is allowed.
+ * exact RAW conversation payload belonging to each normalized source and keyed
+ * by conversationNativeId. New generations read RAW from SQLite; pre-PR4
+ * generations can still fall back to shared SHA-addressed bodies. No
+ * user-message title synthesis is allowed.
  */
 class AndroidConversationTitleCatalog(context: Context) {
-    private val captureRoot = AndroidDnaPaths.capturesRoot(context.applicationContext)
+    private val appContext = context.applicationContext
+    private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
     private val normalizedDirectory = File(captureRoot, "normalized")
-    private val bodiesDirectory = File(captureRoot, "bodies")
     private val catalogFile = File(captureRoot, CATALOG_FILE_NAME)
 
     @Volatile private var cached: CatalogState? = null
@@ -29,6 +31,7 @@ class AndroidConversationTitleCatalog(context: Context) {
     @Synchronized
     fun refreshFromEvidence() {
         val state = readCatalog()
+        val generations = AndroidWorkingDataManager(appContext).listWorkingData()
         var changed = false
 
         normalizedDirectory.listFiles().orEmpty()
@@ -46,14 +49,13 @@ class AndroidConversationTitleCatalog(context: Context) {
                 val observedAt = normalized.optString("normalizedAt").trim()
 
                 val normalizedTitle = normalized.optNullableTitle("displayTitle")
-                val rawBody = File(bodiesDirectory, "$sourceSha256.body")
-                val rawTitle = if (normalizedTitle == null && rawBody.isFile) {
-                    readCapturedTitle(rawBody)
+                val rawTitleResult = if (normalizedTitle == null) {
+                    readCapturedTitle(sourceSha256, generations)
                 } else {
-                    null
+                    RawTitleResult(null, inspected = false)
                 }
 
-                val title = normalizedTitle ?: rawTitle
+                val title = normalizedTitle ?: rawTitleResult.title
                 if (title != null) {
                     val previous = state.titles[conversationNativeId]
                     if (previous == null || observedAt >= previous.observedAt) {
@@ -65,9 +67,11 @@ class AndroidConversationTitleCatalog(context: Context) {
                     }
                 }
 
-                // Raw evidence is persisted before normalization. If it exists,
-                // this source has been completely inspected for the current catalog format.
-                if (normalizedTitle != null || rawBody.isFile) {
+                // RAW is persisted before normalization. Once a source can be
+                // resolved from any Working Data generation (or a normalized
+                // title already exists), the source is completely inspected for
+                // this catalog format and does not need repeated full reads.
+                if (normalizedTitle != null || rawTitleResult.inspected) {
                     state.indexedSources += sourceSha256
                     changed = true
                 }
@@ -97,13 +101,42 @@ class AndroidConversationTitleCatalog(context: Context) {
         cached ?: readCatalog().also { cached = it }
     }
 
-    private fun readCapturedTitle(bodyPath: File): String? {
-        if (bodyPath.length() > MAX_BODY_BYTES) return null
+    private fun readCapturedTitle(
+        sourceSha256: String,
+        generations: List<AndroidWorkingDataGeneration>,
+    ): RawTitleResult {
+        var bytes: ByteArray? = null
+        var inspected = false
+        for (generation in generations) {
+            val source = runCatching {
+                AndroidRawSourceAccess.readAllBytes(
+                    generation = generation,
+                    captureRoot = captureRoot,
+                    sourceSha256 = sourceSha256,
+                    maxBytes = MAX_BODY_BYTES,
+                )
+            }
+            if (source.isSuccess) {
+                val resolved = source.getOrNull()
+                if (resolved != null) {
+                    bytes = resolved
+                    inspected = true
+                    break
+                }
+            } else if (source.exceptionOrNull() is IllegalArgumentException) {
+                // A resolved source that exceeds the bounded title parser has
+                // still been inspected for this catalog format.
+                inspected = true
+                break
+            }
+        }
+        if (bytes == null) return RawTitleResult(null, inspected)
+
         val root = runCatching {
-            val tokener = JSONTokener(bodyPath.readText(Charsets.UTF_8))
+            val tokener = JSONTokener(String(bytes, Charsets.UTF_8))
             val value = tokener.nextValue()
             if (tokener.nextClean() != '\u0000') null else value as? JSONObject
-        }.getOrNull() ?: return null
+        }.getOrNull() ?: return RawTitleResult(null, inspected = true)
 
         if (root.has("title")) {
             Log.d(TAG, "BKE DNA title: candidate_root_title")
@@ -112,7 +145,10 @@ class AndroidConversationTitleCatalog(context: Context) {
         if (titleValue is String) {
             Log.d(TAG, "BKE DNA title: candidate_title_string")
         }
-        return (titleValue as? String)?.trim()?.takeIf { it.isNotBlank() }
+        return RawTitleResult(
+            title = (titleValue as? String)?.trim()?.takeIf { it.isNotBlank() },
+            inspected = true,
+        )
     }
 
     private fun readCatalog(): CatalogState {
@@ -181,6 +217,11 @@ class AndroidConversationTitleCatalog(context: Context) {
             if (temp.exists()) temp.delete()
         }
     }
+
+    private data class RawTitleResult(
+        val title: String?,
+        val inspected: Boolean,
+    )
 
     private data class CatalogState(
         val indexedSources: MutableSet<String> = linkedSetOf(),

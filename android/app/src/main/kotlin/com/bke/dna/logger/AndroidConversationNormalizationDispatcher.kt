@@ -7,11 +7,11 @@ import java.io.File
 
 /** Selects a representation-specific normalizer without weakening either parser. */
 class AndroidConversationNormalizationDispatcher(context: android.content.Context) {
-    private val captureRoot = AndroidDnaPaths.capturesRoot(context.applicationContext)
-    private val bodiesDirectory = File(captureRoot, "bodies")
+    private val appContext = context.applicationContext
+    private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
     private val classificationsDirectory = File(captureRoot, "classifications")
-    private val graphNormalizer = AndroidGraphNormalizationEngine(context.applicationContext)
-    private val messagesNormalizer = AndroidMessagesNormalizationEngine(context.applicationContext)
+    private val graphNormalizer = AndroidGraphNormalizationEngine(appContext)
+    private val messagesNormalizer = AndroidMessagesNormalizationEngine(appContext)
 
     fun normalizeCandidate(sourceSha256: String): AndroidNormalizationResult? {
         require(SHA256.matches(sourceSha256)) { "Expected lowercase SHA-256 source identity" }
@@ -23,18 +23,19 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
         }.getOrNull() ?: return null
         if (classification.optString("kind") != CANDIDATE_KIND) return null
 
-        val bodyPath = File(bodiesDirectory, "$sourceSha256.body")
-        if (!bodyPath.isFile) {
-            Log.d(TAG, "BKE DNA normalization: normalization_skip_body_missing")
+        val rawBytes = try {
+            AndroidRawSourceAccess.readAllBytes(appContext, sourceSha256, MAX_BODY_BYTES)
+        } catch (_: IllegalArgumentException) {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_body_oversize")
             return null
         }
-        if (bodyPath.length() > MAX_BODY_BYTES) {
-            Log.d(TAG, "BKE DNA normalization: normalization_skip_body_oversize")
+        if (rawBytes == null) {
+            Log.d(TAG, "BKE DNA normalization: normalization_skip_body_missing")
             return null
         }
 
         val root = try {
-            val tokener = JSONTokener(bodyPath.readText(Charsets.UTF_8))
+            val tokener = JSONTokener(String(rawBytes, Charsets.UTF_8))
             val value = tokener.nextValue()
             if (tokener.nextClean() != '\u0000' || value !is JSONObject) {
                 Log.d(TAG, "BKE DNA normalization: normalization_skip_unsupported_representation")

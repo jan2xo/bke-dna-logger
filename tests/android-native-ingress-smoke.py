@@ -8,6 +8,7 @@ ingress = (kotlin / "AndroidWireIngress.kt").read_text(encoding="utf-8")
 runtime = (kotlin / "AndroidCaptureRuntime.kt").read_text(encoding="utf-8")
 store = (kotlin / "AndroidCaptureStore.kt").read_text(encoding="utf-8")
 queue = (kotlin / "AndroidDerivationQueue.kt").read_text(encoding="utf-8")
+raw_store = (kotlin / "AndroidRawEvidenceStore.kt").read_text(encoding="utf-8")
 index = (kotlin / "AndroidCaptureIndex.kt").read_text(encoding="utf-8")
 host = (kotlin / "GeckoViewHost.kt").read_text(encoding="utf-8")
 bridge = (repo / "android" / "app" / "src" / "main" / "assets" / "dna-extension" / "bridge.js").read_text(encoding="utf-8")
@@ -36,25 +37,35 @@ for token in (
 ):
     assert token in runtime, token
 
+# Native ingress still fsyncs exact bytes before ACK, but completed sources now
+# promote only to durable staging. Permanent RAW ownership moves to SQLite in
+# the breathing queue, not on the Gecko capture path.
 for token in (
     'MessageDigest.getInstance("SHA-256")',
     "output.fd.sync()",
     "expected sequence",
     "declaredLength: Long?",
     "finalDeclaredLength",
-    "bodies/$bodyName",
+    'File(root, "staging")',
+    'val stagingName = "${result.sha256}.raw"',
+    'result.partial.renameTo(stagedRaw)',
+    '"staging/$stagingName"',
     "observations",
     "AndroidDerivationScheduler.enqueue(",
     "awaitBackgroundDerivationIdle(context: Context)",
     "insertOrThrow",
 ):
     assert token in store + index, token
+assert 'File(root, "bodies")' not in store
 assert "DERIVATION_EXECUTOR" not in store
 assert store.index("index.record(") < store.index("AndroidDerivationScheduler.enqueue(")
 
 for token in (
     "CREATE TABLE IF NOT EXISTS derivation_queue",
     "recoverInterrupted()",
+    "recoverStagedRaw(appContext)",
+    'STAGE_RAW_INGEST = "RAW_INGEST"',
+    "rawStore.importVerified(",
     "Executors.newSingleThreadExecutor",
     "waitForCaptureQuiet()",
     "SLOW(500L)",
@@ -62,6 +73,15 @@ for token in (
     "FAST(25L)",
 ):
     assert token in queue, token
+assert queue.index("rawStore.importVerified(") < queue.index("stagedRaw.delete()")
+
+for token in (
+    "CREATE TABLE IF NOT EXISTS raw_source (",
+    "CREATE TABLE IF NOT EXISTS raw_source_chunk (",
+    "verifySource(sourceSha256, expectedByteLength)",
+    "database.setTransactionSuccessful()",
+):
+    assert token in raw_store, token
 
 assert 'dna_archived INTEGER NOT NULL DEFAULT 0' in index
 
@@ -100,4 +120,4 @@ for token in (
 for forbidden in ("Authorization", "Cookie", "requestHeaders", "responseHeaders"):
     assert forbidden not in bridge, forbidden
 
-print("android streamed native ingress/durable breathing queue smoke PASS")
+print("android streamed native ingress/SQLite RAW breathing queue smoke PASS")

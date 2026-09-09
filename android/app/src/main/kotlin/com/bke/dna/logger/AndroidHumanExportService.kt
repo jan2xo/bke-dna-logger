@@ -4,7 +4,9 @@ import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.OutputStream
 import java.math.BigDecimal
 import java.time.Instant
 import java.time.LocalDate
@@ -17,17 +19,20 @@ import java.time.ZoneOffset
  * text survives, labelled JAN and RIGHT-HAND. Tool calls/results, system or
  * developer messages, diagnostics and archaeology metadata are excluded.
  *
- * RAW is the unfiltered captured conversation source payload stream. SQLite is
- * the live/recovery projection and `.dna` remains the self-contained durable
- * evidence archive.
+ * RAW is the unfiltered captured conversation source payload stream. New
+ * Working Data generations resolve RAW from their SQLite; historical pre-PR4
+ * generations retain the legacy SHA-addressed .body fallback.
  */
 class AndroidHumanExportService(
     context: Context,
     conversationStateDirectory: File? = null,
+    private val generation: AndroidWorkingDataGeneration? = null,
 ) {
     private val appContext = context.applicationContext
     private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
-    private val stateDirectory = conversationStateDirectory ?: File(captureRoot, "conversations")
+    private val stateDirectory = conversationStateDirectory
+        ?: generation?.conversationStateDirectory
+        ?: File(captureRoot, "conversations")
 
     fun describe(conversationKey: String): AndroidConversationExportDescriptor {
         val state = readState(conversationKey)
@@ -36,7 +41,13 @@ class AndroidHumanExportService(
 
         val title = sourceShas.asReversed().firstNotNullOfOrNull { source ->
             runCatching {
-                JSONObject(File(captureRoot, "bodies/$source.body").readText())
+                val bytes = AndroidRawSourceAccess.readAllBytes(
+                    resolvedGeneration(),
+                    captureRoot,
+                    source,
+                    MAX_TITLE_SOURCE_BYTES,
+                ) ?: return@runCatching null
+                JSONObject(String(bytes, Charsets.UTF_8))
                     .optString("title")
                     .trim()
                     .takeIf { it.isNotBlank() }
@@ -68,8 +79,9 @@ class AndroidHumanExportService(
     }
 
     /**
-     * Bytes attributable to this conversation in the shared working evidence.
-     * SQLite page allocation is shared and therefore deliberately excluded.
+     * Bytes attributable to this conversation outside shared SQLite allocation.
+     * SQLite page allocation, including SQLite-backed RAW, is deliberately not
+     * guessed at conversation granularity.
      */
     fun conversationWorkingBytes(conversationKey: String): Long {
         val state = readState(conversationKey)
@@ -78,9 +90,9 @@ class AndroidHumanExportService(
         files += statePath(conversationKey)
 
         sourceShas.forEach { source ->
-            files += File(captureRoot, "bodies/$source.body")
             files += File(captureRoot, "classifications/$source.json")
             files += File(captureRoot, "normalized/$source.json")
+            if (!hasSqliteRaw(source)) files += File(captureRoot, "bodies/$source.body")
         }
 
         for (directoryName in SOURCE_REFERENCING_DIRECTORIES) {
@@ -103,8 +115,12 @@ class AndroidHumanExportService(
     fun renderCleanMarkdown(conversationKey: String): String =
         renderCleanMarkdown(readState(conversationKey))
 
-    fun renderRawMarkdown(conversationKey: String): String =
-        renderRawMarkdown(readState(conversationKey), describe(conversationKey))
+    /** Explicit export helper; interactive reading must use the bounded pager. */
+    fun renderRawMarkdown(conversationKey: String): String {
+        val output = ByteArrayOutputStream()
+        renderRawToStream(readState(conversationKey), describe(conversationKey), output)
+        return output.toString(Charsets.UTF_8.name())
+    }
 
     fun exportCleanMarkdownToUri(
         conversationKey: String,
@@ -116,7 +132,17 @@ class AndroidHumanExportService(
         conversationKey: String,
         resolver: ContentResolver,
         destinationUri: Uri,
-    ) = exportMarkdown(destinationUri, resolver, renderRawMarkdown(conversationKey))
+    ) {
+        check(!DnaReconciliationContract.AUTOMATIC_MARKDOWN_EXPORT) {
+            "Markdown export must remain an explicit owner action"
+        }
+        val state = readState(conversationKey)
+        val descriptor = describe(conversationKey)
+        resolver.openOutputStream(destinationUri, "w")?.use { output ->
+            renderRawToStream(state, descriptor, output)
+            output.flush()
+        } ?: error("Unable to open owner-selected Markdown export destination")
+    }
 
     /** Backward-compatible alias: the former single Markdown export is CLEAN. */
     fun exportMarkdownToUri(
@@ -147,6 +173,18 @@ class AndroidHumanExportService(
         (0 until array.length()).map { array.getJSONObject(it).getString("sourceSha256") }.distinct()
     }
 
+    private fun resolvedGeneration(): AndroidWorkingDataGeneration {
+        generation?.let { return it }
+        val statePath = stateDirectory.absolutePath
+        return AndroidWorkingDataManager(appContext).listWorkingData()
+            .firstOrNull { it.conversationStateDirectory.absolutePath == statePath }
+            ?: AndroidWorkingDataManager(appContext).generation(AndroidWorkingDataManager.LATEST_ID)
+    }
+
+    private fun hasSqliteRaw(sourceSha256: String): Boolean = runCatching {
+        AndroidRawEvidenceStore(resolvedGeneration()).use { it.contains(sourceSha256) }
+    }.getOrDefault(false)
+
     private fun deriveTitleFromState(state: JSONObject): String? {
         for (node in orderedNodes(state)) {
             if (cleanSpeaker(node) != CLEAN_JAN) continue
@@ -157,11 +195,6 @@ class AndroidHumanExportService(
         return null
     }
 
-    /**
-     * CLEAN contract: exactly JAN / RIGHT-HAND conversational turns.
-     * No title, timestamp, IDs, tool summaries, system/developer content or
-     * forensic metadata are emitted here.
-     */
     private fun renderCleanMarkdown(state: JSONObject): String = buildString {
         var wroteTurn = false
         orderedNodes(state).forEach { node ->
@@ -178,19 +211,17 @@ class AndroidHumanExportService(
         }
     }.trimEnd() + "\n"
 
-    /**
-     * RAW contract: preserve every unfiltered raw conversation payload source
-     * represented by this logical conversation, plus its exact capture
-     * observation envelopes. No tool/system/content filtering is performed.
-     */
-    private fun renderRawMarkdown(
+    private fun renderRawToStream(
         state: JSONObject,
         descriptor: AndroidConversationExportDescriptor,
-    ): String = buildString {
-        appendLine("# ${descriptor.title} — RAW")
-        appendLine()
-        appendLine("Unfiltered captured conversation payloads. Nothing below is CLEAN-filtered.")
-        appendLine()
+        output: OutputStream,
+    ) {
+        fun writeText(value: String) {
+            output.write(value.toByteArray(Charsets.UTF_8))
+        }
+
+        writeText("# ${descriptor.title} — RAW\n\n")
+        writeText("Unfiltered captured conversation payloads. Nothing below is CLEAN-filtered.\n\n")
 
         val sources = state.getJSONArray("sources").let { array ->
             (0 until array.length()).map { array.getJSONObject(it) }
@@ -201,25 +232,25 @@ class AndroidHumanExportService(
 
         sources.forEachIndexed { index, source ->
             val sha = source.getString("sourceSha256")
-            appendLine("## SOURCE ${index + 1} — $sha")
-            appendLine()
-            appendLine("Observed at: ${source.optString("observedAt", "not exposed")}")
-            appendLine()
+            writeText("## SOURCE ${index + 1} — $sha\n\n")
+            writeText("Observed at: ${source.optString("observedAt", "not exposed")}\n\n")
 
             observationsForSource(sha).forEach { observation ->
-                appendLine("### CAPTURE OBSERVATION — ${observation.name}")
-                appendLine()
-                appendLine(observation.readText(Charsets.UTF_8))
-                appendLine()
+                writeText("### CAPTURE OBSERVATION — ${observation.name}\n\n")
+                observation.inputStream().use { it.copyTo(output, 128 * 1024) }
+                writeText("\n\n")
             }
 
-            val body = File(captureRoot, "bodies/$sha.body")
-            require(body.isFile) { "RAW source body '$sha' is missing" }
-            appendLine("### RAW BODY")
-            appendLine()
-            append(body.readText(Charsets.UTF_8))
-            if (!endsWith("\n")) appendLine()
-            appendLine()
+            writeText("### RAW BODY\n\n")
+            require(
+                AndroidRawSourceAccess.writeExactSource(
+                    generation = resolvedGeneration(),
+                    captureRoot = captureRoot,
+                    sourceSha256 = sha,
+                    output = output,
+                ),
+            ) { "RAW source body '$sha' is missing" }
+            writeText("\n\n")
         }
     }
 
@@ -294,6 +325,7 @@ class AndroidHumanExportService(
     companion object {
         const val CLEAN_JAN = "JAN"
         const val CLEAN_RIGHT_HAND = "RIGHT-HAND"
+        private const val MAX_TITLE_SOURCE_BYTES = 16L * 1024 * 1024
         private const val MAX_REFERENCE_SCAN_BYTES = 2L * 1024 * 1024
         private val SOURCE_REFERENCING_DIRECTORIES = listOf("observations", "witnesses", "reconciliations")
     }

@@ -14,16 +14,17 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Durable processing queue stored inside the active Working Data SQLite.
  *
- * Capture remains the priority lane. Semantic derivation is deliberately
- * serialized and yields between stages/jobs so GeckoView and the UI get time
- * to breathe. Queue rows survive process death and interrupted PROCESSING rows
- * are returned to WAITING when the runtime starts again.
+ * Capture remains the priority lane. RAW SQLite ingestion and semantic
+ * derivation are deliberately serialized and yield between stages/jobs so
+ * GeckoView and the UI get time to breathe. Queue rows and completed RAW
+ * staging files survive process death.
  */
 object AndroidDerivationScheduler {
     private const val TAG = "BkeDnaQueue"
     private const val PREFS = "bke-dna-processing"
     private const val PREF_PROFILE = "profile"
     private const val CAPTURE_QUIET_POLL_MS = 50L
+    private val STAGED_RAW_NAME = Regex("[0-9a-f]{64}\\.raw")
 
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "bke-dna-breathing-derivation").apply { isDaemon = true }
@@ -47,6 +48,10 @@ object AndroidDerivationScheduler {
                     store.ensureSchema()
                 }
             }
+            val staged = recoverStagedRaw(appContext)
+            if (staged > 0) {
+                Log.d(TAG, "BKE DNA queue: recovered_raw_staging")
+            }
         }
         kick(appContext)
     }
@@ -62,7 +67,10 @@ object AndroidDerivationScheduler {
         val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
         val relativePath = bodyFile.relativeTo(captureRoot).invariantSeparatorsPath
         AndroidDerivationQueueStore(appContext).use { store ->
-            store.enqueue(
+            // A recapture of a SHA that was already DONE still has a fresh
+            // durable staging file to verify/remove. Re-arm RAW_INGEST now
+            // instead of leaving that staging file orphaned until restart.
+            store.requeueForRawIngest(
                 AndroidDerivationJob(
                     sourceSha256 = sourceSha256,
                     bodyPath = relativePath,
@@ -102,16 +110,35 @@ object AndroidDerivationScheduler {
     fun snapshot(context: Context): AndroidDerivationQueueSnapshot =
         AndroidDerivationQueueStore(context.applicationContext).use { it.snapshot() }
 
-    /**
-     * Storage mutations call this after capture ingress is paused. The single
-     * executor barrier runs only after the current queue drain has finished.
-     */
     fun awaitIdle(context: Context) {
         val appContext = context.applicationContext
         start(appContext)
         val barrier = CountDownLatch(1)
         executor.execute { barrier.countDown() }
         barrier.await()
+    }
+
+    private fun recoverStagedRaw(context: Context): Int {
+        val captureRoot = AndroidDnaPaths.capturesRoot(context)
+        val stagingDirectory = File(captureRoot, "staging")
+        val stagedFiles = stagingDirectory.listFiles().orEmpty()
+            .filter { it.isFile && STAGED_RAW_NAME.matches(it.name) }
+        if (stagedFiles.isEmpty()) return 0
+
+        AndroidDerivationQueueStore(context).use { store ->
+            stagedFiles.forEach { file ->
+                val sourceSha256 = file.name.removeSuffix(".raw")
+                store.requeueForRawIngest(
+                    AndroidDerivationJob(
+                        sourceSha256 = sourceSha256,
+                        bodyPath = file.relativeTo(captureRoot).invariantSeparatorsPath,
+                        byteLength = file.length(),
+                        contentType = null,
+                    ),
+                )
+            }
+        }
+        return stagedFiles.size
     }
 
     private fun kick(context: Context) {
@@ -131,17 +158,43 @@ object AndroidDerivationScheduler {
     private fun drain(context: Context) {
         while (true) {
             val job = AndroidDerivationQueueStore(context).use { it.claimNext() } ?: return
-            val bodyFile = File(AndroidDnaPaths.capturesRoot(context), job.bodyPath)
-            if (!bodyFile.isFile) {
+            val stagedRaw = File(AndroidDnaPaths.capturesRoot(context), job.bodyPath)
+
+            val rawReady = runCatching {
+                waitForCaptureQuiet()
                 AndroidDerivationQueueStore(context).use {
-                    it.markFailed(job.sourceSha256, "missing_raw_body")
+                    it.updateStage(job.sourceSha256, STAGE_RAW_INGEST)
                 }
+                AndroidRawEvidenceStore(context).use { rawStore ->
+                    if (stagedRaw.isFile) {
+                        rawStore.importVerified(
+                            sourceSha256 = job.sourceSha256,
+                            stagingFile = stagedRaw,
+                            expectedByteLength = job.byteLength,
+                        )
+                    } else {
+                        check(rawStore.contains(job.sourceSha256)) { "RAW staging and SQLite source are both missing" }
+                        rawStore.verifySource(job.sourceSha256, job.byteLength)
+                    }
+                }
+                if (stagedRaw.isFile && !stagedRaw.delete()) {
+                    Log.d(TAG, "BKE DNA queue: raw_staging_cleanup_deferred")
+                }
+                true
+            }.getOrElse {
+                AndroidDerivationQueueStore(context).use { store ->
+                    store.markFailed(job.sourceSha256, "raw_ingest_failed")
+                }
+                false
+            }
+            if (!rawReady) {
+                breathe(context)
                 continue
             }
 
+            breathe(context)
             var firstStage = true
             val success = AndroidLiveDerivationPipeline(context).processCompletedCapture(
-                bodyFile = bodyFile,
                 sourceSha256 = job.sourceSha256,
                 byteLength = job.byteLength,
                 contentType = job.contentType,
@@ -178,6 +231,8 @@ object AndroidDerivationScheduler {
         if (restMillis > 0) Thread.sleep(restMillis)
         Thread.yield()
     }
+
+    const val STAGE_RAW_INGEST = "RAW_INGEST"
 }
 
 enum class AndroidProcessingProfile(val restMillis: Long) {
@@ -201,7 +256,6 @@ data class AndroidDerivationQueueSnapshot(
     val currentStage: String?,
 )
 
-/** SQLite access for the derivation queue. Uses the same Working Data DB. */
 private class AndroidDerivationQueueStore(context: Context) : AutoCloseable {
     private val index = AndroidCaptureIndex(context.applicationContext)
     private val db: SQLiteDatabase
@@ -243,7 +297,7 @@ private class AndroidDerivationQueueStore(context: Context) : AutoCloseable {
             put("byte_length", job.byteLength)
             put("content_type", job.contentType)
             put("status", STATUS_WAITING)
-            put("stage", STAGE_QUEUED)
+            put("stage", AndroidDerivationScheduler.STAGE_RAW_INGEST)
             put("priority", 0)
             put("attempts", 0)
             putNull("last_error_code")
@@ -255,6 +309,25 @@ private class AndroidDerivationQueueStore(context: Context) : AutoCloseable {
             null,
             values,
             SQLiteDatabase.CONFLICT_IGNORE,
+        )
+    }
+
+    fun requeueForRawIngest(job: AndroidDerivationJob) {
+        enqueue(job)
+        val values = ContentValues().apply {
+            put("body_path", job.bodyPath)
+            put("byte_length", job.byteLength)
+            if (job.contentType != null) put("content_type", job.contentType)
+            put("status", STATUS_WAITING)
+            put("stage", AndroidDerivationScheduler.STAGE_RAW_INGEST)
+            putNull("last_error_code")
+            put("updated_at", Instant.now().toString())
+        }
+        db.update(
+            "derivation_queue",
+            values,
+            "source_sha256 = ? AND status IN (?, ?, ?)",
+            arrayOf(job.sourceSha256, STATUS_WAITING, STATUS_DONE, STATUS_FAILED),
         )
     }
 
@@ -295,11 +368,6 @@ private class AndroidDerivationQueueStore(context: Context) : AutoCloseable {
                 )
             }
 
-            val values = ContentValues().apply {
-                put("status", STATUS_PROCESSING)
-                put("stage", STAGE_STARTING)
-                put("updated_at", Instant.now().toString())
-            }
             db.execSQL(
                 "UPDATE derivation_queue " +
                     "SET status = ?, stage = ?, attempts = attempts + 1, updated_at = ? " +
@@ -403,7 +471,6 @@ private class AndroidDerivationQueueStore(context: Context) : AutoCloseable {
         private const val STATUS_DONE = "DONE"
         private const val STATUS_FAILED = "FAILED"
 
-        private const val STAGE_QUEUED = "QUEUED"
         private const val STAGE_RECOVERED = "RECOVERED"
         private const val STAGE_STARTING = "STARTING"
         private const val STAGE_DONE = "DONE"

@@ -14,10 +14,10 @@ import java.time.format.DateTimeFormatter
  * App-private Working Data generations.
  *
  * Latest is the only writable/live SQLite database. A rotation snapshots the
- * current SQLite projection plus the small logical conversation-state files,
- * verifies the snapshot, then starts a fresh Latest database. Raw bodies and
- * other immutable evidence remain shared by SHA under the capture root and are
- * deliberately not duplicated into every Working Data generation.
+ * current SQLite projection, including SQLite-backed exact RAW for new
+ * generations, plus the small logical conversation-state files, verifies the
+ * snapshot, then starts a fresh Latest database. Older saved generations that
+ * predate RAW-in-SQLite remain compatible with shared SHA-addressed bodies.
  */
 class AndroidWorkingDataManager(context: Context) {
     private val appContext = context.applicationContext
@@ -94,8 +94,8 @@ class AndroidWorkingDataManager(context: Context) {
                 .put("sqliteByteLength", snapshotDatabase.length())
                 .put("conversationCount", summaries.size)
                 .put("conversationStateIncluded", true)
-                .put("rawEvidenceIncluded", false)
-                .put("rawEvidenceSharedBySha", true)
+                .put("rawEvidenceIncluded", true)
+                .put("rawEvidenceSharedBySha", false)
             writeDurably(File(generationDirectory, MANIFEST_NAME), manifest.toString(2))
 
             val verifiedGeneration = readGeneration(generationDirectory, verify = true)
@@ -162,8 +162,12 @@ class AndroidWorkingDataManager(context: Context) {
         require(manifest.getString("generationId") == directory.name)
         require(manifest.getString("mode") == "read_only_recovery")
         require(manifest.getBoolean("conversationStateIncluded"))
-        require(!manifest.getBoolean("rawEvidenceIncluded"))
-        require(manifest.getBoolean("rawEvidenceSharedBySha"))
+
+        val rawEvidenceIncluded = manifest.optBoolean("rawEvidenceIncluded", false)
+        val rawEvidenceSharedBySha = manifest.optBoolean("rawEvidenceSharedBySha", !rawEvidenceIncluded)
+        require(rawEvidenceIncluded || rawEvidenceSharedBySha) {
+            "Working Data generation exposes no RAW evidence recovery route"
+        }
 
         if (verify) {
             require(sha256File(database) == manifest.getString("sqliteSha256"))

@@ -14,23 +14,26 @@ import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 
 /**
  * Manual Android conversation .dna v2 exporter.
  *
- * Reconciliation only changes working state. This service is invoked by an
- * explicit owner export action. Durability is recorded only after the archive
- * has been written to the owner-selected destination, re-read, and proven byte
- * identical to the locally verified archive.
+ * .dna is a portable owner export, not the ordinary Working Data durability
+ * authority. New SQLite-backed RAW is materialized only into export-temporary
+ * files while the deterministic archive is built; permanent loose bodies are
+ * never recreated.
  */
 class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val captureRoot = AndroidDnaPaths.capturesRoot(appContext)
-    private val stagingDirectory = File(captureRoot, "export-staging").also {
-        check(it.exists() || it.mkdirs()) { "Unable to create Android DNA export staging directory" }
+    private val stagingDirectory = File(captureRoot, "export-staging").also { directory ->
+        check(directory.exists() || directory.mkdirs()) { "Unable to create Android DNA export staging directory" }
+        directory.listFiles().orEmpty()
+            .filter { it.isFile && it.name.startsWith(".raw-") && it.name.endsWith(".tmp") }
+            .forEach(File::delete)
+    }
+    private val latestGeneration by lazy {
+        AndroidWorkingDataManager(appContext).generation(AndroidWorkingDataManager.LATEST_ID)
     }
     private val index = AndroidCaptureIndex(appContext)
 
@@ -112,14 +115,15 @@ class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
                 sourceSha256 = null,
             ),
         )
+        val temporaryRaw = mutableListOf<File>()
         val pageUrls = linkedSetOf<String>()
         val witnessIds = linkedSetOf<String>()
 
         sources.forEach { sourceSha ->
-            val raw = File(captureRoot, "bodies/$sourceSha.body")
+            val raw = materializeRawSource(sourceSha).also(temporaryRaw::add)
             val normalized = File(captureRoot, "normalized/$sourceSha.json")
-            require(raw.isFile && normalized.isFile) {
-                "Conversation source '$sourceSha' is missing raw or normalized evidence"
+            require(normalized.isFile) {
+                "Conversation source '$sourceSha' is missing normalized evidence"
             }
 
             val rawEvidence = EvidenceSource.fromFile(
@@ -264,9 +268,36 @@ class AndroidConversationDnaArchiveService(context: Context) : AutoCloseable {
         } catch (error: Throwable) {
             archive.delete()
             throw error
+        } finally {
+            temporaryRaw.forEach(File::delete)
         }
 
         return ArchiveBuild(archiveId, conversationKey, archive)
+    }
+
+    private fun materializeRawSource(sourceSha256: String): File {
+        val temporary = File(stagingDirectory, ".raw-$sourceSha256-${UUID.randomUUID()}.tmp")
+        try {
+            FileOutputStream(temporary, false).use { output ->
+                require(
+                    AndroidRawSourceAccess.writeExactSource(
+                        generation = latestGeneration,
+                        captureRoot = captureRoot,
+                        sourceSha256 = sourceSha256,
+                        output = output,
+                    ),
+                ) { "Conversation source '$sourceSha256' is missing RAW evidence" }
+                output.flush()
+                output.fd.sync()
+            }
+            require(sha256File(temporary) == sourceSha256) {
+                "Materialized RAW no longer hashes to source identity '$sourceSha256'"
+            }
+            return temporary
+        } catch (error: Throwable) {
+            temporary.delete()
+            throw error
+        }
     }
 
     private fun resolveConversationKey(identity: String): String {
