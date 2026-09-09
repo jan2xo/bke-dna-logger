@@ -25,7 +25,7 @@ import java.io.FileOutputStream
 import java.util.Locale
 import java.util.UUID
 
-/** Owner-facing Working Data management plus one deduplicated lazy conversation library. */
+/** Owner-facing Working Data generation management plus one unified conversation library. */
 class AndroidExportsBackupsActivity : Activity() {
     private var inspectedWorkingDataId: String = AndroidWorkingDataManager.LATEST_ID
     private var searchQuery: String = ""
@@ -33,7 +33,6 @@ class AndroidExportsBackupsActivity : Activity() {
     private var pendingWorkingDataId: String = AndroidWorkingDataManager.LATEST_ID
     private var pendingConversationKey: String? = null
     @Volatile private var operationInProgress = false
-    private val purgeService by lazy { AndroidPurgeService(this) }
     private var queueStatusView: TextView? = null
     private val queueMonitorHandler = Handler(Looper.getMainLooper())
     private val queueMonitorTick = object : Runnable {
@@ -130,7 +129,6 @@ class AndroidExportsBackupsActivity : Activity() {
         refreshQueueStatus()
 
         content.addView(sectionTitle("Working Data"))
-
         val spinner = Spinner(this)
         spinner.adapter = ArrayAdapter(
             this,
@@ -160,8 +158,11 @@ class AndroidExportsBackupsActivity : Activity() {
                 } else {
                     append("READ-ONLY WORKING DATA")
                     append("\n${inspected.label}")
+                    if (!inspected.rawEvidenceIncluded) {
+                        append("\nLegacy generation: RAW may still depend on pre-SQLite fallback evidence.")
+                    }
                 }
-                append("\nThis selector only inspects Working Data; it does NOT filter the conversation library below.")
+                append("\nThe selector only inspects Working Data; the conversation library remains unified below.")
             }
             textSize = 14f
             setPadding(0, 10, 0, 8)
@@ -179,15 +180,7 @@ class AndroidExportsBackupsActivity : Activity() {
                             inspectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
                         }
                     },
-                    compactButton("BACKUP") {
-                        pendingConversationKey = null
-                        pendingWorkingDataId = AndroidWorkingDataManager.LATEST_ID
-                        createDocument(
-                            REQUEST_BACKUP,
-                            "BKE-DNA-working-${System.currentTimeMillis()}.dna-backup.zip",
-                            "application/zip",
-                        )
-                    },
+                    compactButton("BACKUP") { prepareWorkingDataBackup(inspected) },
                     compactButton("IMPORT") {
                         startActivityForResult(
                             Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -200,19 +193,33 @@ class AndroidExportsBackupsActivity : Activity() {
                 ),
             )
             content.addView(TextView(this).apply {
-                text = "SAVE NEW snapshots verified SQLite/state and activates a fresh Latest. GeckoSession stays alive while the capture writer is briefly paused."
+                text = "SAVE NEW checkpoints verified SQLite/state and activates a fresh Latest. BACKUP writes the self-contained SQLite generation. IMPORT restores a Working Data backup as read-only; conversation .dna import remains supported separately."
                 textSize = 12f
                 setPadding(0, 4, 0, 8)
             })
         } else {
+            val backupButton = compactButton("BACKUP") { prepareWorkingDataBackup(inspected) }.apply {
+                isEnabled = inspected.rawEvidenceIncluded
+            }
             content.addView(
                 compactRow(
                     compactButton("LATEST") {
                         inspectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
                         refreshUi()
                     },
+                    backupButton,
+                    dangerButton("DELETE") { confirmDeleteGeneration(inspected) },
                 ),
             )
+            content.addView(TextView(this).apply {
+                text = if (inspected.rawEvidenceIncluded) {
+                    "Saved Working Data is a self-contained read-only SQLite recovery generation. DELETE removes this whole generation after exact jan2x confirmation; Latest is never eligible."
+                } else {
+                    "This pre-SQLite-RAW generation cannot produce a self-contained SQLite backup. It remains readable through legacy fallback and may still be deleted explicitly with jan2x."
+                }
+                textSize = 12f
+                setPadding(0, 4, 0, 8)
+            })
         }
 
         val totalWorkingBytes = AndroidWorkingStorage.workingBytes(this) + manager.savedWorkingDataBytes()
@@ -222,22 +229,16 @@ class AndroidExportsBackupsActivity : Activity() {
                 append("Total local Working Data: ${formatBytes(totalWorkingBytes)}")
                 append("\nInspected generation SQLite/state: ${formatBytes(inspected.snapshotBytes)}")
                 append("\nWorking Data generations: ${generations.size}")
-                append("\nNotify threshold: 1 GiB — capture continues until Jan explicitly purges verified evidence.")
+                append("\nNotify threshold: 1 GiB — capture continues; Jan decides when saved generations are deleted.")
                 if (warning) append("\n⚠ Storage is above the warning threshold.")
             }
             textSize = 13f
-            setPadding(0, 10, 0, 6)
-        })
-        content.addView(compactRow(dangerButton("PURGE ALL VERIFIED RAW") { confirmPurgeAll() }))
-        content.addView(TextView(this).apply {
-            text = "Red purge deletes only local SHA-addressed raw/normalized/classification/observation files already covered by verified .dna. Shared sources used by another conversation stay. SQLite and logical reader state stay. Exact confirmation: jan2x"
-            textSize = 12f
-            setPadding(0, 4, 0, 12)
+            setPadding(0, 10, 0, 12)
         })
 
         content.addView(sectionTitle("All Conversations"))
         content.addView(TextView(this).apply {
-            text = "One deduplicated library across Latest + every saved SQLite. Tap a conversation row to read it. CLEAN and RAW stay immediate; archival/purge actions live under MORE."
+            text = "One deduplicated library across Latest + every saved SQLite. Tap a conversation row to read it. CLEAN and RAW stay immediate; portable .dna export lives under MORE when Latest owns the conversation."
             textSize = 12f
             setPadding(0, 0, 0, 8)
         })
@@ -272,17 +273,12 @@ class AndroidExportsBackupsActivity : Activity() {
 
         if (conversations.isEmpty()) {
             content.addView(TextView(this).apply {
-                text = if (searchQuery.isBlank()) {
-                    "No normalized conversations yet."
-                } else {
-                    "No conversations matched ‘$searchQuery’."
-                }
+                text = if (searchQuery.isBlank()) "No normalized conversations yet." else "No conversations matched ‘$searchQuery’."
                 setPadding(0, 12, 0, 12)
             })
         }
 
         conversations.forEach { summary ->
-            val locallyPurged = purgeService.isLocallyPurged(summary.conversationKey)
             val panel = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(0, 12, 0, 16)
@@ -302,38 +298,22 @@ class AndroidExportsBackupsActivity : Activity() {
                     append(" · ${summary.generationCount} Working Data")
                     append(" · ${summary.coverageStatus}")
                     if (summary.dnaArchived) append(" · .dna verified")
-                    if (locallyPurged) append(" · LOCAL RAW PURGED")
                 }
                 textSize = 12f
                 setPadding(0, 2, 0, 4)
             })
 
             val actions = mutableListOf<Button>()
-            actions += compactButton("CLEAN") {
-                prepareHumanExport(summary, clean = true)
-            }
-            actions += compactButton("RAW") {
-                prepareHumanExport(summary, clean = false)
-            }
+            actions += compactButton("CLEAN") { prepareHumanExport(summary, clean = true) }
+            actions += compactButton("RAW") { prepareHumanExport(summary, clean = false) }
             if (summary.hasLatest) {
                 val moreButton = compactButton("MORE")
                 moreButton.setOnClickListener {
-                    if (operationInProgress) {
-                        showOperationInProgress()
-                    } else {
-                        showConversationMenu(moreButton, summary, locallyPurged)
-                    }
+                    if (operationInProgress) showOperationInProgress() else showConversationMenu(moreButton, summary)
                 }
                 actions += moreButton
             }
             panel.addView(compactRow(*actions.toTypedArray()))
-
-            if (locallyPurged) {
-                panel.addView(TextView(this).apply {
-                    text = "Heavy local evidence was purged after verified .dna. Import that .dna to restore RAW evidence before re-archiving. CLEAN/logical state remains locally readable."
-                    textSize = 12f
-                })
-            }
             content.addView(panel)
         }
 
@@ -344,6 +324,66 @@ class AndroidExportsBackupsActivity : Activity() {
                 refreshUi()
             }))
         }
+    }
+
+    private fun prepareWorkingDataBackup(generation: AndroidWorkingDataGeneration) {
+        pendingConversationKey = null
+        pendingWorkingDataId = generation.id
+        val fileLabel = if (generation.isLatest) "latest" else generation.id
+        createDocument(
+            REQUEST_BACKUP,
+            "BKE-DNA-working-$fileLabel.dna-backup.zip",
+            "application/zip",
+        )
+    }
+
+    private fun confirmDeleteGeneration(generation: AndroidWorkingDataGeneration) {
+        require(!generation.isLatest)
+        showJan2xConfirmation(
+            title = "DELETE WORKING DATA?",
+            message = buildString {
+                append(generation.label)
+                append("\n\nDelete this complete read-only Working Data generation and reclaim approximately ${formatBytes(generation.snapshotBytes)}.")
+                append("\n\nThis does not touch Latest and does not require a .dna export.")
+            },
+        ) {
+            runResultWork(storageMutation = true) {
+                val result = AndroidWorkingDataManager(this).deleteSavedGeneration(
+                    generation.id,
+                    AndroidWorkingDataManager.DELETE_CONFIRMATION_TEXT,
+                )
+                inspectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+                "Deleted ${result.generationId}; reclaimed ${formatBytes(result.bytesReclaimed)}"
+            }
+        }
+    }
+
+    private fun showJan2xConfirmation(title: String, message: String, confirmed: () -> Unit) {
+        val input = EditText(this).apply {
+            hint = "Type jan2x"
+            setSingleLine(true)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage("$message\n\nType exact confirmation: jan2x")
+            .setView(input)
+            .setNegativeButton("CANCEL", null)
+            .setPositiveButton("DELETE", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).apply {
+                setTextColor(Color.RED)
+                setOnClickListener {
+                    if (input.text.toString() != AndroidWorkingDataManager.DELETE_CONFIRMATION_TEXT) {
+                        input.error = "Type exactly jan2x"
+                        return@setOnClickListener
+                    }
+                    dialog.dismiss()
+                    confirmed()
+                }
+            }
+        }
+        dialog.show()
     }
 
     private fun refreshQueueStatus() {
@@ -372,16 +412,9 @@ class AndroidExportsBackupsActivity : Activity() {
         )
     }
 
-    private fun showConversationMenu(
-        anchor: Button,
-        summary: AndroidUnifiedConversationSummary,
-        locallyPurged: Boolean,
-    ) {
+    private fun showConversationMenu(anchor: Button, summary: AndroidUnifiedConversationSummary) {
         val popup = PopupMenu(this, anchor)
-        if (!locallyPurged) {
-            popup.menu.add(0, MENU_EXPORT_DNA, 0, "Export .dna")
-        }
-        popup.menu.add(0, MENU_PURGE_VERIFIED_RAW, 1, "PURGE VERIFIED RAW")
+        popup.menu.add(0, MENU_EXPORT_DNA, 0, "Export .dna")
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 MENU_EXPORT_DNA -> {
@@ -392,10 +425,6 @@ class AndroidExportsBackupsActivity : Activity() {
                         "${safeFileBase(summary.displayTitle)}.dna",
                         "application/zip",
                     )
-                    true
-                }
-                MENU_PURGE_VERIFIED_RAW -> {
-                    preparePurge(summary)
                     true
                 }
                 else -> false
@@ -412,99 +441,6 @@ class AndroidExportsBackupsActivity : Activity() {
                     summary.conversationNativeId,
                 ),
         )
-    }
-
-    private fun preparePurge(summary: AndroidUnifiedConversationSummary) {
-        if (operationInProgress) {
-            showOperationInProgress()
-            return
-        }
-        operationInProgress = true
-        refreshQueueStatus()
-        Thread {
-            val plan = runCatching { purgeService.plan(summary.conversationNativeId) }
-            runOnUiThread {
-                operationInProgress = false
-                refreshQueueStatus()
-                plan.fold(
-                    onSuccess = { ready ->
-                        when {
-                            ready.blockedReason != null -> Toast.makeText(
-                                this,
-                                "PURGE BLOCKED: ${ready.blockedReason}",
-                                Toast.LENGTH_LONG,
-                            ).show()
-                            ready.bytesReclaimable <= 0L -> Toast.makeText(
-                                this,
-                                "Nothing purgeable remains for this conversation.",
-                                Toast.LENGTH_LONG,
-                            ).show()
-                            else -> showPurgeDialog(summary, ready)
-                        }
-                    },
-                    onFailure = {
-                        Toast.makeText(this, "Unable to prepare purge: ${it.message}", Toast.LENGTH_LONG).show()
-                    },
-                )
-            }
-        }.start()
-    }
-
-    private fun showPurgeDialog(summary: AndroidUnifiedConversationSummary, plan: AndroidPurgePlan) {
-        showJan2xConfirmation(
-            title = "DELETE VERIFIED RAW?",
-            message = buildString {
-                append(summary.displayTitle)
-                append("\n\nReclaim approximately ${formatBytes(plan.bytesReclaimable)}.")
-                append("\n${plan.purgeableSourceSha256s.size} exclusive source payloads are eligible.")
-                append("\n\nVerified .dna is the durability gate. Shared evidence remains untouched.")
-            },
-        ) {
-            runResultWork(storageMutation = true) {
-                val result = purgeService.purge(summary.conversationNativeId, AndroidPurgeService.CONFIRMATION_TEXT)
-                "Purged ${formatBytes(result.bytesReclaimed)} from ${result.sourcesPurged} verified sources"
-            }
-        }
-    }
-
-    private fun confirmPurgeAll() {
-        showJan2xConfirmation(
-            title = "PURGE ALL VERIFIED RAW?",
-            message = "Delete every currently purgeable local raw source already protected by verified .dna. Unarchived evidence and shared sources are never deleted.",
-        ) {
-            runResultWork(storageMutation = true) {
-                val result = purgeService.purgeAllVerified(AndroidPurgeService.CONFIRMATION_TEXT)
-                "Purged ${formatBytes(result.bytesReclaimed)} across ${result.conversationsPurged} conversations"
-            }
-        }
-    }
-
-    private fun showJan2xConfirmation(title: String, message: String, confirmed: () -> Unit) {
-        val input = EditText(this).apply {
-            hint = "Type jan2x"
-            setSingleLine(true)
-        }
-        val dialog = AlertDialog.Builder(this)
-            .setTitle(title)
-            .setMessage("$message\n\nType exact confirmation: jan2x")
-            .setView(input)
-            .setNegativeButton("CANCEL", null)
-            .setPositiveButton("DELETE", null)
-            .create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).apply {
-                setTextColor(Color.RED)
-                setOnClickListener {
-                    if (input.text.toString() != AndroidPurgeService.CONFIRMATION_TEXT) {
-                        input.error = "Type exactly jan2x"
-                        return@setOnClickListener
-                    }
-                    dialog.dismiss()
-                    confirmed()
-                }
-            }
-        }
-        dialog.show()
     }
 
     private fun prepareHumanExport(summary: AndroidUnifiedConversationSummary, clean: Boolean) {
@@ -543,13 +479,17 @@ class AndroidExportsBackupsActivity : Activity() {
             }
             REQUEST_EXPORT_CLEAN_MD -> exportHuman(uri, clean = true)
             REQUEST_EXPORT_RAW_MD -> exportHuman(uri, clean = false)
-            REQUEST_BACKUP -> runWork("Working Data backup exported") {
-                AndroidWorkingBackupService(this).backupToUri(contentResolver, uri)
-            }
-            REQUEST_IMPORT -> runWork(
-                successMessage = "Import reconciled into Latest Working Data",
+            REQUEST_BACKUP -> runWork(
+                successMessage = "Working Data SQLite backup exported and verified",
                 storageMutation = true,
             ) {
+                AndroidWorkingBackupService(this).backupToUri(
+                    contentResolver,
+                    uri,
+                    pendingWorkingDataId,
+                )
+            }
+            REQUEST_IMPORT -> runResultWork(storageMutation = true) {
                 importSelected(uri)
             }
         }
@@ -568,9 +508,9 @@ class AndroidExportsBackupsActivity : Activity() {
         }
     }
 
-    private fun importSelected(uri: Uri) {
+    private fun importSelected(uri: Uri): String {
         val name = displayName(uri).lowercase(Locale.ROOT)
-        if (name.endsWith(".dna")) {
+        return if (name.endsWith(".dna")) {
             val temp = File(cacheDir, "conversation-import-${UUID.randomUUID()}.dna")
             try {
                 contentResolver.openInputStream(uri)?.use { input ->
@@ -581,11 +521,14 @@ class AndroidExportsBackupsActivity : Activity() {
                     }
                 } ?: error("Unable to open selected conversation .dna")
                 AndroidConversationDnaImportService(this).importVerified(listOf(temp))
+                "Conversation .dna reconciled into Latest Working Data"
             } finally {
                 temp.delete()
             }
         } else {
-            AndroidWorkingBackupService(this).importFromUri(contentResolver, uri)
+            val restored = AndroidWorkingBackupService(this).importFromUri(contentResolver, uri)
+            inspectedWorkingDataId = restored.generationId
+            "Working Data restored as read-only generation ${restored.generationId}"
         }
     }
 
@@ -726,7 +669,6 @@ class AndroidExportsBackupsActivity : Activity() {
         private const val REQUEST_IMPORT = 1104
         private const val REQUEST_EXPORT_RAW_MD = 1105
         private const val MENU_EXPORT_DNA = 2101
-        private const val MENU_PURGE_VERIFIED_RAW = 2102
         private const val QUEUE_REFRESH_MS = 1_500L
     }
 }
