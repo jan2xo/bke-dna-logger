@@ -175,6 +175,15 @@ for token in (
 ):
     assert token in titles, token
 
+# Latest metadata title reads stay on the shared active SQLite pool; only saved
+# immutable generations may use generation-scoped read-only RAW handles.
+metadata_start = titles.index('private fun refreshConversationListEvidence(')
+metadata_end = titles.index('private fun conversationListCaptures(', metadata_start)
+metadata = titles[metadata_start:metadata_end]
+assert 'if (capture.generation.isLatest)' in metadata
+assert 'AndroidRawSourceAccess.readAllBytes(\n                        context = appContext,' in metadata
+assert 'AndroidRawSourceAccess.readAllBytes(\n                        generation = capture.generation,' in metadata
+
 resolve_start = unified.index('fun resolve(')
 resolve_end = unified.index('private fun mergeCopies(', resolve_start)
 resolve = unified[resolve_start:resolve_end]
