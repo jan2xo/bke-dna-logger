@@ -11,7 +11,8 @@ import java.time.Instant
  * Normalizes modern ChatGPT message collections independently of
  * generic-mapping-graph-v0. Message collections may be root-level or carried
  * inside one explicit JSON envelope. This representation does not expose
- * parent/child graph edges, so none are invented here.
+ * parent/child graph edges, so none are invented here. Display titles are
+ * carried only when the captured payload itself supplies title evidence.
  */
 class AndroidMessagesNormalizationEngine(context: android.content.Context) {
     private val appContext = context.applicationContext
@@ -64,6 +65,14 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         val identity = resolveConversationIdentity(root, envelope.container, sourceSha256) ?: return null
         Log.d(TAG, "BKE DNA normalization: messages_identity_resolved")
 
+        val displayTitle = resolveDisplayTitle(
+            capturedTitle(root.opt("title")),
+            capturedTitle(envelope.container.opt("title")),
+        )
+        if (displayTitle != null) {
+            Log.d(TAG, "BKE DNA normalization: messages_display_title_found")
+        }
+
         val sourceCurrentNodeId = scalarToString(envelope.container.opt("current_node"))
             ?.takeIf { it.isNotBlank() }
             ?: scalarToString(root.opt("current_node"))?.takeIf { it.isNotBlank() }
@@ -100,6 +109,7 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
                         sourceSha256 = sourceSha256,
                         parser = parser,
                         identity = identity,
+                        displayTitle = displayTitle,
                         currentNodeNativeId = currentNodeNativeId,
                         currentNodeFound = currentNodeFound,
                         nodes = nodes,
@@ -121,6 +131,7 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         sourceSha256: String,
         parser: String,
         identity: AndroidConversationIdentityResolution,
+        displayTitle: String?,
         currentNodeNativeId: String?,
         currentNodeFound: Boolean,
         nodes: List<NormalizedMessageNode>,
@@ -131,6 +142,7 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         writer.name("parser").value(parser)
         writer.name("conversationNativeId").value(identity.conversationNativeId)
         writer.name("conversationIdentityBasis").value(identity.basis)
+        if (displayTitle != null) writer.name("displayTitle").value(displayTitle)
         writer.name("currentNodeNativeId")
         if (currentNodeNativeId == null) writer.nullValue() else writer.value(currentNodeNativeId)
         writer.name("coverageStatus").value("indeterminate")
@@ -233,6 +245,20 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         }
         return metadataIdentity
     }
+
+    private fun resolveDisplayTitle(rootTitle: String?, envelopeTitle: String?): String? {
+        val capturedTitles = linkedSetOf<String>()
+        rootTitle?.takeIf { it.isNotBlank() }?.let(capturedTitles::add)
+        envelopeTitle?.takeIf { it.isNotBlank() }?.let(capturedTitles::add)
+        if (capturedTitles.size > 1) {
+            Log.d(TAG, "BKE DNA normalization: messages_display_title_conflict")
+            return null
+        }
+        return capturedTitles.singleOrNull()
+    }
+
+    private fun capturedTitle(value: Any?): String? =
+        (value as? String)?.trim()?.takeIf { it.isNotBlank() }?.take(DISPLAY_TITLE_LIMIT)
 
     private fun messageObjects(messages: Any): List<JSONObject> = when (messages) {
         is JSONArray -> buildList {
@@ -343,6 +369,7 @@ class AndroidMessagesNormalizationEngine(context: android.content.Context) {
         private const val TAG = "BkeDnaNormalizer"
         private const val MAX_BODY_BYTES = 16L * 1024 * 1024
         private const val MAX_ENVELOPE_VALUES = 4096
+        private const val DISPLAY_TITLE_LIMIT = 240
         private const val CANDIDATE_KIND = "conversation_payload_candidate"
         private const val PARSER = "messages-array-v0"
         private const val PARSER_ENVELOPE = "messages-envelope-v1"
