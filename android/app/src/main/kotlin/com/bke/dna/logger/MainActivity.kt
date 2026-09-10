@@ -87,9 +87,9 @@ class MainActivity : Activity() {
         AndroidDerivationScheduler.noteBrowserActivity()
     }
 
-    override fun onResume() {
-        super.onResume()
-        AndroidDerivationScheduler.noteBrowserActivity()
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) AndroidDerivationScheduler.noteBrowserActivity()
     }
 
     override fun onUserInteraction() {
