@@ -48,6 +48,8 @@ object AndroidRawSourceAccess {
     /**
      * Keeps the backing RAW store open for the entire callback so large sources
      * can be consumed incrementally without ever materializing the whole body.
+     * The wrapper yields between bounded read windows whenever the owner becomes
+     * active in GeckoView, so a long normalization cannot monopolize the device.
      */
     fun <T> withExactInputStream(
         context: Context,
@@ -58,14 +60,18 @@ object AndroidRawSourceAccess {
         AndroidRawEvidenceStore(appContext).use { store ->
             if (store.contains(sourceSha256)) {
                 store.openExactInputStream(sourceSha256).use { input ->
-                    return block(input)
+                    BrowserYieldingInputStream(input).use { yielding ->
+                        return block(yielding)
+                    }
                 }
             }
         }
 
         val body = File(AndroidDnaPaths.capturesRoot(appContext), "bodies/$sourceSha256.body")
         if (!body.isFile) return null
-        body.inputStream().buffered().use { input -> return block(input) }
+        body.inputStream().buffered().use { input ->
+            BrowserYieldingInputStream(input).use { yielding -> return block(yielding) }
+        }
     }
 
     fun readPage(
@@ -159,6 +165,37 @@ object AndroidRawSourceAccess {
         require(body.length() <= maxBytes) { "RAW source exceeds bounded read limit" }
         return body.readBytes()
     }
+
+    private class BrowserYieldingInputStream(
+        private val delegate: InputStream,
+    ) : InputStream() {
+        private var bytesUntilYield = YIELD_READ_BYTES
+
+        override fun read(): Int {
+            val value = delegate.read()
+            if (value >= 0) accountRead(1)
+            return value
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            if (length == 0) return 0
+            val boundedLength = minOf(length, bytesUntilYield)
+            val count = delegate.read(buffer, offset, boundedLength)
+            if (count > 0) accountRead(count)
+            return count
+        }
+
+        private fun accountRead(count: Int) {
+            bytesUntilYield -= count
+            if (bytesUntilYield > 0) return
+            AndroidDerivationScheduler.yieldForBrowserActivity()
+            bytesUntilYield = YIELD_READ_BYTES
+        }
+
+        override fun close() = delegate.close()
+    }
+
+    private const val YIELD_READ_BYTES = 256 * 1024
 }
 
 data class AndroidRawResolvedPage(
