@@ -24,6 +24,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.Executors
 
 /** Owner-facing Working Data generation management plus one unified conversation library. */
 class AndroidExportsBackupsActivity : Activity() {
@@ -33,7 +34,13 @@ class AndroidExportsBackupsActivity : Activity() {
     private var pendingWorkingDataId: String = AndroidWorkingDataManager.LATEST_ID
     private var pendingConversationKey: String? = null
     @Volatile private var operationInProgress = false
+    @Volatile private var queueRefreshInFlight = false
     private var queueStatusView: TextView? = null
+    private var uiLoadGeneration = 0L
+    private var hasRenderedUi = false
+    private val ioExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "bke-dna-working-data-io").apply { isDaemon = true }
+    }
     private val queueMonitorHandler = Handler(Looper.getMainLooper())
     private val queueMonitorTick = object : Runnable {
         override fun run() {
@@ -46,6 +53,7 @@ class AndroidExportsBackupsActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        renderLoadingShell()
         refreshUi()
     }
 
@@ -61,6 +69,13 @@ class AndroidExportsBackupsActivity : Activity() {
         super.onPause()
     }
 
+    override fun onDestroy() {
+        uiLoadGeneration += 1
+        queueMonitorHandler.removeCallbacks(queueMonitorTick)
+        ioExecutor.shutdown()
+        super.onDestroy()
+    }
+
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
         if (operationInProgress) {
@@ -70,13 +85,90 @@ class AndroidExportsBackupsActivity : Activity() {
         super.onBackPressed()
     }
 
+    private fun renderLoadingShell() {
+        if (hasRenderedUi) return
+        setContentView(TextView(this).apply {
+            text = "Loading Working Data & Conversations…"
+            textSize = 16f
+            setPadding(32, 32, 32, 32)
+        })
+    }
+
     private fun refreshUi() {
-        val manager = AndroidWorkingDataManager(this)
-        val generations = manager.listWorkingData()
-        if (generations.none { it.id == inspectedWorkingDataId }) {
-            inspectedWorkingDataId = AndroidWorkingDataManager.LATEST_ID
+        val request = ++uiLoadGeneration
+        val requestedInspectedId = inspectedWorkingDataId
+        val requestedSearchQuery = searchQuery
+        val requestedLibraryLimit = libraryLimit
+        if (ioExecutor.isShutdown) return
+
+        ioExecutor.execute {
+            val result = runCatching {
+                loadUiSnapshot(
+                    requestedInspectedId = requestedInspectedId,
+                    requestedSearchQuery = requestedSearchQuery,
+                    requestedLibraryLimit = requestedLibraryLimit,
+                )
+            }
+            runOnUiThread {
+                if (request != uiLoadGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = { snapshot ->
+                        inspectedWorkingDataId = snapshot.inspected.id
+                        renderUi(snapshot)
+                    },
+                    onFailure = { error -> renderLoadFailure(error) },
+                )
+            }
         }
-        val inspected = generations.first { it.id == inspectedWorkingDataId }
+    }
+
+    private fun loadUiSnapshot(
+        requestedInspectedId: String,
+        requestedSearchQuery: String,
+        requestedLibraryLimit: Int,
+    ): UiSnapshot {
+        val appContext = applicationContext
+        val manager = AndroidWorkingDataManager(appContext)
+        val generations = manager.listWorkingData()
+        require(generations.isNotEmpty()) { "No Working Data generations are available" }
+        val resolvedInspectedId = requestedInspectedId.takeIf { requested ->
+            generations.any { it.id == requested }
+        } ?: AndroidWorkingDataManager.LATEST_ID
+        val inspected = generations.first { it.id == resolvedInspectedId }
+        val totalWorkingBytes = AndroidWorkingStorage.workingBytes(appContext) + manager.savedWorkingDataBytes()
+        val rawTelemetry = runCatching { AndroidWorkingDataTelemetry.inspect(inspected) }.getOrNull()
+        val libraryResult = runCatching {
+            AndroidUnifiedConversationLibrary(appContext).search(requestedSearchQuery, requestedLibraryLimit)
+        }
+
+        return UiSnapshot(
+            generations = generations,
+            inspected = inspected,
+            currentProfile = AndroidDerivationScheduler.getProfile(appContext),
+            totalWorkingBytes = totalWorkingBytes,
+            storageWarning = DnaReconciliationContract.shouldNotifyStorage(totalWorkingBytes),
+            rawTelemetry = rawTelemetry,
+            conversations = libraryResult.getOrDefault(emptyList()),
+            libraryError = libraryResult.exceptionOrNull()?.message,
+            searchQuery = requestedSearchQuery,
+            libraryLimit = requestedLibraryLimit,
+        )
+    }
+
+    private fun renderLoadFailure(error: Throwable) {
+        hasRenderedUi = true
+        queueStatusView = null
+        setContentView(TextView(this).apply {
+            text = "Unable to read Working Data: ${error.message ?: "unknown error"}"
+            textSize = 14f
+            setPadding(32, 32, 32, 32)
+        })
+    }
+
+    private fun renderUi(snapshot: UiSnapshot) {
+        hasRenderedUi = true
+        val generations = snapshot.generations
+        val inspected = snapshot.inspected
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -102,11 +194,12 @@ class AndroidExportsBackupsActivity : Activity() {
 
         content.addView(sectionTitle("Processing"))
         queueStatusView = TextView(this).apply {
+            text = "Reading queue…"
             textSize = 13f
             setPadding(0, 0, 0, 6)
         }
         content.addView(queueStatusView)
-        val currentProfile = AndroidDerivationScheduler.getProfile(this)
+        val currentProfile = snapshot.currentProfile
         content.addView(
             compactRow(
                 *AndroidProcessingProfile.entries.map { profile ->
@@ -222,9 +315,9 @@ class AndroidExportsBackupsActivity : Activity() {
             })
         }
 
-        val totalWorkingBytes = AndroidWorkingStorage.workingBytes(this) + manager.savedWorkingDataBytes()
-        val warning = DnaReconciliationContract.shouldNotifyStorage(totalWorkingBytes)
-        val rawTelemetry = runCatching { AndroidWorkingDataTelemetry.inspect(inspected) }.getOrNull()
+        val totalWorkingBytes = snapshot.totalWorkingBytes
+        val warning = snapshot.storageWarning
+        val rawTelemetry = snapshot.rawTelemetry
         content.addView(TextView(this).apply {
             text = buildString {
                 append("Physical local Working Data: ${formatBytes(totalWorkingBytes)}")
@@ -255,7 +348,7 @@ class AndroidExportsBackupsActivity : Activity() {
         val searchInput = EditText(this).apply {
             hint = "Search conversation titles"
             setSingleLine(true)
-            setText(searchQuery)
+            setText(snapshot.searchQuery)
         }
         content.addView(searchInput)
         content.addView(
@@ -273,16 +366,13 @@ class AndroidExportsBackupsActivity : Activity() {
             ),
         )
 
-        val library = AndroidUnifiedConversationLibrary(this)
-        val conversations = runCatching { library.search(searchQuery, libraryLimit) }
-            .getOrElse {
-                content.addView(TextView(this).apply { text = "Unable to read unified library: ${it.message}" })
-                emptyList()
-            }
-
+        snapshot.libraryError?.let { error ->
+            content.addView(TextView(this).apply { text = "Unable to read unified library: $error" })
+        }
+        val conversations = snapshot.conversations
         if (conversations.isEmpty()) {
             content.addView(TextView(this).apply {
-                text = if (searchQuery.isBlank()) "No normalized conversations yet." else "No conversations matched ‘$searchQuery’."
+                text = if (snapshot.searchQuery.isBlank()) "No normalized conversations yet." else "No conversations matched ‘${snapshot.searchQuery}’."
                 setPadding(0, 12, 0, 12)
             })
         }
@@ -326,9 +416,9 @@ class AndroidExportsBackupsActivity : Activity() {
             content.addView(panel)
         }
 
-        if (conversations.size >= libraryLimit && libraryLimit < AndroidUnifiedConversationLibrary.MAX_PAGE_SIZE) {
+        if (conversations.size >= snapshot.libraryLimit && snapshot.libraryLimit < AndroidUnifiedConversationLibrary.MAX_PAGE_SIZE) {
             content.addView(compactRow(compactButton("LOAD MORE") {
-                libraryLimit = (libraryLimit + AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE)
+                libraryLimit = (snapshot.libraryLimit + AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE)
                     .coerceAtMost(AndroidUnifiedConversationLibrary.MAX_PAGE_SIZE)
                 refreshUi()
             }))
@@ -401,24 +491,35 @@ class AndroidExportsBackupsActivity : Activity() {
             target.text = "Queue monitor paused · Working Data operation in progress"
             return
         }
-        val snapshot = runCatching { AndroidDerivationScheduler.snapshot(this) }
-        target.text = snapshot.fold(
-            onSuccess = { queue ->
-                buildString {
-                    when {
-                        queue.processing > 0 -> {
-                            append("PROCESSING")
-                            queue.currentStage?.let { append(" · $it") }
+        if (queueRefreshInFlight || ioExecutor.isShutdown) return
+        queueRefreshInFlight = true
+        val appContext = applicationContext
+        ioExecutor.execute {
+            val text = runCatching { AndroidDerivationScheduler.snapshot(appContext) }.fold(
+                onSuccess = { queue ->
+                    buildString {
+                        when {
+                            queue.processing > 0 -> {
+                                append("PROCESSING")
+                                queue.currentStage?.let { append(" · $it") }
+                            }
+                            queue.waiting > 0 -> append("QUEUED")
+                            queue.failed > 0 -> append("IDLE · ATTENTION")
+                            else -> append("IDLE")
                         }
-                        queue.waiting > 0 -> append("QUEUED")
-                        queue.failed > 0 -> append("IDLE · ATTENTION")
-                        else -> append("IDLE")
+                        append("\n${queue.waiting} waiting · ${queue.processing} processing · ${queue.failed} failed · ${queue.done} done")
                     }
-                    append("\n${queue.waiting} waiting · ${queue.processing} processing · ${queue.failed} failed · ${queue.done} done")
+                },
+                onFailure = { error -> "Queue unavailable · ${error.message ?: "unknown error"}" },
+            )
+            runOnUiThread {
+                queueRefreshInFlight = false
+                if (isFinishing || isDestroyed || operationInProgress || queueStatusView !== target) {
+                    return@runOnUiThread
                 }
-            },
-            onFailure = { error -> "Queue unavailable · ${error.message ?: "unknown error"}" },
-        )
+                target.text = text
+            }
+        }
     }
 
     private fun showConversationMenu(anchor: Button, summary: AndroidUnifiedConversationSummary) {
@@ -453,17 +554,51 @@ class AndroidExportsBackupsActivity : Activity() {
     }
 
     private fun prepareHumanExport(summary: AndroidUnifiedConversationSummary, clean: Boolean) {
-        val location = AndroidUnifiedConversationLibrary(this).resolve(summary.conversationNativeId)
-        val verifiedGeneration = AndroidWorkingDataManager(this).generation(location.generation.id)
-        val human = AndroidHumanExportService(this, verifiedGeneration.conversationStateDirectory)
-        val descriptor = human.describe(location.conversationKey)
-        pendingConversationKey = location.conversationKey
-        pendingWorkingDataId = verifiedGeneration.id
-        createDocument(
-            if (clean) REQUEST_EXPORT_CLEAN_MD else REQUEST_EXPORT_RAW_MD,
-            "${descriptor.fileBase} - ${if (clean) "CLEAN" else "RAW"}.md",
-            "text/markdown",
-        )
+        if (operationInProgress) {
+            showOperationInProgress()
+            return
+        }
+        operationInProgress = true
+        refreshQueueStatus()
+        if (ioExecutor.isShutdown) return
+        ioExecutor.execute {
+            val result = runCatching {
+                val location = AndroidUnifiedConversationLibrary(applicationContext)
+                    .resolve(summary.conversationNativeId)
+                val verifiedGeneration = AndroidWorkingDataManager(applicationContext)
+                    .generation(location.generation.id)
+                val human = AndroidHumanExportService(applicationContext, verifiedGeneration.conversationStateDirectory)
+                val descriptor = human.describe(location.conversationKey)
+                HumanExportPreparation(
+                    conversationKey = location.conversationKey,
+                    workingDataId = verifiedGeneration.id,
+                    fileName = "${descriptor.fileBase} - ${if (clean) "CLEAN" else "RAW"}.md",
+                )
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                operationInProgress = false
+                result.fold(
+                    onSuccess = { preparation ->
+                        pendingConversationKey = preparation.conversationKey
+                        pendingWorkingDataId = preparation.workingDataId
+                        createDocument(
+                            if (clean) REQUEST_EXPORT_CLEAN_MD else REQUEST_EXPORT_RAW_MD,
+                            preparation.fileName,
+                            "text/markdown",
+                        )
+                    },
+                    onFailure = { error ->
+                        Toast.makeText(
+                            this,
+                            "Unable to prepare export: ${error.message ?: "unknown error"}",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    },
+                )
+                refreshQueueStatus()
+            }
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -577,7 +712,8 @@ class AndroidExportsBackupsActivity : Activity() {
         }
         operationInProgress = true
         refreshQueueStatus()
-        Thread {
+        if (ioExecutor.isShutdown) return
+        ioExecutor.execute {
             val result = runCatching {
                 if (storageMutation) {
                     AndroidCaptureRuntime.withStorageMutationPause(this) { work() }
@@ -586,6 +722,7 @@ class AndroidExportsBackupsActivity : Activity() {
                 }
             }
             runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
                 operationInProgress = false
                 Toast.makeText(
                     this,
@@ -599,7 +736,7 @@ class AndroidExportsBackupsActivity : Activity() {
                 pendingWorkingDataId = AndroidWorkingDataManager.LATEST_ID
                 refreshUi()
             }
-        }.start()
+        }
     }
 
     private fun sectionTitle(label: String): TextView = TextView(this).apply {
@@ -670,6 +807,25 @@ class AndroidExportsBackupsActivity : Activity() {
         if (mib < 1024.0) return String.format(Locale.US, "%.1f MiB", mib)
         return String.format(Locale.US, "%.2f GiB", mib / 1024.0)
     }
+
+    private data class UiSnapshot(
+        val generations: List<AndroidWorkingDataGeneration>,
+        val inspected: AndroidWorkingDataGeneration,
+        val currentProfile: AndroidProcessingProfile,
+        val totalWorkingBytes: Long,
+        val storageWarning: Boolean,
+        val rawTelemetry: AndroidWorkingDataStorageTelemetry?,
+        val conversations: List<AndroidUnifiedConversationSummary>,
+        val libraryError: String?,
+        val searchQuery: String,
+        val libraryLimit: Int,
+    )
+
+    private data class HumanExportPreparation(
+        val conversationKey: String,
+        val workingDataId: String,
+        val fileName: String,
+    )
 
     companion object {
         private const val REQUEST_EXPORT_DNA = 1101
