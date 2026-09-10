@@ -108,18 +108,27 @@ for source in (graph_normalizer, messages_normalizer, dispatcher):
         assert forbidden not in source, forbidden
 
 # Exact RAW remains consolidated into Working Data SQLite as independently
-# compressed chunks with round-trip verification before commit.
+# compressed chunks. Large ingest uses bounded autocommits, verifies the full
+# unpublished representation, then publishes with a tiny metadata transaction.
 for token in (
     'CREATE TABLE IF NOT EXISTS raw_source (',
     'CREATE TABLE IF NOT EXISTS raw_source_chunk (',
     'RAW_CHUNK_BYTES = 256 * 1024',
     'CODEC = "deflate-raw-chunk-v1"',
     'fun importVerified(', 'fun verifySource(', 'fun readPage(', 'fun writeExactSource(',
-    'verifySource(sourceSha256, expectedByteLength)',
+    'deleteUnpublishedChunks(sourceSha256)', 'verifyUnpublishedSource(',
+    'database.insertOrThrow("raw_source_chunk", null, values)',
+    'database.insertOrThrow("raw_source", null, sourceValues)',
     'database.setTransactionSuccessful()',
 ):
     assert token in raw_store, token
-assert raw_store.index('verifySource(sourceSha256, expectedByteLength)') < raw_store.index('database.setTransactionSuccessful()', raw_store.index('verifySource(sourceSha256, expectedByteLength)'))
+raw_import_start = raw_store.index('fun importVerified(')
+raw_import_end = raw_store.index('fun readPage(', raw_import_start)
+raw_import = raw_store[raw_import_start:raw_import_end]
+raw_verify = raw_import.index('verifyUnpublishedSource(')
+raw_publish = raw_import.index('database.beginTransaction()')
+assert raw_verify < raw_publish
+assert raw_import[:raw_verify].find('database.beginTransaction()') == -1
 
 # RAW consumers resolve by source SHA. SQLite is preferred; legacy shared bodies
 # are only a fallback for pre-PR4 read-only generations.
@@ -222,17 +231,20 @@ assert 'DERIVATION_EXECUTOR' not in store
 assert 'AndroidLiveDerivationPipeline(appContext).processCompletedCapture(' not in store
 assert store.index('index.record(') < store.index('AndroidDerivationScheduler.enqueue(')
 
-# Durable queue remains RAW_INGEST -> semantic stages; staging deletion follows
-# verified SQLite RAW import.
+# Durable queue remains RAW_INGEST -> semantic stages. It now runs as an Android
+# background-priority worker and requires browser quiet before heavy work;
+# staging deletion still follows verified SQLite RAW import.
 for token in (
     'CREATE TABLE IF NOT EXISTS derivation_queue',
     'source_sha256 TEXT PRIMARY KEY',
     'status TEXT NOT NULL', 'stage TEXT NOT NULL', 'attempts INTEGER NOT NULL DEFAULT 0',
     'recoverInterrupted()', 'recoverStagedRaw(appContext)', 'requeueForRawIngest(',
     'Executors.newSingleThreadExecutor', 'bke-dna-breathing-derivation',
+    'Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)',
+    'BROWSER_QUIET_MS = 3_000L', 'noteBrowserActivity()', 'yieldForBrowserActivity()',
     'enum class AndroidProcessingProfile', 'SLOW(500L)', 'BALANCED(150L)', 'FAST(25L)',
     'Thread.sleep(restMillis)', 'Thread.yield()',
-    'activeCaptures', 'waitForCaptureQuiet()',
+    'activeCaptures', 'waitForBrowserQuiet()',
     'STAGE_RAW_INGEST = "RAW_INGEST"',
     'rawStore.importVerified(', 'rawStore.verifySource(job.sourceSha256, job.byteLength)',
     'stagedRaw.delete()',
