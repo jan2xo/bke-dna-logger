@@ -121,19 +121,27 @@ for token in ['withStorageMutationPause', 'pauseForStorageMutation', 'resumeAfte
 for token in ['storageMutation = true', 'AndroidCaptureRuntime.withStorageMutationPause(this)']:
     assert token in ui, token
 
-# Shared title catalog derives only actual captured titles. Large Latest RAW is
-# streamed instead of being rejected by the legacy 16 MiB materialization bound,
-# and the format bump re-probes old titleless indexed sources.
+# Shared title catalog derives only actual captured title evidence. Catalog v3
+# adds bounded conversation-list metadata recovery so ordinary cards can hydrate
+# titles without scanning giant conversation RAW, while the full explicit search
+# path still supports normalized/root RAW title evidence and historical recovery.
 for token in [
     'class AndroidConversationTitleCatalog', 'conversation-title-catalog.json',
-    'candidate_root_title', 'candidate_title_string', 'candidate_title_conflict',
-    'matchingConversationIds', 'indexedSources', 'FORMAT_VERSION = 2',
+    'candidate_root_title', 'candidate_title_string', 'candidate_bound_title',
+    'conversations_list_title_found', 'conversations_list_title_conflict',
+    'matchingConversationIds', 'indexedSources', 'indexedMetadataSources',
+    'FORMAT_VERSION = 3',
     'MAX_LEGACY_BODY_BYTES = 16L * 1024 * 1024',
+    'MAX_CONVERSATION_LIST_BYTES = 8L * 1024 * 1024',
+    'fun refreshFromConversationListEvidence()',
+    'queryConversationListCaptures(', 'isConversationListRequest(requestUrl)',
+    'collectConversationListTitles(root, candidates, depth = 0)',
+    'CONVERSATION_ID_KEYS = setOf("id", "conversation_id", "conversationId")',
     'AndroidWorkingDataManager(appContext).listWorkingData()',
     'AndroidDerivativeSourceAccess.listNormalizedSourceSha256s(generation, captureRoot)',
     'AndroidDerivativeSourceAccess.readNormalized(generation, captureRoot, sourceSha256)',
     'AndroidRawSourceAccess.withExactInputStream(appContext, sourceSha256)',
-    'JsonReader(InputStreamReader(input, Charsets.UTF_8)).use(::readCapturedRootTitle)',
+    'readCapturedRootTitle(reader, conversationNativeId)',
     'AndroidRawSourceAccess.readAllBytes(',
 ]:
     assert token in titles, token
@@ -142,12 +150,16 @@ for forbidden in ['setOf("user")', 'textParts', 'first user', 'first JAN', 'bodi
     assert forbidden not in titles, forbidden
 
 # Unified library remains metadata-only, federated and deduplicated by native identity.
+# Blank loads may hydrate bounded conversation-list titles; explicit title search
+# performs the full evidence refresh.
 for token in [
     'class AndroidUnifiedConversationLibrary', 'workingData.listWorkingData()',
     'AndroidConversationTitleCatalog', 'SQLiteDatabase.OPEN_READONLY', 'logical_conversation',
     '.groupBy { it.conversationNativeId }', 'generationCount', 'hasLatest',
     'DEFAULT_PAGE_SIZE = 40', 'MAX_PAGE_SIZE = 10_000',
     'UNTITLED_TITLE = "Untitled conversation"', 'fun resolve(conversationNativeId: String)',
+    'titleCatalog.refreshFromConversationListEvidence()',
+    'titleCatalog.refreshFromEvidence()',
 ]:
     assert token in unified, token
 for forbidden in ['AndroidHumanExportService', '.readText(']:
@@ -309,4 +321,4 @@ identity = '\n'.join(f'{p}\t{s}\t{n}\t{src}' for p, s, n, src in sorted(evidence
 archive_id = 'dna-conversation-v2-' + hashlib.sha256(identity.encode()).hexdigest()
 assert len(archive_id) == len('dna-conversation-v2-') + 64
 
-print('android SQLite Working Data backup + background UI + title recovery smoke PASS')
+print('android SQLite Working Data backup + background UI + title evidence recovery smoke PASS')
