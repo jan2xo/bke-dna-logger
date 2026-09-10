@@ -27,7 +27,21 @@
     "capture_forward_failed",
     "interceptor_load_error",
     "page_runtime_error",
-    "page_unhandled_rejection"
+    "page_unhandled_rejection",
+    "page_window_open",
+    "page_history_push_state",
+    "page_history_replace_state",
+    "page_navigation_api",
+    "page_popstate",
+    "page_hashchange"
+  ]);
+  const REPEATABLE_DIAGNOSTIC_EVENTS = new Set([
+    "page_window_open",
+    "page_history_push_state",
+    "page_history_replace_state",
+    "page_navigation_api",
+    "page_popstate",
+    "page_hashchange"
   ]);
   const forwardedDiagnostics = new Set();
   let forwarding = Promise.resolve();
@@ -47,11 +61,16 @@
   }
 
   async function forwardDiagnostic(event) {
-    if (!DIAGNOSTIC_EVENTS.has(event) || forwardedDiagnostics.has(event)) {
+    if (!DIAGNOSTIC_EVENTS.has(event)) {
+      return;
+    }
+    if (!REPEATABLE_DIAGNOSTIC_EVENTS.has(event) && forwardedDiagnostics.has(event)) {
       return;
     }
 
-    forwardedDiagnostics.add(event);
+    if (!REPEATABLE_DIAGNOSTIC_EVENTS.has(event)) {
+      forwardedDiagnostics.add(event);
+    }
     await sendNative({
       type: "diagnostic",
       event
