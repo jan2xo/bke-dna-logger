@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets
 class GeckoViewHost(
     private val activity: Activity,
     private val view: GeckoView,
+    private val onCanGoBackChanged: (Boolean) -> Unit = {},
 ) {
     companion object {
         private const val TAG = "BkeDnaGeckoView"
@@ -234,8 +235,10 @@ class GeckoViewHost(
         }
 
         override fun onCanGoBack(session: GeckoSession, canGoBack: Boolean) {
+            val changed = this@GeckoViewHost.canGoBack != canGoBack
             this@GeckoViewHost.canGoBack = canGoBack
             browserDiagnostic(if (canGoBack) "navigation_can_go_back" else "navigation_cannot_go_back")
+            if (changed) onCanGoBackChanged(canGoBack)
         }
 
         override fun onLocationChange(
@@ -550,7 +553,10 @@ class GeckoViewHost(
         dismissPendingFilePrompt()
         pendingGeckoPermissionCallback?.reject()
         pendingGeckoPermissionCallback = null
-        canGoBack = false
+        if (canGoBack) {
+            canGoBack = false
+            onCanGoBackChanged(false)
+        }
         view.releaseSession()
         if (session.isOpen) session.close()
         AndroidCaptureRuntime.stop()

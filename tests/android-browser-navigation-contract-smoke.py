@@ -40,14 +40,15 @@ redirect_block = host[
 ]
 assert "request.hasUserGesture" not in redirect_block
 
-# Android Back behaves like browser Back while Gecko has session history. Only
-# when Gecko reports no back entry does MainActivity fall through to normal
-# Activity back/exit behavior.
+# Browser Back follows Gecko history. Gecko publishes back-state changes to the
+# Activity so API 33+ can register a predictive-back callback only while there is
+# actual web history. This preserves system/default back behavior at history root.
 for token in (
+    "private val onCanGoBackChanged: (Boolean) -> Unit = {}",
     "@Volatile private var canGoBack = false",
     "override fun onCanGoBack(session: GeckoSession, canGoBack: Boolean)",
     "this@GeckoViewHost.canGoBack = canGoBack",
-    'browserDiagnostic(if (canGoBack) "navigation_can_go_back" else "navigation_cannot_go_back")',
+    "if (changed) onCanGoBackChanged(canGoBack)",
     "fun goBackIfPossible(): Boolean",
     "if (!started || !session.isOpen || !canGoBack) return false",
     'browserDiagnostic("navigation_back")',
@@ -55,16 +56,34 @@ for token in (
 ):
     assert token in host, token
 
+for token in (
+    "import android.window.OnBackInvokedCallback",
+    "import android.window.OnBackInvokedDispatcher",
+    "private var backInvokedCallback: OnBackInvokedCallback? = null",
+    "GeckoViewHost(this, geckoView) { canGoBack ->",
+    "updatePredictiveBackRegistration(canGoBack)",
+    "Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU",
+    "OnBackInvokedCallback {",
+    "onBackInvokedDispatcher.registerOnBackInvokedCallback(",
+    "OnBackInvokedDispatcher.PRIORITY_DEFAULT",
+    "onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback)",
+    "geckoHost.goBackIfPossible()",
+    "if (!handled) moveTaskToBack(true)",
+):
+    assert token in main, token
+
+# Pre-API-33 devices still use Activity.onBackPressed; Android 16+ is handled by
+# OnBackInvokedDispatcher because targetSdk 36 no longer dispatches onBackPressed.
 back_start = main.index("override fun onBackPressed()")
-back_end = main.index("override fun onActivityResult", back_start)
-back_block = main[back_start:back_end]
+back_end = main.index("private fun updatePredictiveBackRegistration", back_start)
+legacy_back = main[back_start:back_end]
 for token in (
     "AndroidDerivationScheduler.noteBrowserActivity()",
     "geckoHost.goBackIfPossible()",
     "super.onBackPressed()",
 ):
-    assert token in back_block, token
-assert back_block.index("geckoHost.goBackIfPossible()") < back_block.index("super.onBackPressed()")
+    assert token in legacy_back, token
+assert legacy_back.index("geckoHost.goBackIfPossible()") < legacy_back.index("super.onBackPressed()")
 
 # onNewSession remains Gecko-owned. GeckoView explicitly forbids calling loadUri
 # from this callback; all single-tab folding must happen in onLoadRequest instead.
@@ -96,4 +115,4 @@ for forbidden in (
 ):
     assert forbidden not in host, forbidden
 
-print("android generic navigation + browser back + camera file-URI contract smoke PASS")
+print("android generic navigation + predictive browser back + camera file-URI contract smoke PASS")
