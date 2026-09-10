@@ -10,10 +10,10 @@ import android.database.sqlite.SQLiteDatabase
  * state, raw payloads and human derivatives are resolved only after the owner
  * opens or exports a specific conversation.
  *
- * Owner-facing titles come from the shared captured-title catalog, never from a
- * synthesized first user prompt or a visible conversation UUID fallback. Blank
- * library loads never block on title archaeology; an explicit title search may
- * refresh captured title evidence on the background caller before matching.
+ * Owner-facing titles come from captured title evidence, never from a synthesized
+ * first user prompt or a visible conversation UUID fallback. Ordinary blank
+ * library loads hydrate only bounded conversation-list metadata evidence; an
+ * explicit title search may perform the heavier exact-conversation evidence pass.
  */
 class AndroidUnifiedConversationLibrary(context: Context) {
     private val appContext = context.applicationContext
@@ -26,7 +26,12 @@ class AndroidUnifiedConversationLibrary(context: Context) {
     ): List<AndroidUnifiedConversationSummary> {
         require(limit in 1..MAX_PAGE_SIZE) { "Unified conversation page size is out of range" }
         val normalizedQuery = query.trim()
-        if (normalizedQuery.isNotBlank()) {
+        if (normalizedQuery.isBlank()) {
+            // Fast path: conversation-list responses are bounded metadata and can
+            // hydrate real titles without scanning multi-megabyte message RAW.
+            titleCatalog.refreshFromConversationListEvidence()
+        } else {
+            // Explicit search is allowed to perform the full evidence recovery.
             titleCatalog.refreshFromEvidence()
         }
         val titleMatchedIds = if (normalizedQuery.isBlank()) {
