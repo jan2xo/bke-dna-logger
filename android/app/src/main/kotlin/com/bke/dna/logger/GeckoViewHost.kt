@@ -100,6 +100,41 @@ class GeckoViewHost(
         Log.d(BROWSER_TAG, "BKE Browser: $event")
     }
 
+    private fun shouldRedirectNewWindowToCurrentSession(
+        request: GeckoSession.NavigationDelegate.LoadRequest,
+    ): Boolean {
+        if (request.target != GeckoSession.NavigationDelegate.TARGET_WINDOW_NEW) return false
+        if (!request.hasUserGesture) return false
+
+        val destination = parseWebUri(request.uri) ?: return false
+        val trigger = parseWebUri(request.triggerUri) ?: return false
+        return sameWebOrigin(trigger, destination)
+    }
+
+    private fun parseWebUri(value: String?): URI? {
+        if (value.isNullOrBlank()) return null
+        val uri = runCatching { URI(value) }.getOrNull() ?: return null
+        val scheme = uri.scheme?.lowercase() ?: return null
+        if (scheme != "http" && scheme != "https") return null
+        if (uri.host.isNullOrBlank()) return null
+        return uri
+    }
+
+    private fun sameWebOrigin(first: URI, second: URI): Boolean {
+        if (!first.scheme.equals(second.scheme, ignoreCase = true)) return false
+        if (!first.host.equals(second.host, ignoreCase = true)) return false
+        return effectivePort(first) == effectivePort(second)
+    }
+
+    private fun effectivePort(uri: URI): Int {
+        if (uri.port >= 0) return uri.port
+        return when (uri.scheme?.lowercase()) {
+            "http" -> 80
+            "https" -> 443
+            else -> -1
+        }
+    }
+
     private val messageDelegate = object : WebExtension.MessageDelegate {
         override fun onMessage(
             nativeApp: String,
@@ -173,13 +208,21 @@ class GeckoViewHost(
             session: GeckoSession,
             request: GeckoSession.NavigationDelegate.LoadRequest,
         ): GeckoResult<AllowOrDeny>? {
+            val opensNewWindow = request.target == GeckoSession.NavigationDelegate.TARGET_WINDOW_NEW
             browserDiagnostic(
-                if (request.target == GeckoSession.NavigationDelegate.TARGET_WINDOW_NEW) {
+                if (opensNewWindow) {
                     "navigation_request_new_window"
                 } else {
                     "navigation_request"
                 },
             )
+
+            if (opensNewWindow && shouldRedirectNewWindowToCurrentSession(request)) {
+                browserDiagnostic("navigation_new_window_redirect_current")
+                session.loadUri(request.uri)
+                return GeckoResult.deny()
+            }
+
             return super.onLoadRequest(session, request)
         }
 
