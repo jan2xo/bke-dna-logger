@@ -3,20 +3,20 @@ package com.bke.dna.logger
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
-import android.webkit.MimeTypeMap
 import java.io.File
 import java.util.UUID
 
 /**
  * Stages user-selected non-media documents into app cache before Gecko consumes them.
  *
- * Android document providers disagree on MIME labels for developer files such as
- * Markdown. A short-lived app-owned copy gives Gecko a stable readable content URI,
- * preserves the original display name, and avoids relying on provider quirks after
- * the picker Activity closes. These files are browser upload plumbing, never DNA
- * evidence, and are cleaned opportunistically by AndroidUserSelectedFileProvider.
+ * Gecko's file-prompt bridge ultimately needs a real filesystem path. Android
+ * document providers normally return content:// URIs, so developer files such as
+ * Markdown are copied into a short-lived app-cache file and returned to Gecko as
+ * a file:// URI. These files are browser upload plumbing, never DNA evidence.
  */
 object AndroidDocumentUploadStager {
+    private const val MAX_CACHE_AGE_MS = 24L * 60L * 60L * 1000L
+
     fun shouldStage(context: Context, uri: Uri): Boolean {
         val type = context.contentResolver.getType(uri)?.lowercase().orEmpty()
         return !type.startsWith("image/") &&
@@ -27,27 +27,24 @@ object AndroidDocumentUploadStager {
     fun stage(context: Context, source: Uri): Uri? {
         val appContext = context.applicationContext
         val resolver = appContext.contentResolver
+        cleanupStaleFiles(appContext)
+
         val displayName = sanitizeDisplayName(resolveDisplayName(appContext, source))
-        val mimeType = canonicalMimeType(resolver.getType(source), displayName)
-        val extension = cacheExtension(displayName)
-        val target = AndroidUserSelectedFileProvider.createStagedUploadFile(
-            appContext,
-            "upload-${UUID.randomUUID()}$extension",
-        )
+        val directory = File(cacheRoot(appContext), UUID.randomUUID().toString())
+        if (!directory.mkdir()) return null
+        val target = File(directory, displayName)
 
         return runCatching {
+            require(target.canonicalFile.parentFile == directory.canonicalFile) {
+                "Staged upload escaped browser cache"
+            }
             resolver.openInputStream(source)?.use { input ->
                 target.outputStream().use { output -> input.copyTo(output) }
             } ?: error("Selected document does not expose an input stream")
 
-            AndroidUserSelectedFileProvider.stagedUploadUri(
-                appContext,
-                target,
-                displayName,
-                mimeType,
-            )
+            Uri.fromFile(target)
         }.getOrElse {
-            target.delete()
+            directory.deleteRecursively()
             null
         }
     }
@@ -72,33 +69,25 @@ object AndroidDocumentUploadStager {
 
     private fun sanitizeDisplayName(value: String): String {
         val cleaned = value
-            .replace('/', '_')
-            .replace('\\', '_')
-            .filterNot { it.code < 32 }
-            .trim()
-        return (cleaned.ifBlank { "upload" }).take(180)
+            .replace(Regex("[^A-Za-z0-9._-]+"), "_")
+            .trim('_')
+            .take(180)
+        return cleaned
+            .takeIf { it.isNotBlank() && it != "." && it != ".." }
+            ?: "upload"
     }
 
-    private fun cacheExtension(displayName: String): String {
-        val extension = displayName.substringAfterLast('.', "")
-            .lowercase()
-            .takeIf { SAFE_EXTENSION.matches(it) }
-            ?: return ""
-        return ".$extension"
+    private fun cleanupStaleFiles(context: Context) {
+        val cutoff = System.currentTimeMillis() - MAX_CACHE_AGE_MS
+        cacheRoot(context).listFiles().orEmpty()
+            .filter { it.isDirectory && it.lastModified() < cutoff }
+            .forEach(File::deleteRecursively)
     }
 
-    private fun canonicalMimeType(providerType: String?, displayName: String): String {
-        val extension = displayName.substringAfterLast('.', "").lowercase()
-        if (extension == "md" || extension == "markdown") return "text/markdown"
-
-        val normalizedProvider = providerType?.trim()?.lowercase()
-        if (!normalizedProvider.isNullOrBlank() && normalizedProvider != "application/octet-stream") {
-            return normalizedProvider
+    private fun cacheRoot(context: Context): File =
+        File(context.cacheDir, "gecko-upload").also { directory ->
+            check(directory.exists() || directory.mkdirs()) {
+                "Unable to create Gecko upload cache"
+            }
         }
-
-        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
-            ?: "application/octet-stream"
-    }
-
-    private val SAFE_EXTENSION = Regex("[a-z0-9]{1,16}")
 }

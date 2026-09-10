@@ -59,9 +59,9 @@ assert "AndroidWireIngress(activity.applicationContext)" not in host
 
 # Generic Files must not let provider-specific MIME aliases hide developer files
 # such as Markdown. Media-only prompts retain media filtering so the already-good
-# Photos path remains unchanged. Non-media selections are staged once into the
-# app's short-lived browser cache with their original display name/MIME before
-# they are confirmed back to Gecko.
+# Photos path remains unchanged. Non-media selections are copied into a short-lived
+# app-cache file and returned to Gecko as file:// URIs so Gecko can resolve an
+# actual filesystem path for the page's file input.
 for token in (
     "session.setPromptDelegate(promptDelegate)",
     "override fun onFilePrompt(",
@@ -94,13 +94,15 @@ for token in (
     "fun stage(context: Context, source: Uri): Uri?",
     "resolver.openInputStream(source)",
     "input.copyTo(output)",
-    'extension == "md" || extension == "markdown"',
-    'return "text/markdown"',
     "OpenableColumns.DISPLAY_NAME",
-    "AndroidUserSelectedFileProvider.createStagedUploadFile(",
-    "AndroidUserSelectedFileProvider.stagedUploadUri(",
+    'File(context.cacheDir, "gecko-upload")',
+    "UUID.randomUUID().toString()",
+    "Uri.fromFile(target)",
+    "MAX_CACHE_AGE_MS = 24L * 60L * 60L * 1000L",
 ):
     assert token in stager, token
+assert "AndroidUserSelectedFileProvider.createStagedUploadFile(" not in stager
+assert "AndroidUserSelectedFileProvider.stagedUploadUri(" not in stager
 for forbidden in (
     "AndroidCaptureRuntime",
     "AndroidRawEvidenceStore",
@@ -108,6 +110,8 @@ for forbidden in (
 ):
     assert forbidden not in stager, forbidden
 
+# The provider remains available for legacy camera plumbing, but generic document
+# staging must no longer depend on a custom content:// URI.
 for token in (
     "class AndroidUserSelectedFileProvider : ContentProvider()",
     'File(context.cacheDir, "user-selected")',
@@ -115,12 +119,6 @@ for token in (
     "ParcelFileDescriptor.open(file, flags)",
     "OpenableColumns.DISPLAY_NAME",
     "OpenableColumns.SIZE",
-    'STAGED_PATH = "staged"',
-    'STAGED_FILE_NAME = Regex("upload-',
-    "createStagedUploadFile(context: Context, name: String)",
-    "stagedUploadUri(",
-    'extension == "md" || extension == "markdown"',
-    'return "text/markdown"',
     "MAX_CACHE_AGE_MS = 24L * 60L * 60L * 1000L",
     "cleanupStaleFiles(appContext)",
     "deleteIfOwned(context: Context, uri: Uri?)",
@@ -243,4 +241,4 @@ assert 'type: "diagnostic"' in bridge
 assert host.index("ensureBuiltIn(EXTENSION_URI, EXTENSION_ID)") < host.index("session.loadUri(CHATGPT_URL)")
 assert 'android:windowSoftInputMode="stateUnspecified|adjustResize"' in manifest
 
-print("android GeckoView streamed runtime + generic Markdown/document upload smoke PASS")
+print("android GeckoView streamed runtime + generic Markdown file-URI upload smoke PASS")
