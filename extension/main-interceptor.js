@@ -89,6 +89,8 @@
   }
 
   try {
+    console.warn(`[BKE Browser Identity] origin=${window.location.origin} ua=${navigator.userAgent}`);
+
     window.addEventListener("error", () => emitDiagnostic("page_runtime_error"), true);
     window.addEventListener("unhandledrejection", () => emitDiagnostic("page_unhandled_rejection"));
 
