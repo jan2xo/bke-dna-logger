@@ -11,6 +11,7 @@ raw_access = (base / "AndroidRawSourceAccess.kt").read_text(encoding="utf-8")
 raw_store = (base / "AndroidRawEvidenceStore.kt").read_text(encoding="utf-8")
 normalized_store = (base / "AndroidChunkedNormalizedStore.kt").read_text(encoding="utf-8")
 unified = (base / "AndroidUnifiedConversationLibrary.kt").read_text(encoding="utf-8")
+titles = (base / "AndroidConversationTitleCatalog.kt").read_text(encoding="utf-8")
 manifest = (root / "android/app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
 
 # DNA derivation is explicitly background-priority and waits for a meaningful
@@ -147,19 +148,36 @@ assert 'AndroidDerivationScheduler.yieldForBrowserActivity()' in flush
 assert flush.index('AndroidDerivationScheduler.yieldForBrowserActivity()') < flush.index('database.insertOrThrow(TABLE_CHUNK, null, values)')
 assert 'database.beginTransaction()' not in flush
 
-# Opening the ordinary blank Working Data library must not launch title archaeology
-# before metadata rows can be rendered. Explicit title search may still request it.
+# Ordinary Working Data loads may hydrate only bounded conversation-list metadata
+# titles. They must not invoke the full normalized/RAW title archaeology path.
 search_start = unified.index('fun search(')
 search_end = unified.index('fun resolve(', search_start)
 search = unified[search_start:search_end]
-assert 'val normalizedQuery = query.trim()' in search
-assert 'if (normalizedQuery.isNotBlank())' in search
-assert 'titleCatalog.refreshFromEvidence()' in search
-assert search.index('if (normalizedQuery.isNotBlank())') < search.index('titleCatalog.refreshFromEvidence()')
+for token in (
+    'val normalizedQuery = query.trim()',
+    'if (normalizedQuery.isBlank())',
+    'titleCatalog.refreshFromConversationListEvidence()',
+    'titleCatalog.refreshFromEvidence()',
+):
+    assert token in search, token
+assert search.index('if (normalizedQuery.isBlank())') < search.index('titleCatalog.refreshFromConversationListEvidence()')
+assert search.index('titleCatalog.refreshFromConversationListEvidence()') < search.index('titleCatalog.refreshFromEvidence()')
+
+light_start = titles.index('fun refreshFromConversationListEvidence()')
+light_end = titles.index('/** Full evidence refresh', light_start)
+light = titles[light_start:light_end]
+assert 'refreshConversationListEvidence(state, generations)' in light
+assert 'AndroidDerivativeSourceAccess.listNormalizedSourceSha256s' not in light
+for token in (
+    'MAX_CONVERSATION_LIST_BYTES = 8L * 1024 * 1024',
+    'isConversationListRequest(requestUrl)',
+    'collectConversationListTitles(root, candidates, depth = 0)',
+):
+    assert token in titles, token
 
 resolve_start = unified.index('fun resolve(')
 resolve_end = unified.index('private fun mergeCopies(', resolve_start)
 resolve = unified[resolve_start:resolve_end]
 assert 'titleCatalog.refreshFromEvidence()' not in resolve
 
-print('android browser-first background processing smoke PASS')
+print('android browser-first background processing + lightweight title hydration smoke PASS')
