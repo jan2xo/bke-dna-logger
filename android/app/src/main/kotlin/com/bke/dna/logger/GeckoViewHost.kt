@@ -95,6 +95,7 @@ class GeckoViewHost(
     private var started = false
     private var pendingFilePrompt: PendingFilePrompt? = null
     private var pendingGeckoPermissionCallback: GeckoSession.PermissionDelegate.Callback? = null
+    private var currentWebUri: URI? = parseWebUri(CHATGPT_URL)
 
     private fun browserDiagnostic(event: String) {
         Log.d(BROWSER_TAG, "BKE Browser: $event")
@@ -104,11 +105,10 @@ class GeckoViewHost(
         request: GeckoSession.NavigationDelegate.LoadRequest,
     ): Boolean {
         if (request.target != GeckoSession.NavigationDelegate.TARGET_WINDOW_NEW) return false
-        if (!request.hasUserGesture) return false
 
         val destination = parseWebUri(request.uri) ?: return false
-        val trigger = parseWebUri(request.triggerUri) ?: return false
-        return sameWebOrigin(trigger, destination)
+        val source = parseWebUri(request.triggerUri) ?: currentWebUri ?: return false
+        return sameWebOrigin(source, destination)
     }
 
     private fun parseWebUri(value: String?): URI? {
@@ -232,6 +232,7 @@ class GeckoViewHost(
             perms: List<GeckoSession.PermissionDelegate.ContentPermission>,
             hasUserGesture: Boolean,
         ) {
+            parseWebUri(url)?.let { currentWebUri = it }
             browserDiagnostic("navigation_location_change")
         }
 
@@ -631,8 +632,18 @@ class GeckoViewHost(
     }
 
     private fun prepareGeckoFileUris(selected: List<Uri>, cameraUri: Uri?): List<Uri> =
-        selected.map { uri ->
-            if (uri == cameraUri || !AndroidDocumentUploadStager.shouldStage(appContext, uri)) {
+        selected.mapNotNull { uri ->
+            if (uri == cameraUri) {
+                val staged = AndroidDocumentUploadStager.stage(appContext, uri)
+                if (staged != null) {
+                    browserDiagnostic("file_prompt_camera_staged")
+                    AndroidUserSelectedFileProvider.deleteIfOwned(appContext, uri)
+                    staged
+                } else {
+                    browserDiagnostic("file_prompt_camera_stage_failed")
+                    null
+                }
+            } else if (!AndroidDocumentUploadStager.shouldStage(appContext, uri)) {
                 uri
             } else {
                 AndroidDocumentUploadStager.stage(appContext, uri)?.also {
