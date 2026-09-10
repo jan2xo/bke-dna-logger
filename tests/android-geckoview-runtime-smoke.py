@@ -18,6 +18,7 @@ for token in (
     "geckoHost.start()",
     "startActivity(Intent(this@MainActivity, AndroidExportsBackupsActivity::class.java))",
     "geckoHost.onActivityResult(requestCode, resultCode, data)",
+    "geckoHost.onRequestPermissionsResult(requestCode, permissions, grantResults)",
     "geckoHost.stop()",
 ):
     assert token in main, token
@@ -55,10 +56,11 @@ for token in (
     assert token in host, token
 assert "AndroidWireIngress(activity.applicationContext)" not in host
 
-# Gecko's own FilePrompt contract drives ordinary web uploads. Match the current
-# GeckoView example by using ACTION_GET_CONTENT for files, while folder selection
-# stays on ACTION_OPEN_DOCUMENT_TREE and camera capture remains an optional chooser
-# intent. Selected content URIs go straight back through prompt.confirm().
+# Ordinary web uploads use Gecko's FilePrompt contract and ACTION_GET_CONTENT.
+# Keep the Android chooser coarse-grained rather than applying EXTRA_MIME_TYPES:
+# provider MIME labels vary in the wild and the web page remains the final
+# authority on whether it accepts the selected file. Folder selection remains
+# separate and capture requests use the generic Android camera flow.
 for token in (
     "session.setPromptDelegate(promptDelegate)",
     "override fun onFilePrompt(",
@@ -68,7 +70,7 @@ for token in (
     "Intent.ACTION_GET_CONTENT",
     "Intent.ACTION_OPEN_DOCUMENT_TREE",
     "Intent.EXTRA_ALLOW_MULTIPLE",
-    "Intent.EXTRA_MIME_TYPES",
+    "Intent.EXTRA_LOCAL_ONLY",
     "Intent.EXTRA_INITIAL_INTENTS",
     "mergedMimeType(mimeTypes)",
     "MediaStore.ACTION_IMAGE_CAPTURE",
@@ -83,10 +85,33 @@ for token in (
 ):
     assert token in host, token
 assert "Intent(Intent.ACTION_OPEN_DOCUMENT)" not in host
+assert "Intent.EXTRA_MIME_TYPES" not in host
 file_prompt_block = host[host.index("private val promptDelegate"):host.index("private fun handleDiagnostic")]
 assert "AndroidCaptureRuntime" not in file_prompt_block
 assert "openInputStream" not in host
 assert "copyTo(" not in host
+
+# Camera/microphone browser capability requires an actual embedder-side Android
+# permission bridge. Gecko's default PermissionDelegate rejects these requests,
+# so the app forwards system permission results and then asks the user before
+# granting the requested media source.
+for token in (
+    "session.setPermissionDelegate(permissionDelegate)",
+    "GECKO_ANDROID_PERMISSION_REQUEST = 4702",
+    "FILE_CAMERA_PERMISSION_REQUEST = 4703",
+    "activity.requestPermissions(requested.toTypedArray(), GECKO_ANDROID_PERMISSION_REQUEST)",
+    "activity.requestPermissions(arrayOf(Manifest.permission.CAMERA), FILE_CAMERA_PERMISSION_REQUEST)",
+    "callback.grant()",
+    "callback.reject()",
+    "AlertDialog.Builder(activity)",
+    'setNegativeButton("Deny")',
+    'setPositiveButton("Allow")',
+    "callback.grant(video?.firstOrNull(), audio?.firstOrNull())",
+    "file_prompt_camera_permission_requested",
+    "permission_android_granted",
+    "permission_media_granted",
+):
+    assert token in host, token
 
 for token in (
     "class AndroidUserSelectedFileProvider : ContentProvider()",
@@ -103,15 +128,17 @@ for token in (
 assert "AndroidCaptureRuntime" not in user_files
 assert "AndroidRawEvidenceStore" not in user_files
 assert "AndroidCaptureStore" not in user_files
+
 for token in (
     'android:name=".AndroidUserSelectedFileProvider"',
     'android:authorities="${applicationId}.user-selected-files"',
     'android:exported="false"',
     'android:grantUriPermissions="true"',
+    '<uses-permission android:name="android.permission.CAMERA" />',
+    '<uses-permission android:name="android.permission.RECORD_AUDIO" />',
 ):
     assert token in manifest, token
 for forbidden in (
-    'android.permission.CAMERA',
     'android.permission.READ_MEDIA_IMAGES',
     'android.permission.READ_MEDIA_VIDEO',
     'android.permission.READ_EXTERNAL_STORAGE',
@@ -212,4 +239,4 @@ assert 'type: "diagnostic"' in bridge
 assert host.index("ensureBuiltIn(EXTENSION_URI, EXTENSION_ID)") < host.index("session.loadUri(CHATGPT_URL)")
 assert 'android:windowSoftInputMode="stateUnspecified|adjustResize"' in manifest
 
-print("android GeckoView streamed runtime + browser-correct photo/camera/file prompt smoke PASS")
+print("android GeckoView streamed runtime + generic files + camera/media permission bridge smoke PASS")

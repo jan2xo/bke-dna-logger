@@ -2,6 +2,7 @@ package com.bke.dna.logger
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -32,6 +33,8 @@ class GeckoViewHost(
         private const val EXTENSION_ID = "bke-dna-logger@jl-bke.com"
         private const val NATIVE_APP = "bke.dna.logger"
         private const val FILE_PROMPT_REQUEST = 4701
+        private const val GECKO_ANDROID_PERMISSION_REQUEST = 4702
+        private const val FILE_CAMERA_PERMISSION_REQUEST = 4703
 
         private const val ROUTE_CONVERSATION = "capture_route_conversation"
         private const val ROUTE_CONVERSATIONS_LIST = "capture_route_conversations_list"
@@ -91,6 +94,7 @@ class GeckoViewHost(
     private val session = GeckoSession()
     private var started = false
     private var pendingFilePrompt: PendingFilePrompt? = null
+    private var pendingGeckoPermissionCallback: GeckoSession.PermissionDelegate.Callback? = null
 
     private fun browserDiagnostic(event: String) {
         Log.d(BROWSER_TAG, "BKE Browser: $event")
@@ -210,13 +214,35 @@ class GeckoViewHost(
             callback: GeckoSession.PermissionDelegate.Callback,
         ) {
             browserDiagnostic("permission_android_requested")
-            if (permissions?.contains(Manifest.permission.CAMERA) == true) {
+            val requested = permissions?.filter { it.isNotBlank() }?.distinct().orEmpty()
+            if (Manifest.permission.CAMERA in requested) {
                 browserDiagnostic("permission_android_camera")
             }
-            if (permissions?.contains(Manifest.permission.RECORD_AUDIO) == true) {
+            if (Manifest.permission.RECORD_AUDIO in requested) {
                 browserDiagnostic("permission_android_microphone")
             }
-            super.onAndroidPermissionsRequest(session, permissions, callback)
+
+            if (requested.isEmpty() || requested.all(::isPermissionGranted)) {
+                browserDiagnostic("permission_android_granted")
+                callback.grant()
+                return
+            }
+
+            if (pendingGeckoPermissionCallback != null) {
+                browserDiagnostic("permission_android_busy_rejected")
+                callback.reject()
+                return
+            }
+
+            pendingGeckoPermissionCallback = callback
+            runCatching {
+                activity.requestPermissions(requested.toTypedArray(), GECKO_ANDROID_PERMISSION_REQUEST)
+            }.onFailure { error ->
+                Log.e(TAG, "Unable to request Android browser permission", error)
+                pendingGeckoPermissionCallback = null
+                browserDiagnostic("permission_android_request_failed")
+                callback.reject()
+            }
         }
 
         override fun onContentPermissionRequest(
@@ -235,9 +261,41 @@ class GeckoViewHost(
             callback: GeckoSession.PermissionDelegate.MediaCallback,
         ) {
             browserDiagnostic("permission_media_requested")
-            if (!video.isNullOrEmpty()) browserDiagnostic("permission_media_camera")
-            if (!audio.isNullOrEmpty()) browserDiagnostic("permission_media_microphone")
-            super.onMediaPermissionRequest(session, uri, video, audio, callback)
+            val wantsVideo = !video.isNullOrEmpty()
+            val wantsAudio = !audio.isNullOrEmpty()
+            if (wantsVideo) browserDiagnostic("permission_media_camera")
+            if (wantsAudio) browserDiagnostic("permission_media_microphone")
+
+            if ((wantsVideo && !isPermissionGranted(Manifest.permission.CAMERA)) ||
+                (wantsAudio && !isPermissionGranted(Manifest.permission.RECORD_AUDIO))
+            ) {
+                browserDiagnostic("permission_media_missing_android_permission")
+                callback.reject()
+                return
+            }
+
+            val message = when {
+                wantsVideo && wantsAudio -> "Allow this site to use your camera and microphone?"
+                wantsVideo -> "Allow this site to use your camera?"
+                wantsAudio -> "Allow this site to use your microphone?"
+                else -> "Allow this site to use media devices?"
+            }
+
+            AlertDialog.Builder(activity)
+                .setMessage(message)
+                .setNegativeButton("Deny") { _, _ ->
+                    browserDiagnostic("permission_media_rejected")
+                    callback.reject()
+                }
+                .setPositiveButton("Allow") { _, _ ->
+                    browserDiagnostic("permission_media_granted")
+                    callback.grant(video?.firstOrNull(), audio?.firstOrNull())
+                }
+                .setOnCancelListener {
+                    browserDiagnostic("permission_media_rejected")
+                    callback.reject()
+                }
+                .show()
         }
     }
 
@@ -257,20 +315,26 @@ class GeckoViewHost(
                 result.complete(prompt.dismiss())
                 return result
             }
-            pendingFilePrompt = PendingFilePrompt(prompt, result, launch.cameraUri)
+            val pending = PendingFilePrompt(prompt, result, launch.intent, launch.cameraUri)
+            pendingFilePrompt = pending
 
-            return try {
-                activity.startActivityForResult(launch.intent, FILE_PROMPT_REQUEST)
-                browserDiagnostic("file_prompt_picker_launched")
-                result
-            } catch (error: Exception) {
-                browserDiagnostic("file_prompt_picker_launch_failed")
-                Log.e(TAG, "Unable to launch Gecko file prompt", error)
-                cleanupCameraGrant(launch.cameraUri, deleteFile = true)
-                pendingFilePrompt = null
-                result.complete(prompt.dismiss())
-                result
+            if (launch.requiresCameraPermission && !isPermissionGranted(Manifest.permission.CAMERA)) {
+                browserDiagnostic("file_prompt_camera_permission_requested")
+                return try {
+                    activity.requestPermissions(arrayOf(Manifest.permission.CAMERA), FILE_CAMERA_PERMISSION_REQUEST)
+                    result
+                } catch (error: Exception) {
+                    browserDiagnostic("file_prompt_camera_permission_failed")
+                    Log.e(TAG, "Unable to request camera permission for file prompt", error)
+                    pendingFilePrompt = null
+                    cleanupCameraGrant(launch.cameraUri, deleteFile = true)
+                    result.complete(prompt.dismiss())
+                    result
+                }
             }
+
+            launchPendingFilePrompt(pending)
+            return result
         }
     }
 
@@ -379,14 +443,66 @@ class GeckoViewHost(
         return true
     }
 
+    fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ): Boolean {
+        if (requestCode == GECKO_ANDROID_PERMISSION_REQUEST) {
+            val callback = pendingGeckoPermissionCallback ?: return true
+            pendingGeckoPermissionCallback = null
+            val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            if (granted) {
+                browserDiagnostic("permission_android_granted")
+                callback.grant()
+            } else {
+                browserDiagnostic("permission_android_rejected")
+                callback.reject()
+            }
+            return true
+        }
+
+        if (requestCode == FILE_CAMERA_PERMISSION_REQUEST) {
+            val pending = pendingFilePrompt ?: return true
+            val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            if (granted) {
+                browserDiagnostic("file_prompt_camera_permission_granted")
+                launchPendingFilePrompt(pending)
+            } else {
+                browserDiagnostic("file_prompt_camera_permission_rejected")
+                pendingFilePrompt = null
+                cleanupCameraGrant(pending.cameraUri, deleteFile = true)
+                pending.result.complete(pending.prompt.dismiss())
+            }
+            return true
+        }
+
+        return false
+    }
+
     fun stop() {
         if (!started) return
 
         dismissPendingFilePrompt()
+        pendingGeckoPermissionCallback?.reject()
+        pendingGeckoPermissionCallback = null
         view.releaseSession()
         if (session.isOpen) session.close()
         AndroidCaptureRuntime.stop()
         started = false
+    }
+
+    private fun launchPendingFilePrompt(pending: PendingFilePrompt) {
+        try {
+            activity.startActivityForResult(pending.launchIntent, FILE_PROMPT_REQUEST)
+            browserDiagnostic("file_prompt_picker_launched")
+        } catch (error: Exception) {
+            browserDiagnostic("file_prompt_picker_launch_failed")
+            Log.e(TAG, "Unable to launch Gecko file prompt", error)
+            if (pendingFilePrompt === pending) pendingFilePrompt = null
+            cleanupCameraGrant(pending.cameraUri, deleteFile = true)
+            pending.result.complete(pending.prompt.dismiss())
+        }
     }
 
     private fun buildFilePromptLaunch(
@@ -396,6 +512,7 @@ class GeckoViewHost(
             return FilePromptLaunch(
                 intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),
                 cameraUri = null,
+                requiresCameraPermission = false,
             )
         }
 
@@ -407,9 +524,7 @@ class GeckoViewHost(
         val contentIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = mergedMimeType(mimeTypes)
-            if (mimeTypes.isNotEmpty()) {
-                putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.toTypedArray())
-            }
+            putExtra(Intent.EXTRA_LOCAL_ONLY, true)
             if (prompt.type == GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE) {
                 putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
             }
@@ -417,18 +532,33 @@ class GeckoViewHost(
         }
 
         val cameraMime = supportedCameraMimeType(mimeTypes)
-        val cameraLaunch = cameraMime?.let(::buildCameraLaunch)
-        if (prompt.capture != GeckoSession.PromptDelegate.FilePrompt.Capture.NONE && cameraLaunch != null) {
-            return cameraLaunch
+        val directCapture = prompt.capture != GeckoSession.PromptDelegate.FilePrompt.Capture.NONE
+        if (directCapture && cameraMime != null) {
+            val cameraLaunch = buildCameraLaunch(cameraMime)
+            if (cameraLaunch != null) {
+                return FilePromptLaunch(
+                    intent = cameraLaunch.intent,
+                    cameraUri = cameraLaunch.cameraUri,
+                    requiresCameraPermission = true,
+                )
+            }
         }
-        if (cameraLaunch == null) {
-            return FilePromptLaunch(contentIntent, null)
+
+        val optionalCamera = if (
+            cameraMime != null && isPermissionGranted(Manifest.permission.CAMERA)
+        ) {
+            buildCameraLaunch(cameraMime)
+        } else {
+            null
+        }
+        if (optionalCamera == null) {
+            return FilePromptLaunch(contentIntent, null, false)
         }
 
         val chooser = Intent.createChooser(contentIntent, prompt.title ?: "Choose file").apply {
-            putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(cameraLaunch.intent))
+            putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(optionalCamera.intent))
         }
-        return FilePromptLaunch(chooser, cameraLaunch.cameraUri)
+        return FilePromptLaunch(chooser, optionalCamera.cameraUri, false)
     }
 
     private fun buildCameraLaunch(mimeType: String): FilePromptLaunch? {
@@ -455,7 +585,7 @@ class GeckoViewHost(
         handlers.forEach { resolveInfo ->
             activity.grantUriPermission(resolveInfo.activityInfo.packageName, cameraUri, grantFlags)
         }
-        return FilePromptLaunch(intent, cameraUri)
+        return FilePromptLaunch(intent, cameraUri, false)
     }
 
     private fun collectSelectedUris(data: Intent?): List<Uri> {
@@ -493,8 +623,8 @@ class GeckoViewHost(
     }
 
     private fun supportedCameraMimeType(mimeTypes: List<String>): String? {
-        val acceptsImage = mimeTypes.any { it == "image/*" || it == "image/jpeg" || it == "image/jpg" }
-        val acceptsVideo = mimeTypes.any { it == "video/*" || it == "video/mp4" }
+        val acceptsImage = mimeTypes.isEmpty() || mimeTypes.any { it == "image/*" || it.startsWith("image/") }
+        val acceptsVideo = mimeTypes.any { it == "video/*" || it.startsWith("video/") }
         return when {
             acceptsImage -> "image/jpeg"
             acceptsVideo -> "video/mp4"
@@ -517,14 +647,19 @@ class GeckoViewHost(
         return "$major/$subtype"
     }
 
+    private fun isPermissionGranted(permission: String): Boolean =
+        activity.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+
     private data class FilePromptLaunch(
         val intent: Intent,
         val cameraUri: Uri?,
+        val requiresCameraPermission: Boolean,
     )
 
     private data class PendingFilePrompt(
         val prompt: GeckoSession.PromptDelegate.FilePrompt,
         val result: GeckoResult<GeckoSession.PromptDelegate.PromptResponse>,
+        val launchIntent: Intent,
         val cameraUri: Uri?,
     )
 }

@@ -105,6 +105,17 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (::geckoHost.isInitialized) {
+            geckoHost.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        }
+    }
+
     override fun onDestroy() {
         if (::geckoHost.isInitialized) {
             geckoHost.stop()
