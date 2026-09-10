@@ -64,6 +64,12 @@ class GeckoViewHost(
             "interceptor_load_error",
             "page_runtime_error",
             "page_unhandled_rejection",
+            "page_window_open",
+            "page_history_push_state",
+            "page_history_replace_state",
+            "page_navigation_api",
+            "page_popstate",
+            "page_hashchange",
         )
         private val DIAGNOSTIC_KEYS = setOf("type", "event")
 
@@ -398,7 +404,7 @@ class GeckoViewHost(
             return
         }
 
-        if (event == "page_runtime_error" || event == "page_unhandled_rejection") {
+        if (event.startsWith("page_")) {
             browserDiagnostic(event)
         } else {
             Log.d(TAG, "DNA diagnostic: $event")
