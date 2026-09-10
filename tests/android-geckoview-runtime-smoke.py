@@ -8,6 +8,7 @@ main = (kotlin / "MainActivity.kt").read_text(encoding="utf-8")
 provider = (kotlin / "GeckoRuntimeProvider.kt").read_text(encoding="utf-8")
 host = (kotlin / "GeckoViewHost.kt").read_text(encoding="utf-8")
 user_files = (kotlin / "AndroidUserSelectedFileProvider.kt").read_text(encoding="utf-8")
+stager = (kotlin / "AndroidDocumentUploadStager.kt").read_text(encoding="utf-8")
 runtime = (kotlin / "AndroidCaptureRuntime.kt").read_text(encoding="utf-8")
 interceptor = (repo / "extension" / "main-interceptor.js").read_text(encoding="utf-8")
 bridge = (repo / "android" / "app" / "src" / "main" / "assets" / "dna-extension" / "bridge.js").read_text(encoding="utf-8")
@@ -56,62 +57,56 @@ for token in (
     assert token in host, token
 assert "AndroidWireIngress(activity.applicationContext)" not in host
 
-# Ordinary web uploads use Gecko's FilePrompt contract and ACTION_GET_CONTENT.
-# Keep the Android chooser coarse-grained rather than applying EXTRA_MIME_TYPES:
-# provider MIME labels vary in the wild and the web page remains the final
-# authority on whether it accepts the selected file. Folder selection remains
-# separate and capture requests use the generic Android camera flow.
+# Generic Files must not let provider-specific MIME aliases hide developer files
+# such as Markdown. Media-only prompts retain media filtering so the already-good
+# Photos path remains unchanged. Non-media selections are staged once into the
+# app's short-lived browser cache with their original display name/MIME before
+# they are confirmed back to Gecko.
 for token in (
     "session.setPromptDelegate(promptDelegate)",
     "override fun onFilePrompt(",
     "GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE",
     "GeckoSession.PromptDelegate.FilePrompt.Type.FOLDER",
-    "GeckoSession.PromptDelegate.FilePrompt.Capture.NONE",
     "Intent.ACTION_GET_CONTENT",
     "Intent.ACTION_OPEN_DOCUMENT_TREE",
     "Intent.EXTRA_ALLOW_MULTIPLE",
-    "Intent.EXTRA_LOCAL_ONLY",
-    "Intent.EXTRA_INITIAL_INTENTS",
-    "mergedMimeType(mimeTypes)",
-    "MediaStore.ACTION_IMAGE_CAPTURE",
-    "MediaStore.ACTION_VIDEO_CAPTURE",
-    "MediaStore.EXTRA_OUTPUT",
-    "AndroidUserSelectedFileProvider.createCameraUri(appContext, mimeType)",
-    "pending.prompt.confirm(appContext, finalUris.toTypedArray())",
-    "pending.prompt.confirm(appContext, finalUris.first())",
+    "browserPickerMimeType(mimeTypes)",
+    'mimeTypes.all { it.startsWith("image/") } -> "image/*"',
+    'else -> "*/*"',
+    "prepareGeckoFileUris(finalUris, cameraUri)",
+    "AndroidDocumentUploadStager.shouldStage(appContext, uri)",
+    "AndroidDocumentUploadStager.stage(appContext, uri)",
+    "file_prompt_document_staged",
+    "pending.prompt.confirm(appContext, geckoUris.toTypedArray())",
+    "pending.prompt.confirm(appContext, geckoUris.first())",
     "pending.prompt.dismiss()",
     "collectSelectedUris(data)",
-    "activity.revokeUriPermission(",
 ):
     assert token in host, token
-assert "Intent(Intent.ACTION_OPEN_DOCUMENT)" not in host
 assert "Intent.EXTRA_MIME_TYPES" not in host
+assert "Intent.EXTRA_LOCAL_ONLY" not in host
 file_prompt_block = host[host.index("private val promptDelegate"):host.index("private fun handleDiagnostic")]
 assert "AndroidCaptureRuntime" not in file_prompt_block
-assert "openInputStream" not in host
-assert "copyTo(" not in host
 
-# Camera/microphone browser capability requires an actual embedder-side Android
-# permission bridge. Gecko's default PermissionDelegate rejects these requests,
-# so the app forwards system permission results and then asks the user before
-# granting the requested media source.
 for token in (
-    "session.setPermissionDelegate(permissionDelegate)",
-    "GECKO_ANDROID_PERMISSION_REQUEST = 4702",
-    "FILE_CAMERA_PERMISSION_REQUEST = 4703",
-    "activity.requestPermissions(requested.toTypedArray(), GECKO_ANDROID_PERMISSION_REQUEST)",
-    "activity.requestPermissions(arrayOf(Manifest.permission.CAMERA), FILE_CAMERA_PERMISSION_REQUEST)",
-    "callback.grant()",
-    "callback.reject()",
-    "AlertDialog.Builder(activity)",
-    'setNegativeButton("Deny")',
-    'setPositiveButton("Allow")',
-    "callback.grant(video?.firstOrNull(), audio?.firstOrNull())",
-    "file_prompt_camera_permission_requested",
-    "permission_android_granted",
-    "permission_media_granted",
+    "object AndroidDocumentUploadStager",
+    "fun shouldStage(context: Context, uri: Uri): Boolean",
+    "fun stage(context: Context, source: Uri): Uri?",
+    "resolver.openInputStream(source)",
+    "input.copyTo(output)",
+    'extension == "md" || extension == "markdown"',
+    'return "text/markdown"',
+    "OpenableColumns.DISPLAY_NAME",
+    "AndroidUserSelectedFileProvider.createStagedUploadFile(",
+    "AndroidUserSelectedFileProvider.stagedUploadUri(",
 ):
-    assert token in host, token
+    assert token in stager, token
+for forbidden in (
+    "AndroidCaptureRuntime",
+    "AndroidRawEvidenceStore",
+    "AndroidCaptureStore",
+):
+    assert forbidden not in stager, forbidden
 
 for token in (
     "class AndroidUserSelectedFileProvider : ContentProvider()",
@@ -120,6 +115,12 @@ for token in (
     "ParcelFileDescriptor.open(file, flags)",
     "OpenableColumns.DISPLAY_NAME",
     "OpenableColumns.SIZE",
+    'STAGED_PATH = "staged"',
+    'STAGED_FILE_NAME = Regex("upload-',
+    "createStagedUploadFile(context: Context, name: String)",
+    "stagedUploadUri(",
+    'extension == "md" || extension == "markdown"',
+    'return "text/markdown"',
     "MAX_CACHE_AGE_MS = 24L * 60L * 60L * 1000L",
     "cleanupStaleFiles(appContext)",
     "deleteIfOwned(context: Context, uri: Uri?)",
@@ -134,8 +135,6 @@ for token in (
     'android:authorities="${applicationId}.user-selected-files"',
     'android:exported="false"',
     'android:grantUriPermissions="true"',
-    '<uses-permission android:name="android.permission.CAMERA" />',
-    '<uses-permission android:name="android.permission.RECORD_AUDIO" />',
 ):
     assert token in manifest, token
 for forbidden in (
@@ -144,6 +143,11 @@ for forbidden in (
     'android.permission.READ_EXTERNAL_STORAGE',
 ):
     assert forbidden not in manifest, forbidden
+
+# Camera/media support remains parked: existing code may stay, but generic Files
+# must not depend on camera permission or camera chooser intents.
+normal_picker_tail = host[host.index("val contentIntent = Intent(Intent.ACTION_GET_CONTENT)"):host.index("private fun buildCameraLaunch")]
+assert "Intent.EXTRA_INITIAL_INTENTS" not in normal_picker_tail
 
 for token in (
     "pauseForStorageMutation",
@@ -239,4 +243,4 @@ assert 'type: "diagnostic"' in bridge
 assert host.index("ensureBuiltIn(EXTENSION_URI, EXTENSION_ID)") < host.index("session.loadUri(CHATGPT_URL)")
 assert 'android:windowSoftInputMode="stateUnspecified|adjustResize"' in manifest
 
-print("android GeckoView streamed runtime + generic files + camera/media permission bridge smoke PASS")
+print("android GeckoView streamed runtime + generic Markdown/document upload smoke PASS")
