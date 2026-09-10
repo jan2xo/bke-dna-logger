@@ -5,11 +5,13 @@ root = Path(__file__).resolve().parents[1]
 base = root / "android/app/src/main/kotlin/com/bke/dna/logger"
 
 scheduler = (base / "AndroidDerivationQueue.kt").read_text(encoding="utf-8")
+service = (base / "AndroidDnaProcessingService.kt").read_text(encoding="utf-8")
 main = (base / "MainActivity.kt").read_text(encoding="utf-8")
 raw_access = (base / "AndroidRawSourceAccess.kt").read_text(encoding="utf-8")
 raw_store = (base / "AndroidRawEvidenceStore.kt").read_text(encoding="utf-8")
 normalized_store = (base / "AndroidChunkedNormalizedStore.kt").read_text(encoding="utf-8")
 unified = (base / "AndroidUnifiedConversationLibrary.kt").read_text(encoding="utf-8")
+manifest = (root / "android/app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
 
 # DNA derivation is explicitly background-priority and waits for a meaningful
 # quiet window after browser/capture activity before taking heavy work.
@@ -45,6 +47,58 @@ for token in (
     assert token in main, token
 assert 'override fun onResume()' not in main
 assert 'geckoHost.stop()' in main
+
+# Unfinished queue work owns a single bounded foreground-service lifetime so
+# HyperOS/Android may keep processing after screen-off. The service never creates
+# another queue executor; it starts the existing scheduler through a recursion-safe entry.
+for token in (
+    'AndroidDnaProcessingService.ensureRunning(appContext)',
+    'internal fun startFromProcessingService(context: Context)',
+    'AndroidDnaProcessingService.beginActiveWork(context)',
+    'AndroidDnaProcessingService.endActiveWork()',
+    'AndroidDnaProcessingService.stopWhenIdle(appContext)',
+):
+    assert token in scheduler, token
+assert scheduler.count('Executors.newSingleThreadExecutor') == 1
+
+for token in (
+    'class AndroidDnaProcessingService : Service()',
+    'startForeground(NOTIFICATION_ID, buildNotification())',
+    'AndroidDerivationScheduler.startFromProcessingService(applicationContext)',
+    'return START_STICKY',
+    'NotificationManager.IMPORTANCE_LOW',
+    'PowerManager.PARTIAL_WAKE_LOCK',
+    'WAKE_LOCK_TIMEOUT_MS = 30 * 60 * 1_000L',
+    'acquire(WAKE_LOCK_TIMEOUT_MS)',
+    'wakeLock.release()',
+    'fun stopWhenIdle(context: Context)',
+):
+    assert token in service, token
+assert 'Executors.new' not in service
+
+# Wake lock is acquired only after a queue job is claimed, then released in finally.
+drain = scheduler[scheduler.index('private fun drain('):scheduler.index('private fun waitForBrowserQuiet()')]
+claim_at = drain.index('claimNext()')
+wake_at = drain.index('AndroidDnaProcessingService.beginActiveWork(context)')
+finally_at = drain.index('finally {')
+release_at = drain.index('AndroidDnaProcessingService.endActiveWork()')
+assert claim_at < wake_at < finally_at < release_at
+
+# Manifest explicitly declares the FGS/wake permissions and a non-exported special-use
+# service. This is local processing, not a fake network data-sync classification.
+for token in (
+    'android.permission.WAKE_LOCK',
+    'android.permission.FOREGROUND_SERVICE',
+    'android.permission.FOREGROUND_SERVICE_SPECIAL_USE',
+    'android:name=".AndroidDnaProcessingService"',
+    'android:exported="false"',
+    'android:foregroundServiceType="specialUse"',
+    'android:stopWithTask="false"',
+    'android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE',
+    'Local processing of queued, durable conversation DNA while the screen is off',
+):
+    assert token in manifest, token
+assert 'foregroundServiceType="dataSync"' not in manifest
 
 # Large RAW streaming reads cooperate every bounded window so an already-running
 # parse/title probe can pause when the owner starts using the browser again.
