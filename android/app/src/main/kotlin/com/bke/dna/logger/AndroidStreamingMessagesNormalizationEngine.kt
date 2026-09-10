@@ -17,7 +17,8 @@ import java.time.Instant
  *
  * Semantic rules intentionally match AndroidMessagesNormalizationEngine:
  * graph edges are never invented, payload identity wins when unambiguous, and
- * one explicit messages envelope must be identifiable.
+ * one explicit messages envelope must be identifiable. Display titles are
+ * carried forward only when the captured payload supplies an actual title.
  */
 class AndroidStreamingMessagesNormalizationEngine(context: android.content.Context) {
     private val appContext = context.applicationContext
@@ -66,6 +67,11 @@ class AndroidStreamingMessagesNormalizationEngine(context: android.content.Conte
         ) ?: return null
         Log.d(TAG, "BKE DNA normalization: messages_identity_resolved")
 
+        val displayTitle = resolveDisplayTitle(scan.rootTitle, envelope.title)
+        if (displayTitle != null) {
+            Log.d(TAG, "BKE DNA normalization: messages_display_title_found")
+        }
+
         val nodes = envelope.nodes.distinctBy { it.nodeNativeId }
         Log.d(TAG, "BKE DNA normalization: messages_nodes_parsed_${nodes.size}")
         if (nodes.isEmpty()) {
@@ -94,6 +100,7 @@ class AndroidStreamingMessagesNormalizationEngine(context: android.content.Conte
                         sourceSha256 = sourceSha256,
                         parser = parser,
                         identity = identity,
+                        displayTitle = displayTitle,
                         currentNodeNativeId = currentNodeNativeId,
                         currentNodeFound = currentNodeFound,
                         nodes = nodes,
@@ -113,14 +120,14 @@ class AndroidStreamingMessagesNormalizationEngine(context: android.content.Conte
     private fun scanPayload(reader: JsonReader): PayloadScan {
         if (reader.peek() != JsonToken.BEGIN_OBJECT) {
             reader.skipValue()
-            return PayloadScan(false, null, null, emptyList())
+            return PayloadScan(false, null, null, null, emptyList())
         }
         val candidates = mutableListOf<EnvelopeCandidate>()
         val root = scanObject(reader, 0, candidates)
         if (reader.peek() != JsonToken.END_DOCUMENT) {
-            return PayloadScan(false, null, null, emptyList())
+            return PayloadScan(false, null, null, null, emptyList())
         }
-        return PayloadScan(true, root.conversationId, root.currentNodeId, candidates)
+        return PayloadScan(true, root.conversationId, root.currentNodeId, root.title, candidates)
     }
 
     private fun scanObject(
@@ -131,6 +138,7 @@ class AndroidStreamingMessagesNormalizationEngine(context: android.content.Conte
         require(depth <= MAX_JSON_DEPTH) { "JSON nesting exceeds normalizer limit" }
         var conversationId: String? = null
         var currentNodeId: String? = null
+        var title: String? = null
         var messagesNodes: List<ParsedNode>? = null
         var messagesWasArray = false
 
@@ -139,6 +147,7 @@ class AndroidStreamingMessagesNormalizationEngine(context: android.content.Conte
             when (val name = reader.nextName()) {
                 "conversation_id" -> conversationId = readScalarString(reader)
                 "current_node" -> currentNodeId = readScalarString(reader)
+                "title" -> title = readCapturedTitle(reader)
                 "messages" -> {
                     when (reader.peek()) {
                         JsonToken.BEGIN_ARRAY -> {
@@ -162,12 +171,13 @@ class AndroidStreamingMessagesNormalizationEngine(context: android.content.Conte
             candidates += EnvelopeCandidate(
                 conversationId = conversationId,
                 currentNodeId = currentNodeId,
+                title = title,
                 nodes = nodes.map { it.node },
                 messagesWasArray = messagesWasArray,
                 depth = depth,
             )
         }
-        return ObjectMeta(conversationId, currentNodeId)
+        return ObjectMeta(conversationId, currentNodeId, title)
     }
 
     private fun scanValue(
@@ -258,6 +268,25 @@ class AndroidStreamingMessagesNormalizationEngine(context: android.content.Conte
         return metadataIdentity
     }
 
+    private fun resolveDisplayTitle(rootTitle: String?, envelopeTitle: String?): String? {
+        val capturedTitles = linkedSetOf<String>()
+        rootTitle?.takeIf { it.isNotBlank() }?.let(capturedTitles::add)
+        envelopeTitle?.takeIf { it.isNotBlank() }?.let(capturedTitles::add)
+        if (capturedTitles.size > 1) {
+            Log.d(TAG, "BKE DNA normalization: messages_display_title_conflict")
+            return null
+        }
+        return capturedTitles.singleOrNull()
+    }
+
+    private fun readCapturedTitle(reader: JsonReader): String? = when (reader.peek()) {
+        JsonToken.STRING -> reader.nextString().trim().takeIf { it.isNotBlank() }?.take(DISPLAY_TITLE_LIMIT)
+        else -> {
+            reader.skipValue()
+            null
+        }
+    }
+
     private fun readScalarString(reader: JsonReader): String? = when (reader.peek()) {
         JsonToken.STRING, JsonToken.NUMBER -> reader.nextString()
         JsonToken.BOOLEAN -> reader.nextBoolean().toString()
@@ -308,6 +337,7 @@ class AndroidStreamingMessagesNormalizationEngine(context: android.content.Conte
         sourceSha256: String,
         parser: String,
         identity: AndroidConversationIdentityResolution,
+        displayTitle: String?,
         currentNodeNativeId: String?,
         currentNodeFound: Boolean,
         nodes: List<NormalizedMessageNode>,
@@ -318,6 +348,7 @@ class AndroidStreamingMessagesNormalizationEngine(context: android.content.Conte
         writer.name("parser").value(parser)
         writer.name("conversationNativeId").value(identity.conversationNativeId)
         writer.name("conversationIdentityBasis").value(identity.basis)
+        if (displayTitle != null) writer.name("displayTitle").value(displayTitle)
         writer.name("currentNodeNativeId")
         if (currentNodeNativeId == null) writer.nullValue() else writer.value(currentNodeNativeId)
         writer.name("coverageStatus").value("indeterminate")
@@ -364,14 +395,20 @@ class AndroidStreamingMessagesNormalizationEngine(context: android.content.Conte
         val validRoot: Boolean,
         val rootConversationId: String?,
         val rootCurrentNodeId: String?,
+        val rootTitle: String?,
         val candidates: List<EnvelopeCandidate>,
     )
 
-    private data class ObjectMeta(val conversationId: String?, val currentNodeId: String?)
+    private data class ObjectMeta(
+        val conversationId: String?,
+        val currentNodeId: String?,
+        val title: String?,
+    )
 
     private data class EnvelopeCandidate(
         val conversationId: String?,
         val currentNodeId: String?,
+        val title: String?,
         val nodes: List<NormalizedMessageNode>,
         val messagesWasArray: Boolean,
         val depth: Int,
@@ -409,6 +446,7 @@ class AndroidStreamingMessagesNormalizationEngine(context: android.content.Conte
     companion object {
         private const val TAG = "BkeDnaNormalizer"
         private const val MAX_JSON_DEPTH = 256
+        private const val DISPLAY_TITLE_LIMIT = 120
         private const val CANDIDATE_KIND = "conversation_payload_candidate"
         private const val PARSER = "messages-array-v0"
         private const val PARSER_ENVELOPE = "messages-envelope-v1"
