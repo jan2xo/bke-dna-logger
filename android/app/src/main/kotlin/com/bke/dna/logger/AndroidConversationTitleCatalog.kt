@@ -138,12 +138,20 @@ class AndroidConversationTitleCatalog(context: Context) {
         for (capture in evidence) {
             if (capture.sourceSha256 in state.indexedMetadataSources) continue
             val bytes = runCatching {
-                AndroidRawSourceAccess.readAllBytes(
-                    generation = capture.generation,
-                    captureRoot = captureRoot,
-                    sourceSha256 = capture.sourceSha256,
-                    maxBytes = MAX_CONVERSATION_LIST_BYTES,
-                )
+                if (capture.generation.isLatest) {
+                    AndroidRawSourceAccess.readAllBytes(
+                        context = appContext,
+                        sourceSha256 = capture.sourceSha256,
+                        maxBytes = MAX_CONVERSATION_LIST_BYTES,
+                    )
+                } else {
+                    AndroidRawSourceAccess.readAllBytes(
+                        generation = capture.generation,
+                        captureRoot = captureRoot,
+                        sourceSha256 = capture.sourceSha256,
+                        maxBytes = MAX_CONVERSATION_LIST_BYTES,
+                    )
+                }
             }.getOrNull() ?: continue
 
             val root = runCatching {
