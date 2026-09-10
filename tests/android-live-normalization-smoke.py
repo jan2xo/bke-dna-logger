@@ -233,12 +233,13 @@ assert store.index('index.record(') < store.index('AndroidDerivationScheduler.en
 
 # Durable queue remains RAW_INGEST -> semantic stages. It now runs as an Android
 # background-priority worker and requires browser quiet before heavy work;
-# staging deletion still follows verified SQLite RAW import.
+# staging deletion still follows verified SQLite RAW import. Queue initialization
+# was factored so the foreground service can restart the same worker safely.
 for token in (
     'CREATE TABLE IF NOT EXISTS derivation_queue',
     'source_sha256 TEXT PRIMARY KEY',
     'status TEXT NOT NULL', 'stage TEXT NOT NULL', 'attempts INTEGER NOT NULL DEFAULT 0',
-    'recoverInterrupted()', 'recoverStagedRaw(appContext)', 'requeueForRawIngest(',
+    'recoverInterrupted()', 'recoverStagedRaw(context)', 'requeueForRawIngest(',
     'Executors.newSingleThreadExecutor', 'bke-dna-breathing-derivation',
     'Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)',
     'BROWSER_QUIET_MS = 3_000L', 'noteBrowserActivity()', 'yieldForBrowserActivity()',
@@ -250,6 +251,10 @@ for token in (
     'stagedRaw.delete()',
     'markDone(job.sourceSha256)', 'markFailed(job.sourceSha256, "derivative_failed")',
     'AndroidDerivationQueueSnapshot', 'currentStage',
+    'AndroidDnaProcessingService.ensureRunning(appContext)',
+    'startFromProcessingService(context: Context)',
+    'AndroidDnaProcessingService.beginActiveWork(context)',
+    'AndroidDnaProcessingService.endActiveWork()',
 ):
     assert token in queue, token
 assert 'newFixedThreadPool' not in queue
@@ -267,7 +272,6 @@ for token in (
 # logical state through JsonWriter, so large snapshots are not reconstructed as
 # one monolithic JSON String at either boundary.
 for token in (
-    'AndroidDerivativeSourceAccess.listNormalizedSourceSha256s(appContext)',
     'AndroidDerivativeSourceAccess.readNormalizedMetadata(appContext, sourceSha256)',
     'AndroidDerivativeSourceAccess.withNormalizedJsonReader(',
     'readSnapshot(reader, observedAtBySource)',
