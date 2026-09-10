@@ -400,19 +400,19 @@ class GeckoViewHost(
         }
 
         val mimeTypes = prompt.mimeTypes
+            ?.map { it.trim().lowercase() }
             ?.filter { it.isNotBlank() }
             ?.distinct()
             .orEmpty()
-        val documentIntent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        val contentIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = primaryMimeType(mimeTypes)
-            if (mimeTypes.size > 1) {
+            type = mergedMimeType(mimeTypes)
+            if (mimeTypes.isNotEmpty()) {
                 putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.toTypedArray())
             }
-            putExtra(
-                Intent.EXTRA_ALLOW_MULTIPLE,
-                prompt.type == GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE,
-            )
+            if (prompt.type == GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE) {
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            }
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
@@ -422,13 +422,10 @@ class GeckoViewHost(
             return cameraLaunch
         }
         if (cameraLaunch == null) {
-            return FilePromptLaunch(
-                Intent.createChooser(documentIntent, prompt.title ?: "Choose file"),
-                null,
-            )
+            return FilePromptLaunch(contentIntent, null)
         }
 
-        val chooser = Intent.createChooser(documentIntent, prompt.title ?: "Choose file").apply {
+        val chooser = Intent.createChooser(contentIntent, prompt.title ?: "Choose file").apply {
             putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(cameraLaunch.intent))
         }
         return FilePromptLaunch(chooser, cameraLaunch.cameraUri)
@@ -505,13 +502,19 @@ class GeckoViewHost(
         }
     }
 
-    private fun primaryMimeType(mimeTypes: List<String>): String {
+    private fun mergedMimeType(mimeTypes: List<String>): String {
         if (mimeTypes.isEmpty()) return "*/*"
-        if (mimeTypes.size == 1) return mimeTypes.single()
-        val majorTypes = mimeTypes.mapNotNull { type ->
-            type.substringBefore('/', missingDelimiterValue = "").takeIf { it.isNotBlank() }
-        }.distinct()
-        return if (majorTypes.size == 1) "${majorTypes.single()}/*" else "*/*"
+
+        val parsed = mimeTypes.mapNotNull { rawType ->
+            val slash = rawType.indexOf('/')
+            if (slash <= 0 || slash == rawType.lastIndex) return@mapNotNull null
+            rawType.substring(0, slash) to rawType.substring(slash + 1)
+        }
+        if (parsed.isEmpty()) return "*/*"
+
+        val major = parsed.map { it.first }.distinct().singleOrNull() ?: "*"
+        val subtype = parsed.map { it.second }.distinct().singleOrNull() ?: "*"
+        return "$major/$subtype"
     }
 
     private data class FilePromptLaunch(
