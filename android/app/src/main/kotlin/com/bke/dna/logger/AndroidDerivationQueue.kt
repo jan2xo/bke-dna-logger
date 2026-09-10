@@ -3,6 +3,8 @@ package com.bke.dna.logger
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import java.io.File
 import java.time.Instant
@@ -10,27 +12,38 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Durable processing queue stored inside the active Working Data SQLite.
  *
- * Capture remains the priority lane. RAW SQLite ingestion and semantic
- * derivation are deliberately serialized and yield between stages/jobs so
- * GeckoView and the UI get time to breathe. Queue rows and completed RAW
- * staging files survive process death.
+ * Capture and interactive GeckoView use are the priority lane. RAW SQLite ingest
+ * and semantic derivation run on one Android background-priority thread, wait
+ * for a browser quiet window before heavy work, and expose a cooperative yield
+ * point for bounded inner loops such as normalized SQLite chunk publication.
+ * Queue rows and completed RAW staging files survive process death, so DNA may
+ * intentionally fall behind while the owner actively uses ChatGPT.
  */
 object AndroidDerivationScheduler {
     private const val TAG = "BkeDnaQueue"
     private const val PREFS = "bke-dna-processing"
     private const val PREF_PROFILE = "profile"
-    private const val CAPTURE_QUIET_POLL_MS = 50L
+    private const val BROWSER_QUIET_MS = 3_000L
+    private const val BROWSER_QUIET_POLL_MS = 100L
     private val STAGED_RAW_NAME = Regex("[0-9a-f]{64}\\.raw")
 
     private val executor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "bke-dna-breathing-derivation").apply { isDaemon = true }
+        Thread(
+            {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+                runnable.run()
+            },
+            "bke-dna-breathing-derivation",
+        ).apply { isDaemon = true }
     }
     private val drainScheduled = AtomicBoolean(false)
     private val activeCaptures = AtomicInteger(0)
+    private val lastBrowserActivityAt = AtomicLong(SystemClock.elapsedRealtime())
     private val startLock = Any()
     @Volatile private var recoveryInitialized = false
 
@@ -82,12 +95,29 @@ object AndroidDerivationScheduler {
         kick(appContext)
     }
 
+    /** Called by the browser Activity for touches/keys/resume and by capture. */
+    fun noteBrowserActivity() {
+        lastBrowserActivityAt.set(SystemClock.elapsedRealtime())
+    }
+
     fun captureStarted() {
+        noteBrowserActivity()
         activeCaptures.incrementAndGet()
     }
 
     fun captureFinished() {
         activeCaptures.updateAndGet { current -> if (current > 0) current - 1 else 0 }
+        noteBrowserActivity()
+    }
+
+    /**
+     * Cooperative inner-loop gate. Heavy derivation code may call this between
+     * bounded units of work. It blocks only the DNA worker; browser/capture
+     * threads are never blocked by this method.
+     */
+    fun yieldForBrowserActivity() {
+        waitForBrowserQuiet()
+        Thread.yield()
     }
 
     fun getProfile(context: Context): AndroidProcessingProfile {
@@ -157,11 +187,12 @@ object AndroidDerivationScheduler {
 
     private fun drain(context: Context) {
         while (true) {
+            waitForBrowserQuiet()
             val job = AndroidDerivationQueueStore(context).use { it.claimNext() } ?: return
             val stagedRaw = File(AndroidDnaPaths.capturesRoot(context), job.bodyPath)
 
             val rawReady = runCatching {
-                waitForCaptureQuiet()
+                waitForBrowserQuiet()
                 AndroidDerivationQueueStore(context).use {
                     it.updateStage(job.sourceSha256, STAGE_RAW_INGEST)
                 }
@@ -200,7 +231,7 @@ object AndroidDerivationScheduler {
                 contentType = job.contentType,
                 onStage = { stage ->
                     if (!firstStage) breathe(context)
-                    waitForCaptureQuiet()
+                    waitForBrowserQuiet()
                     AndroidDerivationQueueStore(context).use {
                         it.updateStage(job.sourceSha256, stage)
                     }
@@ -208,6 +239,7 @@ object AndroidDerivationScheduler {
                 },
             )
 
+            waitForBrowserQuiet()
             AndroidDerivationQueueStore(context).use { store ->
                 if (success) {
                     store.markDone(job.sourceSha256)
@@ -219,16 +251,26 @@ object AndroidDerivationScheduler {
         }
     }
 
-    private fun waitForCaptureQuiet() {
-        while (activeCaptures.get() > 0) {
-            Thread.sleep(CAPTURE_QUIET_POLL_MS)
+    private fun waitForBrowserQuiet() {
+        while (true) {
+            if (activeCaptures.get() > 0) {
+                Thread.sleep(BROWSER_QUIET_POLL_MS)
+                continue
+            }
+
+            val quietFor = SystemClock.elapsedRealtime() - lastBrowserActivityAt.get()
+            if (quietFor >= BROWSER_QUIET_MS) return
+            val remaining = BROWSER_QUIET_MS - quietFor
+            Thread.sleep(minOf(BROWSER_QUIET_POLL_MS, remaining.coerceAtLeast(1L)))
         }
     }
 
     private fun breathe(context: Context) {
-        waitForCaptureQuiet()
+        waitForBrowserQuiet()
         val restMillis = getProfile(context).restMillis
         if (restMillis > 0) Thread.sleep(restMillis)
+        // A browser interaction may have happened during the profile rest.
+        waitForBrowserQuiet()
         Thread.yield()
     }
 
