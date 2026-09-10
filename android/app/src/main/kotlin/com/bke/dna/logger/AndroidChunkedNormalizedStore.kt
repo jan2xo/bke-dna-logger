@@ -320,9 +320,10 @@ class AndroidChunkedNormalizedStore private constructor(
                 put("chunk_index", chunkIndex)
                 put("payload_utf8", buffer.copyOf(bufferLength))
             }
-            // Intentionally autocommit each bounded chunk. Capture ingress shares
-            // this live pool and must never wait behind a multi-megabyte write
-            // transaction just to persist capture_end.
+            // Before each short autocommit, give interactive GeckoView use the
+            // right to pause DNA. This bounds the time between cooperative yield
+            // points to one 64 KiB derivative chunk.
+            AndroidDerivationScheduler.yieldForBrowserActivity()
             database.insertOrThrow(TABLE_CHUNK, null, values)
             chunkIndex += 1
             bufferLength = 0
