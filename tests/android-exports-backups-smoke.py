@@ -84,7 +84,7 @@ for token in [
     'object AndroidRawSourceAccess', 'AndroidRawEvidenceStore(generation)',
     'File(captureRoot, "bodies/$sourceSha256.body")',
     'AndroidRawBackend.SQLITE', 'AndroidRawBackend.LEGACY_BODY',
-    'fun readPage(', 'fun writeExactSource(',
+    'fun readPage(', 'fun writeExactSource(', 'fun <T> withExactInputStream(',
 ]:
     assert token in raw_access, token
 for token in [
@@ -121,18 +121,23 @@ for token in ['withStorageMutationPause', 'pauseForStorageMutation', 'resumeAfte
 for token in ['storageMutation = true', 'AndroidCaptureRuntime.withStorageMutationPause(this)']:
     assert token in ui, token
 
-# Shared title catalog derives actual captured root titles through federated
-# normalized derivatives + Working Data RAW generations; never JAN text / UUID fallback.
+# Shared title catalog derives only actual captured titles. Large Latest RAW is
+# streamed instead of being rejected by the legacy 16 MiB materialization bound,
+# and the format bump re-probes old titleless indexed sources.
 for token in [
     'class AndroidConversationTitleCatalog', 'conversation-title-catalog.json',
-    'root.has("title")', 'candidate_root_title', 'candidate_title_string',
-    'matchingConversationIds', 'indexedSources',
+    'candidate_root_title', 'candidate_title_string', 'candidate_title_conflict',
+    'matchingConversationIds', 'indexedSources', 'FORMAT_VERSION = 2',
+    'MAX_LEGACY_BODY_BYTES = 16L * 1024 * 1024',
     'AndroidWorkingDataManager(appContext).listWorkingData()',
     'AndroidDerivativeSourceAccess.listNormalizedSourceSha256s(generation, captureRoot)',
     'AndroidDerivativeSourceAccess.readNormalized(generation, captureRoot, sourceSha256)',
+    'AndroidRawSourceAccess.withExactInputStream(appContext, sourceSha256)',
+    'JsonReader(InputStreamReader(input, Charsets.UTF_8)).use(::readCapturedRootTitle)',
     'AndroidRawSourceAccess.readAllBytes(',
 ]:
     assert token in titles, token
+assert 'source.exceptionOrNull() is IllegalArgumentException' not in titles
 for forbidden in ['setOf("user")', 'textParts', 'first user', 'first JAN', 'bodiesDirectory', 'normalizedDirectory']:
     assert forbidden not in titles, forbidden
 
@@ -148,13 +153,18 @@ for token in [
 for forbidden in ['AndroidHumanExportService', '.readText(']:
     assert forbidden not in unified, forbidden
 
-# PR6 compact queue/profile UI remains intact while PR8 changes lifecycle actions.
+# Working Data UI retains the same owner controls, but all storage/library/queue
+# reads and export preparation run on a dedicated IO executor. Main-thread work
+# is limited to rendering and final widget/text updates.
 for token in [
     'Working Data & Conversations', 'Processing', 'All Conversations', 'Search conversation titles',
-    'SEARCH', 'CLEAR', 'LOAD MORE', 'library.search(searchQuery, libraryLimit)',
+    'SEARCH', 'CLEAR', 'LOAD MORE',
+    'Executors.newSingleThreadExecutor', '"bke-dna-working-data-io"', 'ioExecutor.execute {',
+    'private fun loadUiSnapshot(', 'private fun renderUi(snapshot: UiSnapshot)',
+    'AndroidUnifiedConversationLibrary(appContext).search(requestedSearchQuery, requestedLibraryLimit)',
     'Handler(Looper.getMainLooper())', 'QUEUE_REFRESH_MS = 1_500L',
-    'AndroidDerivationScheduler.start(this)', 'AndroidDerivationScheduler.snapshot(this)',
-    'AndroidDerivationScheduler.getProfile(this)', 'AndroidDerivationScheduler.setProfile(this, profile)',
+    'AndroidDerivationScheduler.start(this)', 'AndroidDerivationScheduler.snapshot(appContext)',
+    'AndroidDerivationScheduler.getProfile(appContext)', 'AndroidDerivationScheduler.setProfile(this, profile)',
     'AndroidProcessingProfile.entries', 'profileLabel(profile)',
     'compactButton("CLEAN")', 'compactButton("RAW")', 'compactButton("MORE")',
     'PopupMenu(this, anchor)', 'setOnClickListener { openConversation(summary) }',
@@ -166,6 +176,28 @@ for token in ['SLOW(500L)', 'BALANCED(150L)', 'FAST(25L)', 'fun snapshot(context
     assert token in queue, token
 for forbidden in ['actionButton("Read conversation")', 'actionButton("Export CLEAN.md")', 'actionButton("Export RAW.md")']:
     assert forbidden not in ui, forbidden
+
+load_start = ui.index('private fun loadUiSnapshot(')
+load_end = ui.index('private fun renderLoadFailure(', load_start)
+load_section = ui[load_start:load_end]
+for token in [
+    'manager.listWorkingData()', 'AndroidWorkingStorage.workingBytes(appContext)',
+    'manager.savedWorkingDataBytes()', 'AndroidWorkingDataTelemetry.inspect(inspected)',
+    'AndroidUnifiedConversationLibrary(appContext).search(',
+]:
+    assert token in load_section, token
+render_start = ui.index('private fun renderUi(snapshot: UiSnapshot)')
+render_end = ui.index('private fun prepareWorkingDataBackup', render_start)
+render_section = ui[render_start:render_end]
+for forbidden in [
+    'manager.listWorkingData()', 'AndroidWorkingStorage.workingBytes(',
+    'savedWorkingDataBytes()', 'AndroidWorkingDataTelemetry.inspect(',
+    'AndroidUnifiedConversationLibrary(this).search(',
+]:
+    assert forbidden not in render_section, forbidden
+assert ui.index('ioExecutor.execute {', ui.index('private fun refreshQueueStatus()')) < ui.index('AndroidDerivationScheduler.snapshot(appContext)')
+assert ui.index('ioExecutor.execute {', ui.index('private fun prepareHumanExport')) < ui.index('AndroidUnifiedConversationLibrary(applicationContext)')
+
 conversation_loop = ui[ui.index('conversations.forEach'):ui.index('private fun prepareWorkingDataBackup')]
 assert 'human.describe' not in conversation_loop
 assert 'conversationWorkingBytes' not in conversation_loop
@@ -277,4 +309,4 @@ identity = '\n'.join(f'{p}\t{s}\t{n}\t{src}' for p, s, n, src in sorted(evidence
 archive_id = 'dna-conversation-v2-' + hashlib.sha256(identity.encode()).hexdigest()
 assert len(archive_id) == len('dna-conversation-v2-') + 64
 
-print('android SQLite Working Data backup + generation deletion guardrails smoke PASS')
+print('android SQLite Working Data backup + background UI + title recovery smoke PASS')
