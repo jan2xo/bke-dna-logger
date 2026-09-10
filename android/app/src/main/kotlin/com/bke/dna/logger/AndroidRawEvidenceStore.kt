@@ -19,8 +19,10 @@ import java.util.zip.InflaterInputStream
  *
  * Each source body is split into independently compressed chunks. Compression is
  * purely a storage representation: reading the chunks in sequence reconstructs
- * the exact original bytes. A new source is not committed until that SQLite
- * reconstruction passes exact byte-length and SHA-256 verification.
+ * the exact original bytes. New RAW chunks are committed in bounded writes,
+ * verified as a complete unpublished representation, then exposed by one tiny
+ * raw_source metadata transaction. This keeps capture/browser work from waiting
+ * behind a multi-megabyte RAW transaction while preserving publish-last safety.
  */
 class AndroidRawEvidenceStore private constructor(
     private val handle: DatabaseHandle,
@@ -102,6 +104,11 @@ class AndroidRawEvidenceStore private constructor(
             return AndroidRawImportResult(existing, reused = true)
         }
 
+        // A process death before metadata publication may leave durable chunks.
+        // Readers cannot see them because descriptor()/contains() require the
+        // raw_source publish marker. Remove only unpublished chunks for this SHA.
+        deleteUnpublishedChunks(sourceSha256)
+
         val digest = MessageDigest.getInstance("SHA-256")
         var byteLength = 0L
         var chunkCount = 0
@@ -109,53 +116,62 @@ class AndroidRawEvidenceStore private constructor(
         var offset = 0L
         val storedAt = Instant.now().toString()
 
+        stagingFile.inputStream().buffered().use { input ->
+            val buffer = ByteArray(RAW_CHUNK_BYTES)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (read == 0) continue
+                digest.update(buffer, 0, read)
+                val compressed = compress(buffer, read)
+                val values = ContentValues().apply {
+                    put("source_sha256", sourceSha256)
+                    put("sequence", chunkCount)
+                    put("uncompressed_offset", offset)
+                    put("uncompressed_length", read)
+                    put("compressed_bytes", compressed)
+                }
+
+                // Interactive GeckoView/capture owns priority. Every RAW chunk is
+                // a bounded autocommit, with a cooperative browser-yield point
+                // before the next SQLite writer slot is taken.
+                AndroidDerivationScheduler.yieldForBrowserActivity()
+                database.insertOrThrow("raw_source_chunk", null, values)
+                byteLength += read
+                offset += read
+                compressedBytes += compressed.size
+                chunkCount += 1
+            }
+        }
+
+        require(byteLength == expectedByteLength) {
+            "RAW staging length changed during SQLite import"
+        }
+        require(digest.digest().toLowerHex() == sourceSha256) {
+            "RAW staging SHA-256 does not match source identity"
+        }
+
+        // Re-read/decompress the exact unpublished SQLite representation before
+        // the visibility marker exists. Failed verification leaves no published
+        // RAW source; the durable staging file remains recovery authority.
+        verifyUnpublishedSource(
+            sourceSha256 = sourceSha256,
+            expectedByteLength = expectedByteLength,
+            expectedChunkCount = chunkCount,
+        )
+
+        val sourceValues = ContentValues().apply {
+            put("source_sha256", sourceSha256)
+            put("byte_length", byteLength)
+            put("chunk_count", chunkCount)
+            put("codec", CODEC)
+            put("stored_at", storedAt)
+            put("compressed_bytes", compressedBytes)
+        }
+        AndroidDerivationScheduler.yieldForBrowserActivity()
         database.beginTransaction()
         try {
-            stagingFile.inputStream().buffered().use { input ->
-                val buffer = ByteArray(RAW_CHUNK_BYTES)
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    if (read == 0) continue
-                    digest.update(buffer, 0, read)
-                    val compressed = compress(buffer, read)
-                    val values = ContentValues().apply {
-                        put("source_sha256", sourceSha256)
-                        put("sequence", chunkCount)
-                        put("uncompressed_offset", offset)
-                        put("uncompressed_length", read)
-                        put("compressed_bytes", compressed)
-                    }
-                    database.insertOrThrow("raw_source_chunk", null, values)
-                    byteLength += read
-                    offset += read
-                    compressedBytes += compressed.size
-                    chunkCount += 1
-                }
-            }
-
-            require(byteLength == expectedByteLength) {
-                "RAW staging length changed during SQLite import"
-            }
-            require(digest.digest().toLowerHex() == sourceSha256) {
-                "RAW staging SHA-256 does not match source identity"
-            }
-
-            val sourceValues = ContentValues().apply {
-                put("source_sha256", sourceSha256)
-                put("byte_length", byteLength)
-                put("chunk_count", chunkCount)
-                put("codec", CODEC)
-                put("stored_at", storedAt)
-                put("compressed_bytes", compressedBytes)
-            }
             database.insertOrThrow("raw_source", null, sourceValues)
-
-            // Re-read and decompress the exact SQLite representation before the
-            // transaction is allowed to commit. If verification fails or the
-            // process dies first, the whole source/chunk insert rolls back and
-            // the durable staging file remains the recovery authority.
-            verifySource(sourceSha256, expectedByteLength)
             database.setTransactionSuccessful()
         } finally {
             database.endTransaction()
@@ -250,6 +266,53 @@ class AndroidRawEvidenceStore private constructor(
             }
         }
         require(bytes == source.byteLength) { "RAW SQLite source verification length mismatch" }
+        require(digest.digest().toLowerHex() == sourceSha256) {
+            "RAW SQLite source verification SHA-256 mismatch"
+        }
+    }
+
+    private fun deleteUnpublishedChunks(sourceSha256: String) {
+        check(descriptor(sourceSha256) == null) { "Published RAW chunks cannot be discarded" }
+        database.delete(
+            "raw_source_chunk",
+            "source_sha256 = ?",
+            arrayOf(sourceSha256),
+        )
+    }
+
+    private fun verifyUnpublishedSource(
+        sourceSha256: String,
+        expectedByteLength: Long,
+        expectedChunkCount: Int,
+    ) {
+        check(descriptor(sourceSha256) == null) {
+            "Unpublished RAW verification requires no metadata marker"
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        var bytes = 0L
+        var expectedSequence = 0
+        var expectedOffset = 0L
+        database.query(
+            "raw_source_chunk",
+            arrayOf("sequence", "uncompressed_offset", "uncompressed_length", "compressed_bytes"),
+            "source_sha256 = ?",
+            arrayOf(sourceSha256),
+            null,
+            null,
+            "sequence ASC",
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                require(cursor.getInt(0) == expectedSequence) { "RAW SQLite chunk sequence mismatch" }
+                require(cursor.getLong(1) == expectedOffset) { "RAW SQLite chunk offset mismatch" }
+                val chunk = decompress(cursor.getBlob(3), cursor.getInt(2))
+                digest.update(chunk)
+                bytes += chunk.size
+                expectedOffset += chunk.size
+                expectedSequence += 1
+            }
+        }
+        require(expectedSequence == expectedChunkCount) { "RAW SQLite chunk count mismatch" }
+        require(bytes == expectedByteLength) { "RAW SQLite source verification length mismatch" }
         require(digest.digest().toLowerHex() == sourceSha256) {
             "RAW SQLite source verification SHA-256 mismatch"
         }
