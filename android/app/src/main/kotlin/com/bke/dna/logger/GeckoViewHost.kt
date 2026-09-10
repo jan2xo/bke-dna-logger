@@ -13,6 +13,7 @@ import org.json.JSONObject
 import org.mozilla.geckoview.AllowOrDeny
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.GeckoView
 import org.mozilla.geckoview.WebExtension
 import org.mozilla.geckoview.WebRequestError
@@ -29,6 +30,9 @@ class GeckoViewHost(
         private const val TAG = "BkeDnaGeckoView"
         private const val BROWSER_TAG = "BkeDnaBrowser"
         private const val CHATGPT_URL = "https://chatgpt.com/"
+        private const val CHROMIUM_ANDROID_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/153.0.0.0 Mobile Safari/537.36"
         private const val EXTENSION_URI = "resource://android/assets/dna-extension/"
         private const val EXTENSION_ID = "bke-dna-logger@jl-bke.com"
         private const val NATIVE_APP = "bke.dna.logger"
@@ -97,7 +101,11 @@ class GeckoViewHost(
 
     private val appContext = activity.applicationContext
     private val runtime = GeckoRuntimeProvider.get(appContext)
-    private val session = GeckoSession()
+    private val session = GeckoSession(
+        GeckoSessionSettings.Builder()
+            .userAgentOverride(CHROMIUM_ANDROID_USER_AGENT)
+            .build(),
+    )
     private var started = false
     private var pendingFilePrompt: PendingFilePrompt? = null
     private var pendingGeckoPermissionCallback: GeckoSession.PermissionDelegate.Callback? = null
