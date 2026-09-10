@@ -261,7 +261,7 @@ class AndroidExportsBackupsActivity : Activity() {
         content.addView(header)
 
         val processingCard = cardContainer()
-        processingCard.addView(cardEyebrow("PROCESSING"))
+        processingCard.addView(cardEyebrow("Processing"))
         val queueHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -454,7 +454,7 @@ class AndroidExportsBackupsActivity : Activity() {
 
         content.addView(sectionTitle("All Conversations"))
         content.addView(TextView(this).apply {
-            text = "${snapshot.conversations.size} shown · one deduplicated library across Latest + saved Working Data"
+            text = "${snapshot.conversations.size} shown · one deduplicated library across Latest + saved Working Data. Tap a conversation row to read it."
             textSize = 12f
             setTextColor(COLOR_TEXT_MUTED)
             setPadding(0, 0, 0, dp(10))
