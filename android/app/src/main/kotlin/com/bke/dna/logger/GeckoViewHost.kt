@@ -418,19 +418,20 @@ class GeckoViewHost(
             deleteFile = cameraUri != null && cameraUri !in finalUris,
         )
 
+        val geckoUris = prepareGeckoFileUris(finalUris, cameraUri)
         val response = runCatching {
             when {
-                finalUris.isEmpty() -> {
+                geckoUris.isEmpty() -> {
                     browserDiagnostic("file_prompt_dismissed")
                     pending.prompt.dismiss()
                 }
                 pending.prompt.type == GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE -> {
                     browserDiagnostic("file_prompt_selection_received")
-                    pending.prompt.confirm(appContext, finalUris.toTypedArray())
+                    pending.prompt.confirm(appContext, geckoUris.toTypedArray())
                 }
                 else -> {
                     browserDiagnostic("file_prompt_selection_received")
-                    pending.prompt.confirm(appContext, finalUris.first())
+                    pending.prompt.confirm(appContext, geckoUris.first())
                 }
             }
         }.getOrElse { error ->
@@ -523,8 +524,7 @@ class GeckoViewHost(
             .orEmpty()
         val contentIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = mergedMimeType(mimeTypes)
-            putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+            type = browserPickerMimeType(mimeTypes)
             if (prompt.type == GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE) {
                 putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
             }
@@ -544,21 +544,9 @@ class GeckoViewHost(
             }
         }
 
-        val optionalCamera = if (
-            cameraMime != null && isPermissionGranted(Manifest.permission.CAMERA)
-        ) {
-            buildCameraLaunch(cameraMime)
-        } else {
-            null
-        }
-        if (optionalCamera == null) {
-            return FilePromptLaunch(contentIntent, null, false)
-        }
-
-        val chooser = Intent.createChooser(contentIntent, prompt.title ?: "Choose file").apply {
-            putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(optionalCamera.intent))
-        }
-        return FilePromptLaunch(chooser, optionalCamera.cameraUri, false)
+        // Normal Files/Photos prompts stay pure pickers. Camera is only invoked
+        // for a real HTML capture request so it cannot interfere with document upload.
+        return FilePromptLaunch(contentIntent, null, false)
     }
 
     private fun buildCameraLaunch(mimeType: String): FilePromptLaunch? {
@@ -599,6 +587,19 @@ class GeckoViewHost(
         return uris.toList()
     }
 
+    private fun prepareGeckoFileUris(selected: List<Uri>, cameraUri: Uri?): List<Uri> =
+        selected.map { uri ->
+            if (uri == cameraUri || !AndroidDocumentUploadStager.shouldStage(appContext, uri)) {
+                uri
+            } else {
+                AndroidDocumentUploadStager.stage(appContext, uri)?.also {
+                    browserDiagnostic("file_prompt_document_staged")
+                } ?: uri.also {
+                    browserDiagnostic("file_prompt_document_stage_failed")
+                }
+            }
+        }
+
     private fun dismissPendingFilePrompt() {
         val pending = pendingFilePrompt ?: return
         pendingFilePrompt = null
@@ -632,19 +633,14 @@ class GeckoViewHost(
         }
     }
 
-    private fun mergedMimeType(mimeTypes: List<String>): String {
+    private fun browserPickerMimeType(mimeTypes: List<String>): String {
         if (mimeTypes.isEmpty()) return "*/*"
-
-        val parsed = mimeTypes.mapNotNull { rawType ->
-            val slash = rawType.indexOf('/')
-            if (slash <= 0 || slash == rawType.lastIndex) return@mapNotNull null
-            rawType.substring(0, slash) to rawType.substring(slash + 1)
+        return when {
+            mimeTypes.all { it.startsWith("image/") } -> "image/*"
+            mimeTypes.all { it.startsWith("video/") } -> "video/*"
+            mimeTypes.all { it.startsWith("audio/") } -> "audio/*"
+            else -> "*/*"
         }
-        if (parsed.isEmpty()) return "*/*"
-
-        val major = parsed.map { it.first }.distinct().singleOrNull() ?: "*"
-        val subtype = parsed.map { it.second }.distinct().singleOrNull() ?: "*"
-        return "$major/$subtype"
     }
 
     private fun isPermissionGranted(permission: String): Boolean =
