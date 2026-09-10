@@ -55,21 +55,22 @@ for token in (
     assert token in host, token
 assert "AndroidWireIngress(activity.applicationContext)" not in host
 
-# PR7 uses Gecko's own FilePrompt contract for normal web uploads. Gallery/files
-# are passed through as content URIs, while optional camera output goes through a
-# temporary non-exported cache provider. File-prompt plumbing is deliberately
-# separate from DNA network-response capture.
+# Gecko's own FilePrompt contract drives ordinary web uploads. Match the current
+# GeckoView example by using ACTION_GET_CONTENT for files, while folder selection
+# stays on ACTION_OPEN_DOCUMENT_TREE and camera capture remains an optional chooser
+# intent. Selected content URIs go straight back through prompt.confirm().
 for token in (
     "session.setPromptDelegate(promptDelegate)",
     "override fun onFilePrompt(",
     "GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE",
     "GeckoSession.PromptDelegate.FilePrompt.Type.FOLDER",
     "GeckoSession.PromptDelegate.FilePrompt.Capture.NONE",
-    "Intent.ACTION_OPEN_DOCUMENT",
+    "Intent.ACTION_GET_CONTENT",
     "Intent.ACTION_OPEN_DOCUMENT_TREE",
     "Intent.EXTRA_ALLOW_MULTIPLE",
     "Intent.EXTRA_MIME_TYPES",
     "Intent.EXTRA_INITIAL_INTENTS",
+    "mergedMimeType(mimeTypes)",
     "MediaStore.ACTION_IMAGE_CAPTURE",
     "MediaStore.ACTION_VIDEO_CAPTURE",
     "MediaStore.EXTRA_OUTPUT",
@@ -81,6 +82,7 @@ for token in (
     "activity.revokeUriPermission(",
 ):
     assert token in host, token
+assert "Intent(Intent.ACTION_OPEN_DOCUMENT)" not in host
 file_prompt_block = host[host.index("private val promptDelegate"):host.index("private fun handleDiagnostic")]
 assert "AndroidCaptureRuntime" not in file_prompt_block
 assert "openInputStream" not in host
@@ -210,4 +212,4 @@ assert 'type: "diagnostic"' in bridge
 assert host.index("ensureBuiltIn(EXTENSION_URI, EXTENSION_ID)") < host.index("session.loadUri(CHATGPT_URL)")
 assert 'android:windowSoftInputMode="stateUnspecified|adjustResize"' in manifest
 
-print("android GeckoView streamed runtime + user photo/camera/file prompt smoke PASS")
+print("android GeckoView streamed runtime + browser-correct photo/camera/file prompt smoke PASS")
