@@ -2,7 +2,7 @@
 from pathlib import Path
 
 repo = Path(__file__).resolve().parents[1]
-host = (
+base = (
     repo
     / "android"
     / "app"
@@ -13,8 +13,9 @@ host = (
     / "bke"
     / "dna"
     / "logger"
-    / "GeckoViewHost.kt"
-).read_text(encoding="utf-8")
+)
+host = (base / "GeckoViewHost.kt").read_text(encoding="utf-8")
+main = (base / "MainActivity.kt").read_text(encoding="utf-8")
 
 # Single-tab browser behavior: same-origin requests for a new window are folded
 # into the current GeckoSession. We track the current top-level origin ourselves
@@ -38,6 +39,32 @@ redirect_block = host[
     host.index("private fun parseWebUri")
 ]
 assert "request.hasUserGesture" not in redirect_block
+
+# Android Back behaves like browser Back while Gecko has session history. Only
+# when Gecko reports no back entry does MainActivity fall through to normal
+# Activity back/exit behavior.
+for token in (
+    "@Volatile private var canGoBack = false",
+    "override fun onCanGoBack(session: GeckoSession, canGoBack: Boolean)",
+    "this@GeckoViewHost.canGoBack = canGoBack",
+    'browserDiagnostic(if (canGoBack) "navigation_can_go_back" else "navigation_cannot_go_back")',
+    "fun goBackIfPossible(): Boolean",
+    "if (!started || !session.isOpen || !canGoBack) return false",
+    'browserDiagnostic("navigation_back")',
+    "session.goBack()",
+):
+    assert token in host, token
+
+back_start = main.index("override fun onBackPressed()")
+back_end = main.index("override fun onActivityResult", back_start)
+back_block = main[back_start:back_end]
+for token in (
+    "AndroidDerivationScheduler.noteBrowserActivity()",
+    "geckoHost.goBackIfPossible()",
+    "super.onBackPressed()",
+):
+    assert token in back_block, token
+assert back_block.index("geckoHost.goBackIfPossible()") < back_block.index("super.onBackPressed()")
 
 # onNewSession remains Gecko-owned. GeckoView explicitly forbids calling loadUri
 # from this callback; all single-tab folding must happen in onLoadRequest instead.
@@ -69,4 +96,4 @@ for forbidden in (
 ):
     assert forbidden not in host, forbidden
 
-print("android generic single-tab navigation + camera file-URI contract smoke PASS")
+print("android generic navigation + browser back + camera file-URI contract smoke PASS")

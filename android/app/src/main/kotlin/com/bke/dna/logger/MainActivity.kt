@@ -97,6 +97,13 @@ class MainActivity : Activity() {
         super.onUserInteraction()
     }
 
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        AndroidDerivationScheduler.noteBrowserActivity()
+        if (::geckoHost.isInitialized && geckoHost.goBackIfPossible()) return
+        super.onBackPressed()
+    }
+
     @Deprecated("Activity result API retained for GeckoView file-prompt compatibility")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)

@@ -102,6 +102,7 @@ class GeckoViewHost(
     private var pendingFilePrompt: PendingFilePrompt? = null
     private var pendingGeckoPermissionCallback: GeckoSession.PermissionDelegate.Callback? = null
     private var currentWebUri: URI? = parseWebUri(CHATGPT_URL)
+    @Volatile private var canGoBack = false
 
     private fun browserDiagnostic(event: String) {
         Log.d(BROWSER_TAG, "BKE Browser: $event")
@@ -230,6 +231,11 @@ class GeckoViewHost(
             }
 
             return super.onLoadRequest(session, request)
+        }
+
+        override fun onCanGoBack(session: GeckoSession, canGoBack: Boolean) {
+            this@GeckoViewHost.canGoBack = canGoBack
+            browserDiagnostic(if (canGoBack) "navigation_can_go_back" else "navigation_cannot_go_back")
         }
 
         override fun onLocationChange(
@@ -445,6 +451,13 @@ class GeckoViewHost(
             )
     }
 
+    fun goBackIfPossible(): Boolean {
+        if (!started || !session.isOpen || !canGoBack) return false
+        browserDiagnostic("navigation_back")
+        session.goBack()
+        return true
+    }
+
     fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
         if (requestCode != FILE_PROMPT_REQUEST) return false
         browserDiagnostic("file_prompt_result_received")
@@ -537,6 +550,7 @@ class GeckoViewHost(
         dismissPendingFilePrompt()
         pendingGeckoPermissionCallback?.reject()
         pendingGeckoPermissionCallback = null
+        canGoBack = false
         view.releaseSession()
         if (session.isOpen) session.close()
         AndroidCaptureRuntime.stop()
