@@ -40,7 +40,13 @@ class AndroidExportsBackupsActivity : Activity() {
     private var pendingConversationKey: String? = null
     @Volatile private var operationInProgress = false
     @Volatile private var queueRefreshInFlight = false
+    @Volatile private var libraryRefreshInFlight = false
     private var queueStatusView: TextView? = null
+    private var conversationCountView: TextView? = null
+    private var conversationListContainer: LinearLayout? = null
+    private var renderedConversations: List<AndroidUnifiedConversationSummary> = emptyList()
+    private var renderedConversationQuery: String = ""
+    private var renderedConversationLimit: Int = 0
     private var uiLoadGeneration = 0L
     private var hasRenderedUi = false
     private val ioExecutor = Executors.newSingleThreadExecutor { runnable ->
@@ -55,6 +61,14 @@ class AndroidExportsBackupsActivity : Activity() {
             }
         }
     }
+    private val libraryMonitorTick = object : Runnable {
+        override fun run() {
+            refreshConversationLibrary()
+            if (!isFinishing && !isDestroyed) {
+                queueMonitorHandler.postDelayed(this, LIBRARY_REFRESH_MS)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,17 +80,21 @@ class AndroidExportsBackupsActivity : Activity() {
         super.onResume()
         AndroidDerivationScheduler.start(this)
         queueMonitorHandler.removeCallbacks(queueMonitorTick)
+        queueMonitorHandler.removeCallbacks(libraryMonitorTick)
         queueMonitorHandler.post(queueMonitorTick)
+        queueMonitorHandler.post(libraryMonitorTick)
     }
 
     override fun onPause() {
         queueMonitorHandler.removeCallbacks(queueMonitorTick)
+        queueMonitorHandler.removeCallbacks(libraryMonitorTick)
         super.onPause()
     }
 
     override fun onDestroy() {
         uiLoadGeneration += 1
         queueMonitorHandler.removeCallbacks(queueMonitorTick)
+        queueMonitorHandler.removeCallbacks(libraryMonitorTick)
         ioExecutor.shutdown()
         super.onDestroy()
     }
@@ -183,6 +201,11 @@ class AndroidExportsBackupsActivity : Activity() {
     private fun renderLoadFailure(error: Throwable) {
         hasRenderedUi = true
         queueStatusView = null
+        conversationCountView = null
+        conversationListContainer = null
+        renderedConversations = emptyList()
+        renderedConversationQuery = ""
+        renderedConversationLimit = 0
         val shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
@@ -453,12 +476,12 @@ class AndroidExportsBackupsActivity : Activity() {
         content.addView(workingCard)
 
         content.addView(sectionTitle("All Conversations"))
-        content.addView(TextView(this).apply {
-            text = "${snapshot.conversations.size} shown · one deduplicated library across Latest + saved Working Data. Tap a conversation row to read it."
+        conversationCountView = TextView(this).apply {
+            text = conversationSummaryText(snapshot.conversations.size)
             textSize = 12f
             setTextColor(COLOR_TEXT_MUTED)
             setPadding(0, 0, 0, dp(10))
-        })
+        }.also(content::addView)
 
         val searchCard = cardContainer(compact = true)
         val searchInput = EditText(this).apply {
@@ -509,11 +532,85 @@ class AndroidExportsBackupsActivity : Activity() {
             content.addView(errorCard)
         }
 
-        val conversations = snapshot.conversations
+        val liveConversationContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        conversationListContainer = liveConversationContainer
+        renderedConversations = snapshot.conversations
+        renderedConversationQuery = snapshot.searchQuery
+        renderedConversationLimit = snapshot.libraryLimit
+        renderConversationList(
+            container = liveConversationContainer,
+            conversations = snapshot.conversations,
+            requestedSearchQuery = snapshot.searchQuery,
+            requestedLibraryLimit = snapshot.libraryLimit,
+        )
+        content.addView(liveConversationContainer)
+    }
+
+    private fun refreshConversationLibrary() {
+        val targetContainer = conversationListContainer ?: return
+        val targetCount = conversationCountView ?: return
+        if (operationInProgress || libraryRefreshInFlight || ioExecutor.isShutdown) return
+
+        val requestedSearchQuery = searchQuery
+        val requestedLibraryLimit = libraryLimit
+        val appContext = applicationContext
+        libraryRefreshInFlight = true
+        ioExecutor.execute {
+            val result = runCatching {
+                AndroidUnifiedConversationLibrary(appContext).search(
+                    requestedSearchQuery,
+                    requestedLibraryLimit,
+                )
+            }
+            runOnUiThread {
+                libraryRefreshInFlight = false
+                if (isFinishing || isDestroyed || operationInProgress) return@runOnUiThread
+                if (conversationListContainer !== targetContainer || conversationCountView !== targetCount) {
+                    return@runOnUiThread
+                }
+                if (searchQuery != requestedSearchQuery || libraryLimit != requestedLibraryLimit) {
+                    return@runOnUiThread
+                }
+                val conversations = result.getOrNull() ?: return@runOnUiThread
+                if (
+                    conversations == renderedConversations &&
+                    requestedSearchQuery == renderedConversationQuery &&
+                    requestedLibraryLimit == renderedConversationLimit
+                ) {
+                    return@runOnUiThread
+                }
+
+                renderedConversations = conversations
+                renderedConversationQuery = requestedSearchQuery
+                renderedConversationLimit = requestedLibraryLimit
+                targetCount.text = conversationSummaryText(conversations.size)
+                renderConversationList(
+                    container = targetContainer,
+                    conversations = conversations,
+                    requestedSearchQuery = requestedSearchQuery,
+                    requestedLibraryLimit = requestedLibraryLimit,
+                )
+            }
+        }
+    }
+
+    private fun renderConversationList(
+        container: LinearLayout,
+        conversations: List<AndroidUnifiedConversationSummary>,
+        requestedSearchQuery: String,
+        requestedLibraryLimit: Int,
+    ) {
+        container.removeAllViews()
         if (conversations.isEmpty()) {
             val emptyCard = cardContainer()
             emptyCard.addView(TextView(this).apply {
-                text = if (snapshot.searchQuery.isBlank()) "No normalized conversations yet." else "No conversations matched ‘${snapshot.searchQuery}’."
+                text = if (requestedSearchQuery.isBlank()) {
+                    "No normalized conversations yet."
+                } else {
+                    "No conversations matched ‘$requestedSearchQuery’."
+                }
                 textSize = 16f
                 setTextColor(COLOR_TEXT_PRIMARY)
                 typeface = Typeface.DEFAULT_BOLD
@@ -524,7 +621,7 @@ class AndroidExportsBackupsActivity : Activity() {
                 setTextColor(COLOR_TEXT_MUTED)
                 setPadding(0, dp(6), 0, 0)
             })
-            content.addView(emptyCard)
+            container.addView(emptyCard)
         }
 
         conversations.forEach { summary ->
@@ -597,12 +694,15 @@ class AndroidExportsBackupsActivity : Activity() {
                 setTextColor(COLOR_TEXT_MUTED)
                 setPadding(0, dp(7), 0, 0)
             })
-            content.addView(panel)
+            container.addView(panel)
         }
 
-        if (conversations.size >= snapshot.libraryLimit && snapshot.libraryLimit < AndroidUnifiedConversationLibrary.MAX_PAGE_SIZE) {
-            content.addView(compactRow(compactButton("LOAD MORE") {
-                libraryLimit = (snapshot.libraryLimit + AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE)
+        if (
+            conversations.size >= requestedLibraryLimit &&
+            requestedLibraryLimit < AndroidUnifiedConversationLibrary.MAX_PAGE_SIZE
+        ) {
+            container.addView(compactRow(compactButton("LOAD MORE") {
+                libraryLimit = (requestedLibraryLimit + AndroidUnifiedConversationLibrary.DEFAULT_PAGE_SIZE)
                     .coerceAtMost(AndroidUnifiedConversationLibrary.MAX_PAGE_SIZE)
                 refreshUi()
             }).apply {
@@ -611,6 +711,9 @@ class AndroidExportsBackupsActivity : Activity() {
             })
         }
     }
+
+    private fun conversationSummaryText(count: Int): String =
+        "$count shown · one deduplicated library across Latest + saved Working Data. Tap a conversation row to read it."
 
     private fun prepareWorkingDataBackup(generation: AndroidWorkingDataGeneration) {
         pendingConversationKey = null
@@ -1088,6 +1191,7 @@ class AndroidExportsBackupsActivity : Activity() {
         private const val REQUEST_EXPORT_RAW_MD = 1105
         private const val MENU_EXPORT_DNA = 2101
         private const val QUEUE_REFRESH_MS = 1_500L
+        private const val LIBRARY_REFRESH_MS = 3_000L
 
         private val COLOR_BACKGROUND = Color.rgb(17, 20, 23)
         private val COLOR_CARD = Color.rgb(24, 29, 33)
