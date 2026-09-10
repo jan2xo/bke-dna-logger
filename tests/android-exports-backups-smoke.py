@@ -166,15 +166,18 @@ for forbidden in ['AndroidHumanExportService', '.readText(']:
     assert forbidden not in unified, forbidden
 
 # Working Data UI retains the same owner controls, but all storage/library/queue
-# reads and export preparation run on a dedicated IO executor. Main-thread work
-# is limited to rendering and final widget/text updates.
+# reads and export preparation run on a dedicated IO executor. The visible
+# conversation section live-refreshes independently so newly reconciled rows and
+# titles appear without leaving/re-entering the Activity or rebuilding the full UI.
 for token in [
     'Working Data & Conversations', 'Processing', 'All Conversations', 'Search conversation titles',
     'SEARCH', 'CLEAR', 'LOAD MORE',
     'Executors.newSingleThreadExecutor', '"bke-dna-working-data-io"', 'ioExecutor.execute {',
     'private fun loadUiSnapshot(', 'private fun renderUi(snapshot: UiSnapshot)',
     'AndroidUnifiedConversationLibrary(appContext).search(requestedSearchQuery, requestedLibraryLimit)',
-    'Handler(Looper.getMainLooper())', 'QUEUE_REFRESH_MS = 1_500L',
+    'Handler(Looper.getMainLooper())', 'QUEUE_REFRESH_MS = 1_500L', 'LIBRARY_REFRESH_MS = 3_000L',
+    'private val libraryMonitorTick', 'refreshConversationLibrary()',
+    'private fun renderConversationList(', 'conversationListContainer', 'renderedConversations',
     'AndroidDerivationScheduler.start(this)', 'AndroidDerivationScheduler.snapshot(appContext)',
     'AndroidDerivationScheduler.getProfile(appContext)', 'AndroidDerivationScheduler.setProfile(this, profile)',
     'AndroidProcessingProfile.entries', 'profileLabel(profile)',
@@ -189,6 +192,19 @@ for token in ['SLOW(500L)', 'BALANCED(150L)', 'FAST(25L)', 'fun snapshot(context
 for forbidden in ['actionButton("Read conversation")', 'actionButton("Export CLEAN.md")', 'actionButton("Export RAW.md")']:
     assert forbidden not in ui, forbidden
 
+resume_start = ui.index('override fun onResume()')
+resume_end = ui.index('override fun onPause()', resume_start)
+resume = ui[resume_start:resume_end]
+for token in [
+    'queueMonitorHandler.removeCallbacks(libraryMonitorTick)',
+    'queueMonitorHandler.post(libraryMonitorTick)',
+]:
+    assert token in resume, token
+pause_start = ui.index('override fun onPause()')
+pause_end = ui.index('override fun onDestroy()', pause_start)
+pause = ui[pause_start:pause_end]
+assert 'queueMonitorHandler.removeCallbacks(libraryMonitorTick)' in pause
+
 load_start = ui.index('private fun loadUiSnapshot(')
 load_end = ui.index('private fun renderLoadFailure(', load_start)
 load_section = ui[load_start:load_end]
@@ -198,6 +214,24 @@ for token in [
     'AndroidUnifiedConversationLibrary(appContext).search(',
 ]:
     assert token in load_section, token
+
+live_start = ui.index('private fun refreshConversationLibrary()')
+live_end = ui.index('private fun renderConversationList(', live_start)
+live_refresh = ui[live_start:live_end]
+for token in [
+    'if (operationInProgress || libraryRefreshInFlight || ioExecutor.isShutdown) return',
+    'ioExecutor.execute {',
+    'AndroidUnifiedConversationLibrary(appContext).search(',
+    'conversationListContainer !== targetContainer',
+    'searchQuery != requestedSearchQuery || libraryLimit != requestedLibraryLimit',
+    'conversations == renderedConversations',
+    'targetCount.text = conversationSummaryText(conversations.size)',
+    'renderConversationList(',
+]:
+    assert token in live_refresh, token
+assert live_refresh.index('ioExecutor.execute {') < live_refresh.index('AndroidUnifiedConversationLibrary(appContext).search(')
+assert 'setContentView(' not in live_refresh
+
 render_start = ui.index('private fun renderUi(snapshot: UiSnapshot)')
 render_end = ui.index('private fun prepareWorkingDataBackup', render_start)
 render_section = ui[render_start:render_end]
@@ -321,4 +355,4 @@ identity = '\n'.join(f'{p}\t{s}\t{n}\t{src}' for p, s, n, src in sorted(evidence
 archive_id = 'dna-conversation-v2-' + hashlib.sha256(identity.encode()).hexdigest()
 assert len(archive_id) == len('dna-conversation-v2-') + 64
 
-print('android SQLite Working Data backup + background UI + title evidence recovery smoke PASS')
+print('android SQLite Working Data backup + background UI + title recovery + visible live refresh smoke PASS')
