@@ -23,6 +23,10 @@ import java.util.concurrent.atomic.AtomicLong
  * point for bounded inner loops such as normalized SQLite chunk publication.
  * Queue rows and completed RAW staging files survive process death, so DNA may
  * intentionally fall behind while the owner actively uses ChatGPT.
+ *
+ * When unfinished work exists, AndroidDnaProcessingService provides a bounded
+ * foreground-service lifetime so the same single queue can continue after the
+ * screen is locked. It does not create a second worker.
  */
 object AndroidDerivationScheduler {
     private const val TAG = "BkeDnaQueue"
@@ -49,8 +53,22 @@ object AndroidDerivationScheduler {
 
     fun start(context: Context) {
         val appContext = context.applicationContext
+        initialize(appContext)
+        val waiting = AndroidDerivationQueueStore(appContext).use { it.hasWaiting() }
+        if (waiting) AndroidDnaProcessingService.ensureRunning(appContext)
+        kick(appContext)
+    }
+
+    /** Entry used only by the already-running foreground service; avoids start recursion. */
+    internal fun startFromProcessingService(context: Context) {
+        val appContext = context.applicationContext
+        initialize(appContext)
+        kick(appContext)
+    }
+
+    private fun initialize(context: Context) {
         synchronized(startLock) {
-            AndroidDerivationQueueStore(appContext).use { store ->
+            AndroidDerivationQueueStore(context).use { store ->
                 if (!recoveryInitialized) {
                     val recovered = store.recoverInterrupted()
                     if (recovered > 0) {
@@ -61,12 +79,11 @@ object AndroidDerivationScheduler {
                     store.ensureSchema()
                 }
             }
-            val staged = recoverStagedRaw(appContext)
+            val staged = recoverStagedRaw(context)
             if (staged > 0) {
                 Log.d(TAG, "BKE DNA queue: recovered_raw_staging")
             }
         }
-        kick(appContext)
     }
 
     fun enqueue(
@@ -92,6 +109,7 @@ object AndroidDerivationScheduler {
                 ),
             )
         }
+        AndroidDnaProcessingService.ensureRunning(appContext)
         kick(appContext)
     }
 
@@ -129,12 +147,15 @@ object AndroidDerivationScheduler {
     }
 
     fun setProfile(context: Context, profile: AndroidProcessingProfile) {
-        context.applicationContext
+        val appContext = context.applicationContext
+        appContext
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(PREF_PROFILE, profile.name)
             .apply()
-        kick(context.applicationContext)
+        val waiting = AndroidDerivationQueueStore(appContext).use { it.hasWaiting() }
+        if (waiting) AndroidDnaProcessingService.ensureRunning(appContext)
+        kick(appContext)
     }
 
     fun snapshot(context: Context): AndroidDerivationQueueSnapshot =
@@ -180,7 +201,12 @@ object AndroidDerivationScheduler {
             } finally {
                 drainScheduled.set(false)
                 val waiting = AndroidDerivationQueueStore(appContext).use { it.hasWaiting() }
-                if (waiting) kick(appContext)
+                if (waiting) {
+                    AndroidDnaProcessingService.ensureRunning(appContext)
+                    kick(appContext)
+                } else {
+                    AndroidDnaProcessingService.stopWhenIdle(appContext)
+                }
             }
         }
     }
@@ -191,61 +217,64 @@ object AndroidDerivationScheduler {
             val job = AndroidDerivationQueueStore(context).use { it.claimNext() } ?: return
             val stagedRaw = File(AndroidDnaPaths.capturesRoot(context), job.bodyPath)
 
-            val rawReady = runCatching {
-                waitForBrowserQuiet()
-                AndroidDerivationQueueStore(context).use {
-                    it.updateStage(job.sourceSha256, STAGE_RAW_INGEST)
-                }
-                AndroidRawEvidenceStore(context).use { rawStore ->
-                    if (stagedRaw.isFile) {
-                        rawStore.importVerified(
-                            sourceSha256 = job.sourceSha256,
-                            stagingFile = stagedRaw,
-                            expectedByteLength = job.byteLength,
-                        )
-                    } else {
-                        check(rawStore.contains(job.sourceSha256)) { "RAW staging and SQLite source are both missing" }
-                        rawStore.verifySource(job.sourceSha256, job.byteLength)
-                    }
-                }
-                if (stagedRaw.isFile && !stagedRaw.delete()) {
-                    Log.d(TAG, "BKE DNA queue: raw_staging_cleanup_deferred")
-                }
-                true
-            }.getOrElse {
-                AndroidDerivationQueueStore(context).use { store ->
-                    store.markFailed(job.sourceSha256, "raw_ingest_failed")
-                }
-                false
-            }
-            if (!rawReady) {
-                breathe(context)
-                continue
-            }
-
-            breathe(context)
-            var firstStage = true
-            val success = AndroidLiveDerivationPipeline(context).processCompletedCapture(
-                sourceSha256 = job.sourceSha256,
-                byteLength = job.byteLength,
-                contentType = job.contentType,
-                onStage = { stage ->
-                    if (!firstStage) breathe(context)
+            AndroidDnaProcessingService.beginActiveWork(context)
+            try {
+                val rawReady = runCatching {
                     waitForBrowserQuiet()
                     AndroidDerivationQueueStore(context).use {
-                        it.updateStage(job.sourceSha256, stage)
+                        it.updateStage(job.sourceSha256, STAGE_RAW_INGEST)
                     }
-                    firstStage = false
-                },
-            )
-
-            waitForBrowserQuiet()
-            AndroidDerivationQueueStore(context).use { store ->
-                if (success) {
-                    store.markDone(job.sourceSha256)
-                } else {
-                    store.markFailed(job.sourceSha256, "derivative_failed")
+                    AndroidRawEvidenceStore(context).use { rawStore ->
+                        if (stagedRaw.isFile) {
+                            rawStore.importVerified(
+                                sourceSha256 = job.sourceSha256,
+                                stagingFile = stagedRaw,
+                                expectedByteLength = job.byteLength,
+                            )
+                        } else {
+                            check(rawStore.contains(job.sourceSha256)) { "RAW staging and SQLite source are both missing" }
+                            rawStore.verifySource(job.sourceSha256, job.byteLength)
+                        }
+                    }
+                    if (stagedRaw.isFile && !stagedRaw.delete()) {
+                        Log.d(TAG, "BKE DNA queue: raw_staging_cleanup_deferred")
+                    }
+                    true
+                }.getOrElse {
+                    AndroidDerivationQueueStore(context).use { store ->
+                        store.markFailed(job.sourceSha256, "raw_ingest_failed")
+                    }
+                    false
                 }
+
+                if (rawReady) {
+                    breathe(context)
+                    var firstStage = true
+                    val success = AndroidLiveDerivationPipeline(context).processCompletedCapture(
+                        sourceSha256 = job.sourceSha256,
+                        byteLength = job.byteLength,
+                        contentType = job.contentType,
+                        onStage = { stage ->
+                            if (!firstStage) breathe(context)
+                            waitForBrowserQuiet()
+                            AndroidDerivationQueueStore(context).use {
+                                it.updateStage(job.sourceSha256, stage)
+                            }
+                            firstStage = false
+                        },
+                    )
+
+                    waitForBrowserQuiet()
+                    AndroidDerivationQueueStore(context).use { store ->
+                        if (success) {
+                            store.markDone(job.sourceSha256)
+                        } else {
+                            store.markFailed(job.sourceSha256, "derivative_failed")
+                        }
+                    }
+                }
+            } finally {
+                AndroidDnaProcessingService.endActiveWork()
             }
             breathe(context)
         }
