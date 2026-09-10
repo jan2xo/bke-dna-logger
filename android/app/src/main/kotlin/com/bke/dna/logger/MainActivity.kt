@@ -84,6 +84,17 @@ class MainActivity : Activity() {
 
         geckoHost = GeckoViewHost(this, geckoView)
         geckoHost.start()
+        AndroidDerivationScheduler.noteBrowserActivity()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        AndroidDerivationScheduler.noteBrowserActivity()
+    }
+
+    override fun onUserInteraction() {
+        AndroidDerivationScheduler.noteBrowserActivity()
+        super.onUserInteraction()
     }
 
     @Deprecated("Activity result API retained for GeckoView file-prompt compatibility")
