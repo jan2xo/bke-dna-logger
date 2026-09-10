@@ -17,7 +17,8 @@
             android:exported="false" />
         <activity
             android:name=".AndroidExportsBackupsActivity"
-            android:exported="false" />
+            android:exported="false"
+            android:theme="@style/BkeWorkingDataTheme" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
