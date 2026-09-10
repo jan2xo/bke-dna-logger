@@ -1,12 +1,15 @@
 package com.bke.dna.logger
 
 import android.content.Context
+import android.util.JsonReader
+import android.util.JsonToken
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStreamReader
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -103,6 +106,25 @@ class AndroidConversationTitleCatalog(context: Context) {
         sourceSha256: String,
         generations: List<AndroidWorkingDataGeneration>,
     ): RawTitleResult {
+        // Latest/legacy RAW can be scanned without materializing the payload.
+        // This is what allows >16 MiB conversations to recover their captured
+        // root title while keeping memory bounded.
+        val streamed = runCatching {
+            AndroidRawSourceAccess.withExactInputStream(appContext, sourceSha256) { input ->
+                runCatching {
+                    JsonReader(InputStreamReader(input, Charsets.UTF_8)).use(::readCapturedRootTitle)
+                }.fold(
+                    onSuccess = { RawTitleResult(it, inspected = true) },
+                    onFailure = { RawTitleResult(null, inspected = true) },
+                )
+            }
+        }.getOrNull()
+        if (streamed != null) return streamed
+
+        // Historical pre-streaming generations retain the bounded compatibility
+        // path. A payload that exceeds that bound is NOT considered inspected;
+        // it must remain eligible for a future exact streaming source instead of
+        // permanently poisoning the title catalog as titleless.
         var bytes: ByteArray? = null
         var inspected = false
         for (generation in generations) {
@@ -111,7 +133,7 @@ class AndroidConversationTitleCatalog(context: Context) {
                     generation = generation,
                     captureRoot = captureRoot,
                     sourceSha256 = sourceSha256,
-                    maxBytes = MAX_BODY_BYTES,
+                    maxBytes = MAX_LEGACY_BODY_BYTES,
                 )
             }
             if (source.isSuccess) {
@@ -121,9 +143,6 @@ class AndroidConversationTitleCatalog(context: Context) {
                     inspected = true
                     break
                 }
-            } else if (source.exceptionOrNull() is IllegalArgumentException) {
-                inspected = true
-                break
             }
         }
         if (bytes == null) return RawTitleResult(null, inspected)
@@ -145,6 +164,40 @@ class AndroidConversationTitleCatalog(context: Context) {
             title = (titleValue as? String)?.trim()?.takeIf { it.isNotBlank() },
             inspected = true,
         )
+    }
+
+    private fun readCapturedRootTitle(reader: JsonReader): String? {
+        if (reader.peek() != JsonToken.BEGIN_OBJECT) {
+            reader.skipValue()
+            return null
+        }
+
+        val candidates = linkedSetOf<String>()
+        reader.beginObject()
+        while (reader.hasNext()) {
+            val name = reader.nextName()
+            if (name == "title") {
+                Log.d(TAG, "BKE DNA title: candidate_root_title")
+                if (reader.peek() == JsonToken.STRING) {
+                    val title = reader.nextString().trim().takeIf { it.isNotBlank() }
+                    if (title != null) {
+                        Log.d(TAG, "BKE DNA title: candidate_title_string")
+                        candidates += title
+                    }
+                } else {
+                    reader.skipValue()
+                }
+            } else {
+                reader.skipValue()
+            }
+        }
+        reader.endObject()
+        if (reader.peek() != JsonToken.END_DOCUMENT) return null
+        if (candidates.size > 1) {
+            Log.d(TAG, "BKE DNA title: candidate_title_conflict")
+            return null
+        }
+        return candidates.singleOrNull()
     }
 
     private fun readCatalog(): CatalogState {
@@ -233,8 +286,8 @@ class AndroidConversationTitleCatalog(context: Context) {
     companion object {
         private const val TAG = "BkeDnaTitles"
         private const val CATALOG_FILE_NAME = "conversation-title-catalog.json"
-        private const val FORMAT_VERSION = 1
-        private const val MAX_BODY_BYTES = 16L * 1024 * 1024
+        private const val FORMAT_VERSION = 2
+        private const val MAX_LEGACY_BODY_BYTES = 16L * 1024 * 1024
         private val SHA256 = Regex("[0-9a-f]{64}")
     }
 }
