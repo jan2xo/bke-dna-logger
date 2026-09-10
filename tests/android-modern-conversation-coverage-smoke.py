@@ -61,6 +61,27 @@ for token in (
 for forbidden in ('message.opt("parent")', 'message.optJSONArray("children")', 'UUID.randomUUID'):
     assert forbidden not in messages, forbidden
 
+# Normal-sized messages now preserve exactly the same evidence-backed title
+# semantics as the oversized streaming path. Only captured string titles from
+# the root/messages envelope are eligible; conflicting evidence fails closed.
+for token in (
+    'capturedTitle(root.opt("title"))',
+    'capturedTitle(envelope.container.opt("title"))',
+    'resolveDisplayTitle(',
+    'messages_display_title_found',
+    'messages_display_title_conflict',
+    'writer.name("displayTitle").value(displayTitle)',
+    'DISPLAY_TITLE_LIMIT = 240',
+):
+    assert token in messages, token
+for forbidden in (
+    'setOf("user")',
+    'first user',
+    'first JAN',
+    'UUID.randomUUID',
+):
+    assert forbidden not in messages, forbidden
+
 # Oversized messages normalization keeps title handling evidence-backed and
 # bounded: only a captured string title on the root/messages envelope may become
 # displayTitle. Conflicts omit the title instead of synthesizing a replacement.
@@ -128,4 +149,4 @@ for token in (
 ):
     assert token in recovery, token
 
-print('android modern conversation representation + streaming title coverage smoke PASS')
+print('android modern conversation representation + captured title coverage smoke PASS')
