@@ -63,7 +63,7 @@ assert store.index("index.record(") < store.index("AndroidDerivationScheduler.en
 for token in (
     "CREATE TABLE IF NOT EXISTS derivation_queue",
     "recoverInterrupted()",
-    "recoverStagedRaw(appContext)",
+    "recoverStagedRaw(context)",
     'STAGE_RAW_INGEST = "RAW_INGEST"',
     "rawStore.importVerified(",
     "Executors.newSingleThreadExecutor",
