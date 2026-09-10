@@ -39,7 +39,7 @@ for token in (
 
 # Native ingress still fsyncs exact bytes before ACK, but completed sources now
 # promote only to durable staging. Permanent RAW ownership moves to SQLite in
-# the breathing queue, not on the Gecko capture path.
+# the background-priority browser-quiet queue, not on the Gecko capture path.
 for token in (
     'MessageDigest.getInstance("SHA-256")',
     "output.fd.sync()",
@@ -63,11 +63,13 @@ assert store.index("index.record(") < store.index("AndroidDerivationScheduler.en
 for token in (
     "CREATE TABLE IF NOT EXISTS derivation_queue",
     "recoverInterrupted()",
-    "recoverStagedRaw(appContext)",
+    "recoverStagedRaw(context)",
     'STAGE_RAW_INGEST = "RAW_INGEST"',
     "rawStore.importVerified(",
     "Executors.newSingleThreadExecutor",
-    "waitForCaptureQuiet()",
+    "Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)",
+    "waitForBrowserQuiet()",
+    "BROWSER_QUIET_MS = 3_000L",
     "SLOW(500L)",
     "BALANCED(150L)",
     "FAST(25L)",
@@ -78,7 +80,10 @@ assert queue.index("rawStore.importVerified(") < queue.index("stagedRaw.delete()
 for token in (
     "CREATE TABLE IF NOT EXISTS raw_source (",
     "CREATE TABLE IF NOT EXISTS raw_source_chunk (",
-    "verifySource(sourceSha256, expectedByteLength)",
+    "deleteUnpublishedChunks(sourceSha256)",
+    "verifyUnpublishedSource(",
+    'database.insertOrThrow("raw_source_chunk", null, values)',
+    'database.insertOrThrow("raw_source", null, sourceValues)',
     "database.setTransactionSuccessful()",
 ):
     assert token in raw_store, token
@@ -120,4 +125,4 @@ for token in (
 for forbidden in ("Authorization", "Cookie", "requestHeaders", "responseHeaders"):
     assert forbidden not in bridge, forbidden
 
-print("android streamed native ingress/SQLite RAW breathing queue smoke PASS")
+print("android streamed native ingress/browser-first SQLite RAW queue smoke PASS")

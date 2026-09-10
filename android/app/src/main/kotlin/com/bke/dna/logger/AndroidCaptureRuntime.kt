@@ -48,6 +48,10 @@ object AndroidCaptureRuntime {
         }
         if (firstPause) {
             AndroidCaptureStore.awaitBackgroundDerivationIdle(appContext)
+            // Capture ingress is closed and the single derivation lane is idle,
+            // so no live SQLite lease may remain. Close/reset the process-wide
+            // helper before checkpoint/copy/delete rotation work begins.
+            AndroidCaptureIndex.closeSharedDatabaseForStorageMutation()
         }
     }
 

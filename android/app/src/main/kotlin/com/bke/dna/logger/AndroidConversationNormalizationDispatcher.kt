@@ -9,6 +9,7 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
     private val appContext = context.applicationContext
     private val graphNormalizer = AndroidGraphNormalizationEngine(appContext)
     private val messagesNormalizer = AndroidMessagesNormalizationEngine(appContext)
+    private val streamingMessagesNormalizer = AndroidStreamingMessagesNormalizationEngine(appContext)
     private val eventStreamNormalizer = AndroidEventStreamNormalizationEngine(appContext)
 
     fun normalizeCandidate(sourceSha256: String): AndroidNormalizationResult? {
@@ -18,6 +19,42 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
         val classificationRoot = runCatching { JSONObject(classificationPayload) }.getOrNull() ?: return null
         val classification = classificationRoot.optJSONObject("classification") ?: return null
         if (classification.optString("kind") != CANDIDATE_KIND) return null
+
+        val contentType = classificationRoot.opt("contentType")
+            ?.takeUnless { it == JSONObject.NULL }
+            ?.toString()
+        val classifierSignals = buildSet {
+            val array = classification.optJSONArray("signals")
+            if (array != null) {
+                for (index in 0 until array.length()) add(array.optString(index))
+            }
+        }
+        val byteLength = classificationRoot.optLong("byteLength", -1L)
+
+        // MAX_BODY_BYTES now selects the legacy materialized parser only.
+        // Large modern messages payloads continue through bounded RAW streams.
+        if (byteLength > MAX_BODY_BYTES) {
+            return when {
+                contentType?.contains("text/event-stream", ignoreCase = true) == true -> {
+                    Log.d(TAG, "BKE DNA normalization: normalization_representation_event_stream")
+                    eventStreamNormalizer.normalizeCandidate(sourceSha256)
+                }
+                hasMessagesSignal(classifierSignals) -> {
+                    Log.d(TAG, "BKE DNA normalization: normalization_representation_messages_array")
+                    streamingMessagesNormalizer.normalizeCandidate(sourceSha256)
+                }
+                "mapping" in classifierSignals -> {
+                    // generic-mapping-graph-v0 remains independently strict and
+                    // bounded until its own streaming parser is certified.
+                    Log.d(TAG, "BKE DNA normalization: normalization_representation_mapping_graph")
+                    graphNormalizer.normalizeCandidate(sourceSha256)
+                }
+                else -> {
+                    Log.d(TAG, "BKE DNA normalization: normalization_skip_unsupported_representation")
+                    null
+                }
+            }
+        }
 
         val rawBytes = try {
             AndroidRawSourceAccess.readAllBytes(appContext, sourceSha256, MAX_BODY_BYTES)
@@ -31,9 +68,6 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
         }
 
         val rawText = String(rawBytes, Charsets.UTF_8)
-        val contentType = classificationRoot.opt("contentType")
-            ?.takeUnless { it == JSONObject.NULL }
-            ?.toString()
         if (contentType?.contains("text/event-stream", ignoreCase = true) == true ||
             looksLikeEventStream(rawText)
         ) {
@@ -54,13 +88,6 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
             return null
         }
 
-        val classifierSignals = buildSet {
-            val array = classification.optJSONArray("signals")
-            if (array != null) {
-                for (index in 0 until array.length()) add(array.optString(index))
-            }
-        }
-
         return when {
             root.optJSONObject("mapping") != null -> {
                 Log.d(TAG, "BKE DNA normalization: normalization_representation_mapping_graph")
@@ -78,6 +105,8 @@ class AndroidConversationNormalizationDispatcher(context: android.content.Contex
             }
         }
     }
+
+    private fun hasMessagesSignal(signals: Set<String>): Boolean = signals.contains("messages")
 
     private fun looksLikeEventStream(text: String): Boolean = text.lineSequence()
         .firstOrNull { it.isNotBlank() }

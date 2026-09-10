@@ -24,6 +24,10 @@ class AndroidLiveDerivationPipeline(context: Context) {
     ): Boolean {
         return try {
             Log.d(TAG, "BKE DNA derivation: started")
+            Log.d(
+                TAG,
+                "BKE DNA derivation: source_${sourceSha256.take(SOURCE_PREFIX_LENGTH)} bytes_$byteLength",
+            )
 
             onStage(STAGE_CLASSIFYING)
             ensureClassification(sourceSha256, byteLength, contentType)
@@ -44,10 +48,14 @@ class AndroidLiveDerivationPipeline(context: Context) {
                 Log.d(TAG, "BKE DNA derivation: reconciliation_complete")
                 true
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
             // Classification, normalization, and aggregation are derivatives.
             // Exact RAW evidence is already verified inside Working Data SQLite.
+            // Log only the exception class and stack trace; never log RAW payloads.
+            val errorType = error.javaClass.simpleName.ifBlank { "Exception" }
             Log.d(TAG, "BKE DNA derivation: derivative_failed")
+            Log.d(TAG, "BKE DNA derivation: derivative_failed_$errorType")
+            Log.d(TAG, "BKE DNA derivation: derivative_failed_stack", error)
             false
         }
     }
@@ -57,12 +65,34 @@ class AndroidLiveDerivationPipeline(context: Context) {
         byteLength: Long,
         contentType: String?,
     ) {
-        if (AndroidDerivativeSourceAccess.readClassification(appContext, sourceSha256) != null) return
+        val existing = AndroidDerivativeSourceAccess.readClassification(appContext, sourceSha256)
+        if (existing != null) {
+            // Only the historical oversized-RAW size-limit derivative became
+            // obsolete when streaming classification shipped. All current/valid
+            // classifications remain immutable and reusable across upgrades.
+            if (
+                byteLength <= MAX_CLASSIFICATION_BYTES ||
+                !hasLegacyClassificationSizeLimit(existing)
+            ) {
+                return
+            }
+
+            // The stale row can live either in Latest or in a read-only saved
+            // generation. Delete it only when it exists in Latest; either way,
+            // continue and write a fresh current classification into Latest so
+            // federation prefers the upgraded derivative without touching RAW.
+            AndroidDerivativeStore(appContext).use { store ->
+                store.invalidateLegacyClassificationSizeLimit(sourceSha256)
+            }
+            Log.d(TAG, "BKE DNA derivation: classification_legacy_size_limit_invalidated")
+        }
 
         var errorType: String? = null
         val classification = try {
             if (byteLength > MAX_CLASSIFICATION_BYTES) {
-                AndroidPayloadClassification.other("classification_size_limit")
+                AndroidRawSourceAccess.withExactInputStream(appContext, sourceSha256) { input ->
+                    AndroidStreamingConversationPayloadClassifier.classify(input, contentType)
+                } ?: error("RAW source is not available")
             } else {
                 val bytes = AndroidRawSourceAccess.readAllBytes(
                     appContext,
@@ -85,6 +115,16 @@ class AndroidLiveDerivationPipeline(context: Context) {
             .put("errorType", errorType ?: JSONObject.NULL)
         AndroidDerivativeStore(appContext).use { store ->
             store.putClassificationJson(sourceSha256, envelope.toString(2))
+        }
+    }
+
+    private fun hasLegacyClassificationSizeLimit(payload: String): Boolean {
+        val classification = runCatching {
+            JSONObject(payload).getJSONObject("classification")
+        }.getOrNull() ?: return false
+        val signals = classification.optJSONArray("signals") ?: return false
+        return (0 until signals.length()).any { index ->
+            signals.optString(index) == LEGACY_CLASSIFICATION_SIZE_LIMIT_SIGNAL
         }
     }
 
@@ -112,7 +152,10 @@ class AndroidLiveDerivationPipeline(context: Context) {
                 "classification_candidate_high"
             outcome.kind == CANDIDATE_KIND ->
                 "classification_candidate_medium"
-            "classification_size_limit" in outcome.signals ->
+            // Historical classification derivatives may still contain this
+            // signal in read-only saved generations. Oversized RAW is migrated
+            // into a fresh streaming classification in writable Latest.
+            LEGACY_CLASSIFICATION_SIZE_LIMIT_SIGNAL in outcome.signals ->
                 "classification_other_size_limit"
             "classifier_error" in outcome.signals ->
                 "classification_other_error"
@@ -177,6 +220,9 @@ class AndroidLiveDerivationPipeline(context: Context) {
 
         private const val TAG = "BkeDnaDerivation"
         private const val CANDIDATE_KIND = "conversation_payload_candidate"
+        private const val LEGACY_CLASSIFICATION_SIZE_LIMIT_SIGNAL = "classification_size_limit"
+        private const val SOURCE_PREFIX_LENGTH = 8
+        // Legacy materialization threshold only. Oversized RAW is streamed.
         private const val MAX_CLASSIFICATION_BYTES = 16L * 1024 * 1024
     }
 }

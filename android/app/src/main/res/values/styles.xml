@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="BkeWorkingDataTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#111417</item>
+        <item name="android:colorAccent">#79D8C4</item>
+        <item name="android:navigationBarColor">#0B0D0F</item>
+        <item name="android:statusBarColor">#0B0D0F</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:textColorPrimary">#F2F5F7</item>
+        <item name="android:textColorSecondary">#AEB7C0</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:buttonStyle">@style/BkeWorkingDataButton</item>
+        <item name="android:editTextStyle">@style/BkeWorkingDataInput</item>
+    </style>
+
+    <style name="BkeWorkingDataButton" parent="@android:style/Widget.Material.Button">
+        <item name="android:background">@drawable/bke_working_data_button</item>
+        <item name="android:textColor">#F2F5F7</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:gravity">center</item>
+    </style>
+
+    <style name="BkeWorkingDataInput" parent="@android:style/Widget.Material.EditText">
+        <item name="android:background">@drawable/bke_working_data_input</item>
+        <item name="android:textColor">#F2F5F7</item>
+        <item name="android:textColorHint">#87939D</item>
+        <item name="android:paddingLeft">14dp</item>
+        <item name="android:paddingRight">14dp</item>
+        <item name="android:paddingTop">10dp</item>
+        <item name="android:paddingBottom">10dp</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:singleLine">true</item>
+    </style>
+</resources>

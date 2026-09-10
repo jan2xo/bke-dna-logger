@@ -56,8 +56,9 @@ assert runtime.index('AndroidNormalizationRecovery.rearmOnce(appContext)') < run
     'AndroidDerivationScheduler.start(appContext)'
 )
 
-# The owner-facing size display distinguishes logical exact evidence from the
-# compressed physical representation instead of making compression look like loss.
+# The owner-facing size display still distinguishes logical exact evidence from
+# compressed physical representation, but the redesigned UI presents those
+# values as compact card metadata instead of a debug-style multiline dump.
 for token in (
     'SUM(byte_length)',
     'SUM(compressed_bytes)',
@@ -67,11 +68,12 @@ for token in (
 ):
     assert token in telemetry, token
 for token in (
-    'Physical local Working Data:',
-    'Inspected exact RAW represented:',
-    'Inspected compressed RAW payload:',
-    'Inspected verified RAW sources:',
-    'exact bytes are length + SHA-256 verified during ingest',
+    'formatBytes(totalWorkingBytes)',
+    'formatBytes(inspected.snapshotBytes)',
+    'formatBytes(telemetry.exactRawBytes)',
+    'formatBytes(telemetry.compressedRawPayloadBytes)',
+    'telemetry.verifiedSourceCount',
+    'storage warning at 1 GiB',
 ):
     assert token in ui, token
 

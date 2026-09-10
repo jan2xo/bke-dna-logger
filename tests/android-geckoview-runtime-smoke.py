@@ -8,6 +8,7 @@ main = (kotlin / "MainActivity.kt").read_text(encoding="utf-8")
 provider = (kotlin / "GeckoRuntimeProvider.kt").read_text(encoding="utf-8")
 host = (kotlin / "GeckoViewHost.kt").read_text(encoding="utf-8")
 user_files = (kotlin / "AndroidUserSelectedFileProvider.kt").read_text(encoding="utf-8")
+stager = (kotlin / "AndroidDocumentUploadStager.kt").read_text(encoding="utf-8")
 runtime = (kotlin / "AndroidCaptureRuntime.kt").read_text(encoding="utf-8")
 interceptor = (repo / "extension" / "main-interceptor.js").read_text(encoding="utf-8")
 bridge = (repo / "android" / "app" / "src" / "main" / "assets" / "dna-extension" / "bridge.js").read_text(encoding="utf-8")
@@ -18,6 +19,7 @@ for token in (
     "geckoHost.start()",
     "startActivity(Intent(this@MainActivity, AndroidExportsBackupsActivity::class.java))",
     "geckoHost.onActivityResult(requestCode, resultCode, data)",
+    "geckoHost.onRequestPermissionsResult(requestCode, permissions, grantResults)",
     "geckoHost.stop()",
 ):
     assert token in main, token
@@ -55,37 +57,61 @@ for token in (
     assert token in host, token
 assert "AndroidWireIngress(activity.applicationContext)" not in host
 
-# PR7 uses Gecko's own FilePrompt contract for normal web uploads. Gallery/files
-# are passed through as content URIs, while optional camera output goes through a
-# temporary non-exported cache provider. File-prompt plumbing is deliberately
-# separate from DNA network-response capture.
+# Generic Files must not let provider-specific MIME aliases hide developer files
+# such as Markdown. Media-only prompts retain media filtering so the already-good
+# Photos path remains unchanged. Non-media selections are copied into a short-lived
+# app-cache file and returned to Gecko as file:// URIs so Gecko can resolve an
+# actual filesystem path for the page's file input.
 for token in (
     "session.setPromptDelegate(promptDelegate)",
     "override fun onFilePrompt(",
     "GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE",
     "GeckoSession.PromptDelegate.FilePrompt.Type.FOLDER",
-    "GeckoSession.PromptDelegate.FilePrompt.Capture.NONE",
-    "Intent.ACTION_OPEN_DOCUMENT",
+    "Intent.ACTION_GET_CONTENT",
     "Intent.ACTION_OPEN_DOCUMENT_TREE",
     "Intent.EXTRA_ALLOW_MULTIPLE",
-    "Intent.EXTRA_MIME_TYPES",
-    "Intent.EXTRA_INITIAL_INTENTS",
-    "MediaStore.ACTION_IMAGE_CAPTURE",
-    "MediaStore.ACTION_VIDEO_CAPTURE",
-    "MediaStore.EXTRA_OUTPUT",
-    "AndroidUserSelectedFileProvider.createCameraUri(appContext, mimeType)",
-    "pending.prompt.confirm(appContext, finalUris.toTypedArray())",
-    "pending.prompt.confirm(appContext, finalUris.first())",
+    "browserPickerMimeType(mimeTypes)",
+    'mimeTypes.all { it.startsWith("image/") } -> "image/*"',
+    'else -> "*/*"',
+    "prepareGeckoFileUris(finalUris, cameraUri)",
+    "AndroidDocumentUploadStager.shouldStage(appContext, uri)",
+    "AndroidDocumentUploadStager.stage(appContext, uri)",
+    "file_prompt_document_staged",
+    "pending.prompt.confirm(appContext, geckoUris.toTypedArray())",
+    "pending.prompt.confirm(appContext, geckoUris.first())",
     "pending.prompt.dismiss()",
     "collectSelectedUris(data)",
-    "activity.revokeUriPermission(",
 ):
     assert token in host, token
+assert "Intent.EXTRA_MIME_TYPES" not in host
+assert "Intent.EXTRA_LOCAL_ONLY" not in host
 file_prompt_block = host[host.index("private val promptDelegate"):host.index("private fun handleDiagnostic")]
 assert "AndroidCaptureRuntime" not in file_prompt_block
-assert "openInputStream" not in host
-assert "copyTo(" not in host
 
+for token in (
+    "object AndroidDocumentUploadStager",
+    "fun shouldStage(context: Context, uri: Uri): Boolean",
+    "fun stage(context: Context, source: Uri): Uri?",
+    "resolver.openInputStream(source)",
+    "input.copyTo(output)",
+    "OpenableColumns.DISPLAY_NAME",
+    'File(context.cacheDir, "gecko-upload")',
+    "UUID.randomUUID().toString()",
+    "Uri.fromFile(target)",
+    "MAX_CACHE_AGE_MS = 24L * 60L * 60L * 1000L",
+):
+    assert token in stager, token
+assert "AndroidUserSelectedFileProvider.createStagedUploadFile(" not in stager
+assert "AndroidUserSelectedFileProvider.stagedUploadUri(" not in stager
+for forbidden in (
+    "AndroidCaptureRuntime",
+    "AndroidRawEvidenceStore",
+    "AndroidCaptureStore",
+):
+    assert forbidden not in stager, forbidden
+
+# The provider remains available for legacy camera plumbing, but generic document
+# staging must no longer depend on a custom content:// URI.
 for token in (
     "class AndroidUserSelectedFileProvider : ContentProvider()",
     'File(context.cacheDir, "user-selected")',
@@ -101,6 +127,7 @@ for token in (
 assert "AndroidCaptureRuntime" not in user_files
 assert "AndroidRawEvidenceStore" not in user_files
 assert "AndroidCaptureStore" not in user_files
+
 for token in (
     'android:name=".AndroidUserSelectedFileProvider"',
     'android:authorities="${applicationId}.user-selected-files"',
@@ -109,12 +136,16 @@ for token in (
 ):
     assert token in manifest, token
 for forbidden in (
-    'android.permission.CAMERA',
     'android.permission.READ_MEDIA_IMAGES',
     'android.permission.READ_MEDIA_VIDEO',
     'android.permission.READ_EXTERNAL_STORAGE',
 ):
     assert forbidden not in manifest, forbidden
+
+# Camera/media support remains parked: existing code may stay, but generic Files
+# must not depend on camera permission or camera chooser intents.
+normal_picker_tail = host[host.index("val contentIntent = Intent(Intent.ACTION_GET_CONTENT)"):host.index("private fun buildCameraLaunch")]
+assert "Intent.EXTRA_INITIAL_INTENTS" not in normal_picker_tail
 
 for token in (
     "pauseForStorageMutation",
@@ -210,4 +241,4 @@ assert 'type: "diagnostic"' in bridge
 assert host.index("ensureBuiltIn(EXTENSION_URI, EXTENSION_ID)") < host.index("session.loadUri(CHATGPT_URL)")
 assert 'android:windowSoftInputMode="stateUnspecified|adjustResize"' in manifest
 
-print("android GeckoView streamed runtime + user photo/camera/file prompt smoke PASS")
+print("android GeckoView streamed runtime + generic Markdown file-URI upload smoke PASS")

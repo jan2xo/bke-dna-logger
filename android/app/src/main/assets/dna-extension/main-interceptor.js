@@ -15,35 +15,16 @@
     "capture_posted",
     "interceptor_load_error",
     "page_runtime_error",
-    "page_unhandled_rejection",
-    "page_window_open",
-    "page_history_push_state",
-    "page_history_replace_state",
-    "page_navigation_api",
-    "page_popstate",
-    "page_hashchange"
-  ]);
-  const REPEATABLE_DIAGNOSTIC_EVENTS = new Set([
-    "page_window_open",
-    "page_history_push_state",
-    "page_history_replace_state",
-    "page_navigation_api",
-    "page_popstate",
-    "page_hashchange"
+    "page_unhandled_rejection"
   ]);
   const emittedDiagnostics = new Set();
 
   function emitDiagnostic(event) {
-    if (!DIAGNOSTIC_EVENTS.has(event)) {
-      return;
-    }
-    if (!REPEATABLE_DIAGNOSTIC_EVENTS.has(event) && emittedDiagnostics.has(event)) {
+    if (!DIAGNOSTIC_EVENTS.has(event) || emittedDiagnostics.has(event)) {
       return;
     }
 
-    if (!REPEATABLE_DIAGNOSTIC_EVENTS.has(event)) {
-      emittedDiagnostics.add(event);
-    }
+    emittedDiagnostics.add(event);
     window.postMessage({
       source: SOURCE,
       kind: "diagnostic",
@@ -91,30 +72,6 @@
   try {
     window.addEventListener("error", () => emitDiagnostic("page_runtime_error"), true);
     window.addEventListener("unhandledrejection", () => emitDiagnostic("page_unhandled_rejection"));
-
-    const originalWindowOpen = window.open;
-    window.open = function bkeDnaWindowOpen(...args) {
-      emitDiagnostic("page_window_open");
-      return Reflect.apply(originalWindowOpen, this, args);
-    };
-
-    const originalPushState = history.pushState;
-    history.pushState = function bkeDnaPushState(...args) {
-      emitDiagnostic("page_history_push_state");
-      return Reflect.apply(originalPushState, this, args);
-    };
-
-    const originalReplaceState = history.replaceState;
-    history.replaceState = function bkeDnaReplaceState(...args) {
-      emitDiagnostic("page_history_replace_state");
-      return Reflect.apply(originalReplaceState, this, args);
-    };
-
-    if (window.navigation && typeof window.navigation.addEventListener === "function") {
-      window.navigation.addEventListener("navigate", () => emitDiagnostic("page_navigation_api"));
-    }
-    window.addEventListener("popstate", () => emitDiagnostic("page_popstate"));
-    window.addEventListener("hashchange", () => emitDiagnostic("page_hashchange"));
 
     const originalFetch = window.fetch.bind(window);
 

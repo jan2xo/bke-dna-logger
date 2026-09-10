@@ -84,7 +84,7 @@ for token in [
     'object AndroidRawSourceAccess', 'AndroidRawEvidenceStore(generation)',
     'File(captureRoot, "bodies/$sourceSha256.body")',
     'AndroidRawBackend.SQLITE', 'AndroidRawBackend.LEGACY_BODY',
-    'fun readPage(', 'fun writeExactSource(',
+    'fun readPage(', 'fun writeExactSource(', 'fun <T> withExactInputStream(',
 ]:
     assert token in raw_access, token
 for token in [
@@ -121,40 +121,65 @@ for token in ['withStorageMutationPause', 'pauseForStorageMutation', 'resumeAfte
 for token in ['storageMutation = true', 'AndroidCaptureRuntime.withStorageMutationPause(this)']:
     assert token in ui, token
 
-# Shared title catalog derives actual captured root titles through federated
-# normalized derivatives + Working Data RAW generations; never JAN text / UUID fallback.
+# Shared title catalog derives only actual captured title evidence. Catalog v3
+# adds bounded conversation-list metadata recovery so ordinary cards can hydrate
+# titles without scanning giant conversation RAW, while the full explicit search
+# path still supports normalized/root RAW title evidence and historical recovery.
 for token in [
     'class AndroidConversationTitleCatalog', 'conversation-title-catalog.json',
-    'root.has("title")', 'candidate_root_title', 'candidate_title_string',
-    'matchingConversationIds', 'indexedSources',
+    'candidate_root_title', 'candidate_title_string', 'candidate_bound_title',
+    'conversations_list_title_found', 'conversations_list_title_conflict',
+    'matchingConversationIds', 'indexedSources', 'indexedMetadataSources',
+    'FORMAT_VERSION = 3',
+    'MAX_LEGACY_BODY_BYTES = 16L * 1024 * 1024',
+    'MAX_CONVERSATION_LIST_BYTES = 8L * 1024 * 1024',
+    'fun refreshFromConversationListEvidence()',
+    'queryConversationListCaptures(', 'isConversationListRequest(requestUrl)',
+    'collectConversationListTitles(root, candidates, depth = 0)',
+    'CONVERSATION_ID_KEYS = setOf("id", "conversation_id", "conversationId")',
     'AndroidWorkingDataManager(appContext).listWorkingData()',
     'AndroidDerivativeSourceAccess.listNormalizedSourceSha256s(generation, captureRoot)',
     'AndroidDerivativeSourceAccess.readNormalized(generation, captureRoot, sourceSha256)',
+    'AndroidRawSourceAccess.withExactInputStream(appContext, sourceSha256)',
+    'readCapturedRootTitle(reader, conversationNativeId)',
     'AndroidRawSourceAccess.readAllBytes(',
 ]:
     assert token in titles, token
+assert 'source.exceptionOrNull() is IllegalArgumentException' not in titles
 for forbidden in ['setOf("user")', 'textParts', 'first user', 'first JAN', 'bodiesDirectory', 'normalizedDirectory']:
     assert forbidden not in titles, forbidden
 
 # Unified library remains metadata-only, federated and deduplicated by native identity.
+# Blank loads may hydrate bounded conversation-list titles; explicit title search
+# performs the full evidence refresh.
 for token in [
     'class AndroidUnifiedConversationLibrary', 'workingData.listWorkingData()',
     'AndroidConversationTitleCatalog', 'SQLiteDatabase.OPEN_READONLY', 'logical_conversation',
     '.groupBy { it.conversationNativeId }', 'generationCount', 'hasLatest',
     'DEFAULT_PAGE_SIZE = 40', 'MAX_PAGE_SIZE = 10_000',
     'UNTITLED_TITLE = "Untitled conversation"', 'fun resolve(conversationNativeId: String)',
+    'titleCatalog.refreshFromConversationListEvidence()',
+    'titleCatalog.refreshFromEvidence()',
 ]:
     assert token in unified, token
 for forbidden in ['AndroidHumanExportService', '.readText(']:
     assert forbidden not in unified, forbidden
 
-# PR6 compact queue/profile UI remains intact while PR8 changes lifecycle actions.
+# Working Data UI retains the same owner controls, but all storage/library/queue
+# reads and export preparation run on a dedicated IO executor. The visible
+# conversation section live-refreshes independently so newly reconciled rows and
+# titles appear without leaving/re-entering the Activity or rebuilding the full UI.
 for token in [
     'Working Data & Conversations', 'Processing', 'All Conversations', 'Search conversation titles',
-    'SEARCH', 'CLEAR', 'LOAD MORE', 'library.search(searchQuery, libraryLimit)',
-    'Handler(Looper.getMainLooper())', 'QUEUE_REFRESH_MS = 1_500L',
-    'AndroidDerivationScheduler.start(this)', 'AndroidDerivationScheduler.snapshot(this)',
-    'AndroidDerivationScheduler.getProfile(this)', 'AndroidDerivationScheduler.setProfile(this, profile)',
+    'SEARCH', 'CLEAR', 'LOAD MORE',
+    'Executors.newSingleThreadExecutor', '"bke-dna-working-data-io"', 'ioExecutor.execute {',
+    'private fun loadUiSnapshot(', 'private fun renderUi(snapshot: UiSnapshot)',
+    'AndroidUnifiedConversationLibrary(appContext).search(requestedSearchQuery, requestedLibraryLimit)',
+    'Handler(Looper.getMainLooper())', 'QUEUE_REFRESH_MS = 1_500L', 'LIBRARY_REFRESH_MS = 3_000L',
+    'private val libraryMonitorTick', 'refreshConversationLibrary()',
+    'private fun renderConversationList(', 'conversationListContainer', 'renderedConversations',
+    'AndroidDerivationScheduler.start(this)', 'AndroidDerivationScheduler.snapshot(appContext)',
+    'AndroidDerivationScheduler.getProfile(appContext)', 'AndroidDerivationScheduler.setProfile(this, profile)',
     'AndroidProcessingProfile.entries', 'profileLabel(profile)',
     'compactButton("CLEAN")', 'compactButton("RAW")', 'compactButton("MORE")',
     'PopupMenu(this, anchor)', 'setOnClickListener { openConversation(summary) }',
@@ -166,6 +191,59 @@ for token in ['SLOW(500L)', 'BALANCED(150L)', 'FAST(25L)', 'fun snapshot(context
     assert token in queue, token
 for forbidden in ['actionButton("Read conversation")', 'actionButton("Export CLEAN.md")', 'actionButton("Export RAW.md")']:
     assert forbidden not in ui, forbidden
+
+resume_start = ui.index('override fun onResume()')
+resume_end = ui.index('override fun onPause()', resume_start)
+resume = ui[resume_start:resume_end]
+for token in [
+    'queueMonitorHandler.removeCallbacks(libraryMonitorTick)',
+    'queueMonitorHandler.post(libraryMonitorTick)',
+]:
+    assert token in resume, token
+pause_start = ui.index('override fun onPause()')
+pause_end = ui.index('override fun onDestroy()', pause_start)
+pause = ui[pause_start:pause_end]
+assert 'queueMonitorHandler.removeCallbacks(libraryMonitorTick)' in pause
+
+load_start = ui.index('private fun loadUiSnapshot(')
+load_end = ui.index('private fun renderLoadFailure(', load_start)
+load_section = ui[load_start:load_end]
+for token in [
+    'manager.listWorkingData()', 'AndroidWorkingStorage.workingBytes(appContext)',
+    'manager.savedWorkingDataBytes()', 'AndroidWorkingDataTelemetry.inspect(inspected)',
+    'AndroidUnifiedConversationLibrary(appContext).search(',
+]:
+    assert token in load_section, token
+
+live_start = ui.index('private fun refreshConversationLibrary()')
+live_end = ui.index('private fun renderConversationList(', live_start)
+live_refresh = ui[live_start:live_end]
+for token in [
+    'if (operationInProgress || libraryRefreshInFlight || ioExecutor.isShutdown) return',
+    'ioExecutor.execute {',
+    'AndroidUnifiedConversationLibrary(appContext).search(',
+    'conversationListContainer !== targetContainer',
+    'searchQuery != requestedSearchQuery || libraryLimit != requestedLibraryLimit',
+    'conversations == renderedConversations',
+    'targetCount.text = conversationSummaryText(conversations.size)',
+    'renderConversationList(',
+]:
+    assert token in live_refresh, token
+assert live_refresh.index('ioExecutor.execute {') < live_refresh.index('AndroidUnifiedConversationLibrary(appContext).search(')
+assert 'setContentView(' not in live_refresh
+
+render_start = ui.index('private fun renderUi(snapshot: UiSnapshot)')
+render_end = ui.index('private fun prepareWorkingDataBackup', render_start)
+render_section = ui[render_start:render_end]
+for forbidden in [
+    'manager.listWorkingData()', 'AndroidWorkingStorage.workingBytes(',
+    'savedWorkingDataBytes()', 'AndroidWorkingDataTelemetry.inspect(',
+    'AndroidUnifiedConversationLibrary(this).search(',
+]:
+    assert forbidden not in render_section, forbidden
+assert ui.index('ioExecutor.execute {', ui.index('private fun refreshQueueStatus()')) < ui.index('AndroidDerivationScheduler.snapshot(appContext)')
+assert ui.index('ioExecutor.execute {', ui.index('private fun prepareHumanExport')) < ui.index('AndroidUnifiedConversationLibrary(applicationContext)')
+
 conversation_loop = ui[ui.index('conversations.forEach'):ui.index('private fun prepareWorkingDataBackup')]
 assert 'human.describe' not in conversation_loop
 assert 'conversationWorkingBytes' not in conversation_loop
@@ -277,4 +355,4 @@ identity = '\n'.join(f'{p}\t{s}\t{n}\t{src}' for p, s, n, src in sorted(evidence
 archive_id = 'dna-conversation-v2-' + hashlib.sha256(identity.encode()).hexdigest()
 assert len(archive_id) == len('dna-conversation-v2-') + 64
 
-print('android SQLite Working Data backup + generation deletion guardrails smoke PASS')
+print('android SQLite Working Data backup + background UI + title recovery + visible live refresh smoke PASS')

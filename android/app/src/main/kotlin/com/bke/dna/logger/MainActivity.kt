@@ -84,6 +84,17 @@ class MainActivity : Activity() {
 
         geckoHost = GeckoViewHost(this, geckoView)
         geckoHost.start()
+        AndroidDerivationScheduler.noteBrowserActivity()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) AndroidDerivationScheduler.noteBrowserActivity()
+    }
+
+    override fun onUserInteraction() {
+        AndroidDerivationScheduler.noteBrowserActivity()
+        super.onUserInteraction()
     }
 
     @Deprecated("Activity result API retained for GeckoView file-prompt compatibility")
@@ -91,6 +102,17 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (::geckoHost.isInitialized) {
             geckoHost.onActivityResult(requestCode, resultCode, data)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (::geckoHost.isInitialized) {
+            geckoHost.onRequestPermissionsResult(requestCode, permissions, grantResults)
         }
     }
 
