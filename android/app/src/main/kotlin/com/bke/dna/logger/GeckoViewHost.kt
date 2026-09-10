@@ -1,5 +1,6 @@
 package com.bke.dna.logger
 
+import android.Manifest
 import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
@@ -8,10 +9,13 @@ import android.net.Uri
 import android.provider.MediaStore
 import android.util.Log
 import org.json.JSONObject
+import org.mozilla.geckoview.AllowOrDeny
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoView
 import org.mozilla.geckoview.WebExtension
+import org.mozilla.geckoview.WebRequestError
+import org.mozilla.geckoview.WebResponse
 import java.net.URI
 import java.nio.charset.StandardCharsets
 
@@ -22,6 +26,7 @@ class GeckoViewHost(
 ) {
     companion object {
         private const val TAG = "BkeDnaGeckoView"
+        private const val BROWSER_TAG = "BkeDnaBrowser"
         private const val CHATGPT_URL = "https://chatgpt.com/"
         private const val EXTENSION_URI = "resource://android/assets/dna-extension/"
         private const val EXTENSION_ID = "bke-dna-logger@jl-bke.com"
@@ -54,6 +59,8 @@ class GeckoViewHost(
             "capture_end_sent",
             "capture_forward_failed",
             "interceptor_load_error",
+            "page_runtime_error",
+            "page_unhandled_rejection",
         )
         private val DIAGNOSTIC_KEYS = setOf("type", "event")
 
@@ -84,6 +91,10 @@ class GeckoViewHost(
     private val session = GeckoSession()
     private var started = false
     private var pendingFilePrompt: PendingFilePrompt? = null
+
+    private fun browserDiagnostic(event: String) {
+        Log.d(BROWSER_TAG, "BKE Browser: $event")
+    }
 
     private val messageDelegate = object : WebExtension.MessageDelegate {
         override fun onMessage(
@@ -127,16 +138,121 @@ class GeckoViewHost(
         }
     }
 
+    private val contentDelegate = object : GeckoSession.ContentDelegate {
+        override fun onFocusRequest(session: GeckoSession) {
+            browserDiagnostic("content_focus_request")
+        }
+
+        override fun onFullScreen(session: GeckoSession, fullScreen: Boolean) {
+            browserDiagnostic(if (fullScreen) "content_fullscreen_enter" else "content_fullscreen_exit")
+        }
+
+        override fun onCloseRequest(session: GeckoSession) {
+            browserDiagnostic("content_close_request")
+        }
+
+        override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
+            browserDiagnostic("external_response")
+        }
+
+        override fun onCrash(session: GeckoSession) {
+            browserDiagnostic("content_crash")
+        }
+
+        override fun onKill(session: GeckoSession) {
+            browserDiagnostic("content_kill")
+        }
+    }
+
+    private val navigationDelegate = object : GeckoSession.NavigationDelegate {
+        override fun onLoadRequest(
+            session: GeckoSession,
+            request: GeckoSession.NavigationDelegate.LoadRequest,
+        ): GeckoResult<AllowOrDeny>? {
+            browserDiagnostic(
+                if (request.target == GeckoSession.NavigationDelegate.TARGET_WINDOW_NEW) {
+                    "navigation_request_new_window"
+                } else {
+                    "navigation_request"
+                },
+            )
+            return super.onLoadRequest(session, request)
+        }
+
+        override fun onLocationChange(
+            session: GeckoSession,
+            url: String?,
+            perms: List<GeckoSession.PermissionDelegate.ContentPermission>,
+            hasUserGesture: Boolean,
+        ) {
+            browserDiagnostic("navigation_location_change")
+        }
+
+        override fun onNewSession(session: GeckoSession, uri: String): GeckoResult<GeckoSession>? {
+            browserDiagnostic("new_window_request")
+            return super.onNewSession(session, uri)
+        }
+
+        override fun onLoadError(
+            session: GeckoSession,
+            uri: String?,
+            error: WebRequestError,
+        ): GeckoResult<String>? {
+            browserDiagnostic("navigation_load_error")
+            return super.onLoadError(session, uri, error)
+        }
+    }
+
+    private val permissionDelegate = object : GeckoSession.PermissionDelegate {
+        override fun onAndroidPermissionsRequest(
+            session: GeckoSession,
+            permissions: Array<out String>?,
+            callback: GeckoSession.PermissionDelegate.Callback,
+        ) {
+            browserDiagnostic("permission_android_requested")
+            if (permissions?.contains(Manifest.permission.CAMERA) == true) {
+                browserDiagnostic("permission_android_camera")
+            }
+            if (permissions?.contains(Manifest.permission.RECORD_AUDIO) == true) {
+                browserDiagnostic("permission_android_microphone")
+            }
+            super.onAndroidPermissionsRequest(session, permissions, callback)
+        }
+
+        override fun onContentPermissionRequest(
+            session: GeckoSession,
+            perm: GeckoSession.PermissionDelegate.ContentPermission,
+        ): GeckoResult<Int>? {
+            browserDiagnostic("permission_content_requested")
+            return super.onContentPermissionRequest(session, perm)
+        }
+
+        override fun onMediaPermissionRequest(
+            session: GeckoSession,
+            uri: String,
+            video: Array<out GeckoSession.PermissionDelegate.MediaSource>?,
+            audio: Array<out GeckoSession.PermissionDelegate.MediaSource>?,
+            callback: GeckoSession.PermissionDelegate.MediaCallback,
+        ) {
+            browserDiagnostic("permission_media_requested")
+            if (!video.isNullOrEmpty()) browserDiagnostic("permission_media_camera")
+            if (!audio.isNullOrEmpty()) browserDiagnostic("permission_media_microphone")
+            super.onMediaPermissionRequest(session, uri, video, audio, callback)
+        }
+    }
+
     private val promptDelegate = object : GeckoSession.PromptDelegate {
         override fun onFilePrompt(
             session: GeckoSession,
             prompt: GeckoSession.PromptDelegate.FilePrompt,
         ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+            browserDiagnostic("file_prompt_requested")
             dismissPendingFilePrompt()
             AndroidUserSelectedFileProvider.cleanupStaleFiles(appContext)
 
             val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
             val launch = runCatching { buildFilePromptLaunch(prompt) }.getOrElse { error ->
+                browserDiagnostic("file_prompt_prepare_failed")
                 Log.e(TAG, "Unable to prepare Gecko file prompt", error)
                 result.complete(prompt.dismiss())
                 return result
@@ -145,8 +261,10 @@ class GeckoViewHost(
 
             return try {
                 activity.startActivityForResult(launch.intent, FILE_PROMPT_REQUEST)
+                browserDiagnostic("file_prompt_picker_launched")
                 result
             } catch (error: Exception) {
+                browserDiagnostic("file_prompt_picker_launch_failed")
                 Log.e(TAG, "Unable to launch Gecko file prompt", error)
                 cleanupCameraGrant(launch.cameraUri, deleteFile = true)
                 pendingFilePrompt = null
@@ -172,7 +290,11 @@ class GeckoViewHost(
             return
         }
 
-        Log.d(TAG, "DNA diagnostic: $event")
+        if (event == "page_runtime_error" || event == "page_unhandled_rejection") {
+            browserDiagnostic(event)
+        } else {
+            Log.d(TAG, "DNA diagnostic: $event")
+        }
     }
 
     fun start() {
@@ -180,7 +302,9 @@ class GeckoViewHost(
         started = true
         AndroidCaptureRuntime.start(appContext)
 
-        session.setContentDelegate(object : GeckoSession.ContentDelegate {})
+        session.setContentDelegate(contentDelegate)
+        session.setNavigationDelegate(navigationDelegate)
+        session.setPermissionDelegate(permissionDelegate)
         session.setPromptDelegate(promptDelegate)
         session.open(runtime)
         view.setSession(session)
@@ -209,7 +333,12 @@ class GeckoViewHost(
 
     fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
         if (requestCode != FILE_PROMPT_REQUEST) return false
-        val pending = pendingFilePrompt ?: return true
+        browserDiagnostic("file_prompt_result_received")
+        val pending = pendingFilePrompt
+        if (pending == null) {
+            browserDiagnostic("file_prompt_result_without_pending")
+            return true
+        }
         pendingFilePrompt = null
 
         val selected = if (resultCode == Activity.RESULT_OK) collectSelectedUris(data) else emptyList()
@@ -227,16 +356,26 @@ class GeckoViewHost(
 
         val response = runCatching {
             when {
-                finalUris.isEmpty() -> pending.prompt.dismiss()
-                pending.prompt.type == GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE ->
+                finalUris.isEmpty() -> {
+                    browserDiagnostic("file_prompt_dismissed")
+                    pending.prompt.dismiss()
+                }
+                pending.prompt.type == GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE -> {
+                    browserDiagnostic("file_prompt_selection_received")
                     pending.prompt.confirm(appContext, finalUris.toTypedArray())
-                else -> pending.prompt.confirm(appContext, finalUris.first())
+                }
+                else -> {
+                    browserDiagnostic("file_prompt_selection_received")
+                    pending.prompt.confirm(appContext, finalUris.first())
+                }
             }
         }.getOrElse { error ->
+            browserDiagnostic("file_prompt_resolve_failed")
             Log.e(TAG, "Unable to resolve Gecko file prompt", error)
             if (!pending.prompt.isComplete) pending.prompt.dismiss() else throw error
         }
         pending.result.complete(response)
+        browserDiagnostic("file_prompt_resolved")
         return true
     }
 

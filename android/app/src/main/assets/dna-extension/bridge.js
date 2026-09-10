@@ -25,7 +25,9 @@
     "chunk_send_complete",
     "capture_end_sent",
     "capture_forward_failed",
-    "interceptor_load_error"
+    "interceptor_load_error",
+    "page_runtime_error",
+    "page_unhandled_rejection"
   ]);
   const forwardedDiagnostics = new Set();
   let forwarding = Promise.resolve();
