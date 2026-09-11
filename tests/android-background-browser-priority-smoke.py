@@ -14,39 +14,69 @@ unified = (base / "AndroidUnifiedConversationLibrary.kt").read_text(encoding="ut
 titles = (base / "AndroidConversationTitleCatalog.kt").read_text(encoding="utf-8")
 manifest = (root / "android/app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
 
-# DNA derivation is explicitly background-priority and waits for a meaningful
-# quiet window after browser/capture activity before taking heavy work.
+# DNA derivation is explicitly background-priority. Active capture is the only
+# hard pause; foreground browsing merely increases the cooperative profile rest.
+# Continuous interaction must never reset an unbounded browser-quiet deadline.
 for token in (
     'import android.os.Process',
-    'import android.os.SystemClock',
     'Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)',
-    'BROWSER_QUIET_MS = 3_000L',
-    'BROWSER_QUIET_POLL_MS = 100L',
-    'lastBrowserActivityAt = AtomicLong(SystemClock.elapsedRealtime())',
+    'CAPTURE_ACTIVE_POLL_MS = 100L',
+    'browserForeground = AtomicBoolean(false)',
+    'fun setBrowserForeground(isForeground: Boolean)',
     'fun noteBrowserActivity()',
     'fun yieldForBrowserActivity()',
-    'private fun waitForBrowserQuiet()',
+    'private fun waitForCaptureIdle()',
+    'profile.browserRestMillis',
+    'SLOW(500L, 1_500L)',
+    'BALANCED(150L, 750L)',
+    'FAST(25L, 300L)',
 ):
     assert token in scheduler, token
+for forbidden in (
+    'BROWSER_QUIET_MS',
+    'BROWSER_QUIET_POLL_MS',
+    'waitForBrowserQuiet()',
+    'lastBrowserActivityAt',
+):
+    assert forbidden not in scheduler, forbidden
 
 capture_started = scheduler[scheduler.index('fun captureStarted()'):scheduler.index('fun captureFinished()')]
 capture_finished = scheduler[scheduler.index('fun captureFinished()'):scheduler.index('fun getProfile(')]
-assert 'noteBrowserActivity()' in capture_started
-assert 'noteBrowserActivity()' in capture_finished
+assert 'activeCaptures.incrementAndGet()' in capture_started
+assert 'activeCaptures.updateAndGet' in capture_finished
+assert 'noteBrowserActivity()' not in capture_started
+assert 'noteBrowserActivity()' not in capture_finished
+
+yield_gate = scheduler[scheduler.index('fun yieldForBrowserActivity()'):scheduler.index('fun getProfile(')]
+assert 'waitForCaptureIdle()' in yield_gate
+assert 'Thread.yield()' in yield_gate
+assert 'Thread.sleep(' not in yield_gate
 
 breathe = scheduler[scheduler.index('private fun breathe('):scheduler.index('const val STAGE_RAW_INGEST')]
-assert breathe.count('waitForBrowserQuiet()') >= 2
-assert breathe.index('Thread.sleep(restMillis)') < breathe.rindex('waitForBrowserQuiet()')
-
-# Normal browser interaction refreshes the quiet deadline without rebuilding or
-# destroying GeckoView. Focus regain covers return from the sibling management Activity.
 for token in (
+    'waitForCaptureIdle()',
+    'val profile = getProfile(context)',
+    'if (browserForeground.get())',
+    'profile.browserRestMillis',
+    'profile.restMillis',
+    'Thread.sleep(restMillis)',
+):
+    assert token in breathe, token
+assert 'waitForBrowserQuiet' not in breathe
+
+# MainActivity explicitly tells the scheduler when the ChatGPT browser is the
+# foreground surface. Opening Working Data or backgrounding the app removes the
+# browser throttle; ordinary interaction may refresh priority but cannot pause work.
+for token in (
+    'override fun onResume()',
+    'AndroidDerivationScheduler.setBrowserForeground(true)',
+    'override fun onPause()',
+    'AndroidDerivationScheduler.setBrowserForeground(false)',
     'override fun onUserInteraction()',
     'override fun onWindowFocusChanged(hasFocus: Boolean)',
     'AndroidDerivationScheduler.noteBrowserActivity()',
 ):
     assert token in main, token
-assert 'override fun onResume()' not in main
 assert 'geckoHost.stop()' in main
 
 # Unfinished queue work owns a single bounded foreground-service lifetime so
@@ -78,12 +108,14 @@ for token in (
 assert 'Executors.new' not in service
 
 # Wake lock is acquired only after a queue job is claimed, then released in finally.
-drain = scheduler[scheduler.index('private fun drain('):scheduler.index('private fun waitForBrowserQuiet()')]
+drain = scheduler[scheduler.index('private fun drain('):scheduler.index('private fun waitForCaptureIdle()')]
 claim_at = drain.index('claimNext()')
 wake_at = drain.index('AndroidDnaProcessingService.beginActiveWork(context)')
 finally_at = drain.index('finally {')
 release_at = drain.index('AndroidDnaProcessingService.endActiveWork()')
 assert claim_at < wake_at < finally_at < release_at
+assert 'waitForCaptureIdle()' in drain
+assert 'waitForBrowserQuiet' not in drain
 
 # Manifest explicitly declares the FGS/wake permissions and a non-exported special-use
 # service. This is local processing, not a fake network data-sync classification.
@@ -101,8 +133,8 @@ for token in (
     assert token in manifest, token
 assert 'foregroundServiceType="dataSync"' not in manifest
 
-# Large RAW streaming reads cooperate every bounded window so an already-running
-# parse/title probe can pause when the owner starts using the browser again.
+# Large RAW streaming reads cooperate every bounded window. The cooperative gate
+# now yields to the browser and blocks only when a capture is actually active.
 for token in (
     'BrowserYieldingInputStream',
     'YIELD_READ_BYTES = 256 * 1024',
@@ -189,4 +221,4 @@ resolve_end = unified.index('private fun mergeCopies(', resolve_start)
 resolve = unified[resolve_start:resolve_end]
 assert 'titleCatalog.refreshFromEvidence()' not in resolve
 
-print('android browser-first background processing + lightweight title hydration smoke PASS')
+print('android browser-first background processing + nonstarving throttle smoke PASS')
