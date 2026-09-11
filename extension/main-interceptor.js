@@ -221,7 +221,11 @@
     if (window.navigation && typeof window.navigation.addEventListener === "function") {
       window.navigation.addEventListener("navigate", () => emitDiagnostic("page_navigation_api"));
       window.navigation.addEventListener("navigatesuccess", () => {
+        emitDiagnostic("page_navigation_api");
         scheduleCurrentConversationHydration(true);
+      });
+      window.navigation.addEventListener("currententrychange", () => {
+        emitDiagnostic("page_navigation_api");
       });
     }
     window.addEventListener("popstate", () => {
