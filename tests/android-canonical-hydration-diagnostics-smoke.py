@@ -36,17 +36,25 @@ for token in (
     assert token in interceptor, token
 
 # Modern navigation may commit after history instrumentation has already checked
-# window.location. The committed Navigation API event therefore schedules the
-# same bounded canonical hydration series after the destination is active.
+# window.location. Keep the existing committed hydration trigger, and instrument
+# both Navigation API post-navigation boundaries with the already-whitelisted
+# repeatable page_navigation_api diagnostic. This changes observability only.
 for token in (
     'function scheduleCurrentConversationHydration(force = false)',
+    'window.navigation.addEventListener("navigate", () => emitDiagnostic("page_navigation_api"));',
     'window.navigation.addEventListener("navigatesuccess", () => {',
+    'window.navigation.addEventListener("currententrychange", () => {',
+    'emitDiagnostic("page_navigation_api");',
     'scheduleCurrentConversationHydration(true);',
 ):
     assert token in interceptor, token
 
-assert interceptor.index('window.navigation.addEventListener("navigate"') < interceptor.index('window.navigation.addEventListener("navigatesuccess"')
-assert interceptor.index('window.navigation.addEventListener("navigatesuccess"') < interceptor.index('scheduleCurrentConversationHydration(true);', interceptor.index('window.navigation.addEventListener("navigatesuccess"'))
+navigate_index = interceptor.index('window.navigation.addEventListener("navigate"')
+success_index = interceptor.index('window.navigation.addEventListener("navigatesuccess"')
+entry_index = interceptor.index('window.navigation.addEventListener("currententrychange"')
+assert navigate_index < success_index < entry_index
+assert interceptor.index('emitDiagnostic("page_navigation_api");', success_index) < interceptor.index('scheduleCurrentConversationHydration(true);', success_index)
+assert interceptor.index('emitDiagnostic("page_navigation_api");', entry_index) > entry_index
 
 # Existing history/popstate/submit coverage remains in place.
 for token in (
@@ -61,4 +69,4 @@ for token in (
 assert interceptor.index('emitHydrationStatus(response.status)') < interceptor.index('if (!response.ok) return;')
 assert interceptor.index('if (!response.ok) return;') < interceptor.index('emitDiagnostic("hydration_publish_started")')
 
-print("android canonical hydration diagnostics + committed-navigation trigger smoke PASS")
+print("android canonical hydration diagnostics + Navigation API boundary probe smoke PASS")
