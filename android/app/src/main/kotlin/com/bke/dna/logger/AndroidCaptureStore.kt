@@ -142,6 +142,11 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
                 byteLength = result.byteLength,
                 contentType = session.start.optNullableString("contentType"),
             )
+            AndroidDerivationQueuePriority.promote(
+                context = appContext,
+                sourceSha256 = result.sha256,
+                priority = priorityForCaptureRoute(route),
+            )
             "capture_end"
         } finally {
             AndroidDerivationScheduler.captureFinished()
@@ -224,6 +229,10 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
         private const val ROUTE_BACKEND_API = "capture_route_backend_api"
         private const val ROUTE_PUBLIC_API = "capture_route_public_api"
         private const val ROUTE_OTHER = "capture_route_other"
+        private const val PRIORITY_CONVERSATION = 100
+        private const val PRIORITY_CONVERSATIONS_LIST = 50
+        private const val PRIORITY_BACKEND_API = 10
+        private const val PRIORITY_DEFAULT = 0
 
         private fun classifyCaptureRoute(requestUrl: String?): String {
             if (requestUrl.isNullOrBlank()) return ROUTE_OTHER
@@ -244,6 +253,13 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
                 path.startsWith("/public-api/") -> ROUTE_PUBLIC_API
                 else -> ROUTE_OTHER
             }
+        }
+
+        private fun priorityForCaptureRoute(route: String): Int = when (route) {
+            ROUTE_CONVERSATION -> PRIORITY_CONVERSATION
+            ROUTE_CONVERSATIONS_LIST -> PRIORITY_CONVERSATIONS_LIST
+            ROUTE_BACKEND_API -> PRIORITY_BACKEND_API
+            else -> PRIORITY_DEFAULT
         }
 
         fun awaitBackgroundDerivationIdle(context: Context) {
