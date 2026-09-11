@@ -24,11 +24,19 @@ for token in (
 ):
     assert token in main, token
 
-# Opening management must not destroy/recreate the browser session.
+# Opening management must not destroy/recreate the browser session. Browser
+# lifecycle reports foreground state only so derivation can throttle without
+# starving while ChatGPT is being used.
 exports_block = main[main.index('text = "Working Data & Exports"'):main.index('root.addView', main.index('text = "Working Data & Exports"'))]
 assert "geckoHost.stop()" not in exports_block
 assert "capturePausedForWorkingData" not in main
-assert "override fun onResume()" not in main
+for token in (
+    "override fun onResume()",
+    "AndroidDerivationScheduler.setBrowserForeground(true)",
+    "override fun onPause()",
+    "AndroidDerivationScheduler.setBrowserForeground(false)",
+):
+    assert token in main, token
 
 for token in (
     "private var instance: GeckoRuntime? = null",
