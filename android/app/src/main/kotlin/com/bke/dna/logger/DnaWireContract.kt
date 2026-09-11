@@ -11,6 +11,7 @@ object DnaWireContract {
         "capture_start",
         "capture_chunk",
         "capture_end",
+        "capture_abort",
         "dom_witness",
     )
 

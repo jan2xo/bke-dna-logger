@@ -24,11 +24,19 @@ for token in (
 ):
     assert token in main, token
 
-# Opening management must not destroy/recreate the browser session.
+# Opening management must not destroy/recreate the browser session. Browser
+# lifecycle reports foreground state only so derivation can throttle without
+# starving while ChatGPT is being used.
 exports_block = main[main.index('text = "Working Data & Exports"'):main.index('root.addView', main.index('text = "Working Data & Exports"'))]
 assert "geckoHost.stop()" not in exports_block
 assert "capturePausedForWorkingData" not in main
-assert "override fun onResume()" not in main
+for token in (
+    "override fun onResume()",
+    "AndroidDerivationScheduler.setBrowserForeground(true)",
+    "override fun onPause()",
+    "AndroidDerivationScheduler.setBrowserForeground(false)",
+):
+    assert token in main, token
 
 for token in (
     "private var instance: GeckoRuntime? = null",
@@ -162,9 +170,12 @@ route_tokens = (
     'ROUTE_BACKEND_API = "capture_route_backend_api"',
     'ROUTE_PUBLIC_API = "capture_route_public_api"',
     'ROUTE_OTHER = "capture_route_other"',
+    'CONVERSATION_PATH_PREFIX = "/backend-api/conversation/"',
+    'CONVERSATION_ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{7,127}")',
     "private fun classifyCaptureRoute(requestUrl: String?): String",
     'path == "/backend-api/conversations"',
-    'path.startsWith("/backend-api/conversation/")',
+    'isCanonicalConversationPath(path) -> ROUTE_CONVERSATION',
+    "return '/' !in conversationId && CONVERSATION_ID.matches(conversationId)",
     'path.startsWith("/backend-api/")',
     'path.startsWith("/public-api/")',
     'if (type == "capture_start")',
@@ -172,6 +183,7 @@ route_tokens = (
 )
 for token in route_tokens:
     assert token in host, token
+assert 'path.startsWith("/backend-api/conversation/") -> ROUTE_CONVERSATION' not in host
 
 for forbidden in (
     'Log.d(TAG, requestUrl',

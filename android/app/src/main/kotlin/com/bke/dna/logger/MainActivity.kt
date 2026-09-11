@@ -6,6 +6,8 @@ import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import android.widget.Button
 import android.widget.LinearLayout
 import org.mozilla.geckoview.GeckoView
@@ -13,6 +15,7 @@ import org.mozilla.geckoview.GeckoView
 class MainActivity : Activity() {
     private lateinit var geckoView: GeckoView
     private lateinit var geckoHost: GeckoViewHost
+    private var backInvokedCallback: OnBackInvokedCallback? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,9 +85,22 @@ class MainActivity : Activity() {
         setContentView(root)
         root.requestApplyInsets()
 
-        geckoHost = GeckoViewHost(this, geckoView)
+        geckoHost = GeckoViewHost(this, geckoView) { canGoBack ->
+            updatePredictiveBackRegistration(canGoBack)
+        }
         geckoHost.start()
         AndroidDerivationScheduler.noteBrowserActivity()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        AndroidDerivationScheduler.setBrowserForeground(true)
+        AndroidDerivationScheduler.noteBrowserActivity()
+    }
+
+    override fun onPause() {
+        AndroidDerivationScheduler.setBrowserForeground(false)
+        super.onPause()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -95,6 +111,40 @@ class MainActivity : Activity() {
     override fun onUserInteraction() {
         AndroidDerivationScheduler.noteBrowserActivity()
         super.onUserInteraction()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        AndroidDerivationScheduler.noteBrowserActivity()
+        if (::geckoHost.isInitialized && geckoHost.goBackIfPossible()) return
+        super.onBackPressed()
+    }
+
+    private fun updatePredictiveBackRegistration(canGoBack: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+
+        if (canGoBack) {
+            if (backInvokedCallback != null) return
+            val callback = OnBackInvokedCallback {
+                AndroidDerivationScheduler.noteBrowserActivity()
+                val handled = ::geckoHost.isInitialized && geckoHost.goBackIfPossible()
+                // A history-state callback can race a system back gesture. If Gecko
+                // no longer has history, preserve root-Activity back behavior instead
+                // of swallowing the gesture.
+                if (!handled) moveTaskToBack(true)
+            }
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                callback,
+            )
+            backInvokedCallback = callback
+            return
+        }
+
+        backInvokedCallback?.let { callback ->
+            onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback)
+            backInvokedCallback = null
+        }
     }
 
     @Deprecated("Activity result API retained for GeckoView file-prompt compatibility")
@@ -117,6 +167,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        AndroidDerivationScheduler.setBrowserForeground(false)
+        updatePredictiveBackRegistration(false)
         if (::geckoHost.isInitialized) {
             geckoHost.stop()
         }

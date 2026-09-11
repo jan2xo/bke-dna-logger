@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = ROOT / "android/app/src/main/kotlin/com/bke/dna/logger"
 
 classifier = (BASE / "AndroidConversationPayloadClassifier.kt").read_text(encoding="utf-8")
+streaming_classifier = (BASE / "AndroidStreamingConversationPayloadClassifier.kt").read_text(encoding="utf-8")
 resolver = (BASE / "AndroidConversationSourceIdentity.kt").read_text(encoding="utf-8")
 messages = (BASE / "AndroidMessagesNormalizationEngine.kt").read_text(encoding="utf-8")
 streaming_messages = (BASE / "AndroidStreamingMessagesNormalizationEngine.kt").read_text(encoding="utf-8")
@@ -23,6 +24,21 @@ for token in (
     '"text/event-stream"',
 ):
     assert token in classifier, token
+
+# Oversized RAW classification must be bounded in both memory and work. A giant
+# source may not monopolize the single derivation lane indefinitely. The scan
+# budget does not lower candidate/high-confidence thresholds.
+for token in (
+    'MAX_SCAN_BYTES = 16L * 1024L * 1024L',
+    'CANDIDATE_SCORE = 28',
+    'HIGH_CONFIDENCE_SCORE = 55',
+    'SCAN_LIMIT_SIGNAL = "classifier_scan_limit"',
+    'ScanBudgetInputStream(input, MAX_SCAN_BYTES)',
+    'catch (_: ScanBudgetExceeded)',
+    'reader.skipValue()',
+    'state.finishWithSignal(SCAN_LIMIT_SIGNAL)',
+):
+    assert token in streaming_classifier, token
 
 # Missing payload conversation_id may only be recovered from exact metadata
 # persisted for the same source SHA. Conflicting metadata returns null.
@@ -149,4 +165,4 @@ for token in (
 ):
     assert token in recovery, token
 
-print('android modern conversation representation + captured title coverage smoke PASS')
+print('android modern conversation representation + bounded classifier + captured title coverage smoke PASS')

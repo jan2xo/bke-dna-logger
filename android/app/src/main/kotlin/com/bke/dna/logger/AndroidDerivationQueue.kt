@@ -4,7 +4,6 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.os.Process
-import android.os.SystemClock
 import android.util.Log
 import java.io.File
 import java.time.Instant
@@ -12,17 +11,18 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Durable processing queue stored inside the active Working Data SQLite.
  *
  * Capture and interactive GeckoView use are the priority lane. RAW SQLite ingest
- * and semantic derivation run on one Android background-priority thread, wait
- * for a browser quiet window before heavy work, and expose a cooperative yield
- * point for bounded inner loops such as normalized SQLite chunk publication.
+ * and semantic derivation run on one Android background-priority thread. Active
+ * capture pauses derivative work, while a foreground browser only increases the
+ * cooperative rest between bounded units; browsing never requires a quiet window
+ * and therefore cannot starve a queued CLASSIFYING/NORMALIZING job indefinitely.
  * Queue rows and completed RAW staging files survive process death, so DNA may
- * intentionally fall behind while the owner actively uses ChatGPT.
+ * intentionally fall behind while the owner actively uses ChatGPT and then catch
+ * up faster in Working Data or while the browser Activity is backgrounded.
  *
  * When unfinished work exists, AndroidDnaProcessingService provides a bounded
  * foreground-service lifetime so the same single queue can continue after the
@@ -32,8 +32,7 @@ object AndroidDerivationScheduler {
     private const val TAG = "BkeDnaQueue"
     private const val PREFS = "bke-dna-processing"
     private const val PREF_PROFILE = "profile"
-    private const val BROWSER_QUIET_MS = 3_000L
-    private const val BROWSER_QUIET_POLL_MS = 100L
+    private const val CAPTURE_ACTIVE_POLL_MS = 100L
     private val STAGED_RAW_NAME = Regex("[0-9a-f]{64}\\.raw")
 
     private val executor = Executors.newSingleThreadExecutor { runnable ->
@@ -46,8 +45,8 @@ object AndroidDerivationScheduler {
         ).apply { isDaemon = true }
     }
     private val drainScheduled = AtomicBoolean(false)
+    private val browserForeground = AtomicBoolean(false)
     private val activeCaptures = AtomicInteger(0)
-    private val lastBrowserActivityAt = AtomicLong(SystemClock.elapsedRealtime())
     private val startLock = Any()
     @Volatile private var recoveryInitialized = false
 
@@ -113,28 +112,31 @@ object AndroidDerivationScheduler {
         kick(appContext)
     }
 
-    /** Called by the browser Activity for touches/keys/resume and by capture. */
+    /** Explicit lifecycle state: ChatGPT browser visible versus sibling/background UI. */
+    fun setBrowserForeground(isForeground: Boolean) {
+        browserForeground.set(isForeground)
+    }
+
+    /** Called for browser interaction; foreground browsing throttles but never pauses DNA. */
     fun noteBrowserActivity() {
-        lastBrowserActivityAt.set(SystemClock.elapsedRealtime())
+        browserForeground.set(true)
     }
 
     fun captureStarted() {
-        noteBrowserActivity()
         activeCaptures.incrementAndGet()
     }
 
     fun captureFinished() {
         activeCaptures.updateAndGet { current -> if (current > 0) current - 1 else 0 }
-        noteBrowserActivity()
     }
 
     /**
      * Cooperative inner-loop gate. Heavy derivation code may call this between
-     * bounded units of work. It blocks only the DNA worker; browser/capture
-     * threads are never blocked by this method.
+     * bounded units of work. Only an active capture blocks derivative work;
+     * ordinary browsing yields CPU but keeps making forward progress.
      */
     fun yieldForBrowserActivity() {
-        waitForBrowserQuiet()
+        waitForCaptureIdle()
         Thread.yield()
     }
 
@@ -213,14 +215,14 @@ object AndroidDerivationScheduler {
 
     private fun drain(context: Context) {
         while (true) {
-            waitForBrowserQuiet()
+            waitForCaptureIdle()
             val job = AndroidDerivationQueueStore(context).use { it.claimNext() } ?: return
             val stagedRaw = File(AndroidDnaPaths.capturesRoot(context), job.bodyPath)
 
             AndroidDnaProcessingService.beginActiveWork(context)
             try {
                 val rawReady = runCatching {
-                    waitForBrowserQuiet()
+                    waitForCaptureIdle()
                     AndroidDerivationQueueStore(context).use {
                         it.updateStage(job.sourceSha256, STAGE_RAW_INGEST)
                     }
@@ -256,7 +258,7 @@ object AndroidDerivationScheduler {
                         contentType = job.contentType,
                         onStage = { stage ->
                             if (!firstStage) breathe(context)
-                            waitForBrowserQuiet()
+                            waitForCaptureIdle()
                             AndroidDerivationQueueStore(context).use {
                                 it.updateStage(job.sourceSha256, stage)
                             }
@@ -264,7 +266,7 @@ object AndroidDerivationScheduler {
                         },
                     )
 
-                    waitForBrowserQuiet()
+                    waitForCaptureIdle()
                     AndroidDerivationQueueStore(context).use { store ->
                         if (success) {
                             store.markDone(job.sourceSha256)
@@ -280,36 +282,36 @@ object AndroidDerivationScheduler {
         }
     }
 
-    private fun waitForBrowserQuiet() {
-        while (true) {
-            if (activeCaptures.get() > 0) {
-                Thread.sleep(BROWSER_QUIET_POLL_MS)
-                continue
-            }
-
-            val quietFor = SystemClock.elapsedRealtime() - lastBrowserActivityAt.get()
-            if (quietFor >= BROWSER_QUIET_MS) return
-            val remaining = BROWSER_QUIET_MS - quietFor
-            Thread.sleep(minOf(BROWSER_QUIET_POLL_MS, remaining.coerceAtLeast(1L)))
+    private fun waitForCaptureIdle() {
+        while (activeCaptures.get() > 0) {
+            Thread.sleep(CAPTURE_ACTIVE_POLL_MS)
         }
     }
 
     private fun breathe(context: Context) {
-        waitForBrowserQuiet()
-        val restMillis = getProfile(context).restMillis
+        waitForCaptureIdle()
+        val profile = getProfile(context)
+        val restMillis = if (browserForeground.get()) {
+            profile.browserRestMillis
+        } else {
+            profile.restMillis
+        }
         if (restMillis > 0) Thread.sleep(restMillis)
-        // A browser interaction may have happened during the profile rest.
-        waitForBrowserQuiet()
+        // Capture may have started while the worker was resting.
+        waitForCaptureIdle()
         Thread.yield()
     }
 
     const val STAGE_RAW_INGEST = "RAW_INGEST"
 }
 
-enum class AndroidProcessingProfile(val restMillis: Long) {
-    SLOW(500L),
-    BALANCED(150L),
-    FAST(25L),
+enum class AndroidProcessingProfile(
+    val restMillis: Long,
+    val browserRestMillis: Long,
+) {
+    SLOW(500L, 1_500L),
+    BALANCED(150L, 750L),
+    FAST(25L, 300L),
 }
 
 data class AndroidDerivationJob(

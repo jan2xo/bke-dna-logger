@@ -32,6 +32,7 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
             "capture_start" -> start(json)
             "capture_chunk" -> append(json)
             "capture_end" -> end(json)
+            "capture_abort" -> abort(json)
             "dom_witness" -> "dom_witness"
             else -> error("Unsupported DNA wire type")
         }
@@ -96,9 +97,6 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
                 "DNA capture complete: source_${result.sha256.take(SOURCE_PREFIX_LENGTH)} $route bytes_${result.byteLength}",
             )
 
-            // Completion is represented by a SHA-addressed staging file. It remains
-            // durable across process death until RAW_INGEST has verified exact bytes
-            // from SQLite. No compression happens on this Gecko ACK path.
             val stagingName = "${result.sha256}.raw"
             val stagedRaw = File(staging, stagingName)
             if (stagedRaw.exists()) {
@@ -137,9 +135,6 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
                 ),
             )
 
-            // Staging + immutable observation + live capture index are durable now.
-            // Queue RAW_INGEST first; the breathing scheduler owns compression,
-            // round-trip verification, staging cleanup and later semantic stages.
             AndroidDerivationScheduler.enqueue(
                 context = appContext,
                 bodyFile = stagedRaw,
@@ -147,11 +142,25 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
                 byteLength = result.byteLength,
                 contentType = session.start.optNullableString("contentType"),
             )
+            AndroidDerivationQueuePriority.promote(
+                context = appContext,
+                sourceSha256 = result.sha256,
+                priority = priorityForCaptureRoute(route),
+            )
             "capture_end"
         } finally {
-            // Keep capture priority active through every durable capture_end write
-            // and queue enqueue. Derivation may resume only after completion has
-            // either fully succeeded or failed and released capture accounting.
+            AndroidDerivationScheduler.captureFinished()
+        }
+    }
+
+    private fun abort(json: JSONObject): String {
+        val captureId = requireCaptureId(json)
+        val session = sessions.remove(captureId) ?: return "capture_abort"
+        try {
+            session.close()
+            Log.d(CAPTURE_DIAGNOSTIC_TAG, "DNA capture aborted")
+            return "capture_abort"
+        } finally {
             AndroidDerivationScheduler.captureFinished()
         }
     }
@@ -220,6 +229,12 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
         private const val ROUTE_BACKEND_API = "capture_route_backend_api"
         private const val ROUTE_PUBLIC_API = "capture_route_public_api"
         private const val ROUTE_OTHER = "capture_route_other"
+        private const val PRIORITY_CONVERSATION = 100
+        private const val PRIORITY_CONVERSATIONS_LIST = 50
+        private const val PRIORITY_BACKEND_API = 10
+        private const val PRIORITY_DEFAULT = 0
+        private const val CONVERSATION_PATH_PREFIX = "/backend-api/conversation/"
+        private val CONVERSATION_ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{7,127}")
 
         private fun classifyCaptureRoute(requestUrl: String?): String {
             if (requestUrl.isNullOrBlank()) return ROUTE_OTHER
@@ -234,12 +249,24 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
             return when {
                 path == "/backend-api/conversations" ||
                     path.startsWith("/backend-api/conversations/") -> ROUTE_CONVERSATIONS_LIST
-                path == "/backend-api/conversation" ||
-                    path.startsWith("/backend-api/conversation/") -> ROUTE_CONVERSATION
+                isCanonicalConversationPath(path) -> ROUTE_CONVERSATION
                 path.startsWith("/backend-api/") -> ROUTE_BACKEND_API
                 path.startsWith("/public-api/") -> ROUTE_PUBLIC_API
                 else -> ROUTE_OTHER
             }
+        }
+
+        private fun isCanonicalConversationPath(path: String): Boolean {
+            if (!path.startsWith(CONVERSATION_PATH_PREFIX)) return false
+            val conversationId = path.removePrefix(CONVERSATION_PATH_PREFIX)
+            return '/' !in conversationId && CONVERSATION_ID.matches(conversationId)
+        }
+
+        private fun priorityForCaptureRoute(route: String): Int = when (route) {
+            ROUTE_CONVERSATION -> PRIORITY_CONVERSATION
+            ROUTE_CONVERSATIONS_LIST -> PRIORITY_CONVERSATIONS_LIST
+            ROUTE_BACKEND_API -> PRIORITY_BACKEND_API
+            else -> PRIORITY_DEFAULT
         }
 
         fun awaitBackgroundDerivationIdle(context: Context) {

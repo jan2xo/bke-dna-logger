@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets
 class GeckoViewHost(
     private val activity: Activity,
     private val view: GeckoView,
+    private val onCanGoBackChanged: (Boolean) -> Unit = {},
 ) {
     companion object {
         private const val TAG = "BkeDnaGeckoView"
@@ -41,6 +42,8 @@ class GeckoViewHost(
         private const val ROUTE_BACKEND_API = "capture_route_backend_api"
         private const val ROUTE_PUBLIC_API = "capture_route_public_api"
         private const val ROUTE_OTHER = "capture_route_other"
+        private const val CONVERSATION_PATH_PREFIX = "/backend-api/conversation/"
+        private val CONVERSATION_ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{7,127}")
 
         private val DIAGNOSTIC_EVENTS = setOf(
             "interceptor_ready",
@@ -70,6 +73,14 @@ class GeckoViewHost(
             "page_navigation_api",
             "page_popstate",
             "page_hashchange",
+            "hydration_requested",
+            "hydration_status_2xx",
+            "hydration_status_3xx",
+            "hydration_status_4xx",
+            "hydration_status_5xx",
+            "hydration_status_other",
+            "hydration_publish_started",
+            "hydration_failed",
         )
         private val DIAGNOSTIC_KEYS = setOf("type", "event")
 
@@ -86,12 +97,17 @@ class GeckoViewHost(
             return when {
                 path == "/backend-api/conversations" ||
                     path.startsWith("/backend-api/conversations/") -> ROUTE_CONVERSATIONS_LIST
-                path == "/backend-api/conversation" ||
-                    path.startsWith("/backend-api/conversation/") -> ROUTE_CONVERSATION
+                isCanonicalConversationPath(path) -> ROUTE_CONVERSATION
                 path.startsWith("/backend-api/") -> ROUTE_BACKEND_API
                 path.startsWith("/public-api/") -> ROUTE_PUBLIC_API
                 else -> ROUTE_OTHER
             }
+        }
+
+        private fun isCanonicalConversationPath(path: String): Boolean {
+            if (!path.startsWith(CONVERSATION_PATH_PREFIX)) return false
+            val conversationId = path.removePrefix(CONVERSATION_PATH_PREFIX)
+            return '/' !in conversationId && CONVERSATION_ID.matches(conversationId)
         }
     }
 
@@ -102,6 +118,7 @@ class GeckoViewHost(
     private var pendingFilePrompt: PendingFilePrompt? = null
     private var pendingGeckoPermissionCallback: GeckoSession.PermissionDelegate.Callback? = null
     private var currentWebUri: URI? = parseWebUri(CHATGPT_URL)
+    @Volatile private var canGoBack = false
 
     private fun browserDiagnostic(event: String) {
         Log.d(BROWSER_TAG, "BKE Browser: $event")
@@ -230,6 +247,13 @@ class GeckoViewHost(
             }
 
             return super.onLoadRequest(session, request)
+        }
+
+        override fun onCanGoBack(session: GeckoSession, canGoBack: Boolean) {
+            val changed = this@GeckoViewHost.canGoBack != canGoBack
+            this@GeckoViewHost.canGoBack = canGoBack
+            browserDiagnostic(if (canGoBack) "navigation_can_go_back" else "navigation_cannot_go_back")
+            if (changed) onCanGoBackChanged(canGoBack)
         }
 
         override fun onLocationChange(
@@ -445,6 +469,13 @@ class GeckoViewHost(
             )
     }
 
+    fun goBackIfPossible(): Boolean {
+        if (!started || !session.isOpen || !canGoBack) return false
+        browserDiagnostic("navigation_back")
+        session.goBack()
+        return true
+    }
+
     fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
         if (requestCode != FILE_PROMPT_REQUEST) return false
         browserDiagnostic("file_prompt_result_received")
@@ -537,6 +568,10 @@ class GeckoViewHost(
         dismissPendingFilePrompt()
         pendingGeckoPermissionCallback?.reject()
         pendingGeckoPermissionCallback = null
+        if (canGoBack) {
+            canGoBack = false
+            onCanGoBackChanged(false)
+        }
         view.releaseSession()
         if (session.isOpen) session.close()
         AndroidCaptureRuntime.stop()
