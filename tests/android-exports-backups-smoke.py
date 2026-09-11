@@ -194,7 +194,13 @@ for token in [
     'Tap a conversation row to read it', 'portable .dna export lives under MORE',
 ]:
     assert token in ui, token
-for token in ['SLOW(500L)', 'BALANCED(150L)', 'FAST(25L)', 'fun snapshot(context: Context)']:
+for token in [
+    'SLOW(500L, 1_500L)',
+    'BALANCED(150L, 750L)',
+    'FAST(25L, 300L)',
+    'val browserRestMillis: Long',
+    'fun snapshot(context: Context)',
+]:
     assert token in queue, token
 for forbidden in ['actionButton("Read conversation")', 'actionButton("Export CLEAN.md")', 'actionButton("Export RAW.md")']:
     assert forbidden not in ui, forbidden
