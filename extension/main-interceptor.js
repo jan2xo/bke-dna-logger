@@ -23,7 +23,15 @@
     "page_history_replace_state",
     "page_navigation_api",
     "page_popstate",
-    "page_hashchange"
+    "page_hashchange",
+    "hydration_requested",
+    "hydration_status_2xx",
+    "hydration_status_3xx",
+    "hydration_status_4xx",
+    "hydration_status_5xx",
+    "hydration_status_other",
+    "hydration_publish_started",
+    "hydration_failed"
   ]);
   const REPEATABLE_DIAGNOSTIC_EVENTS = new Set([
     "page_window_open",
@@ -31,7 +39,15 @@
     "page_history_replace_state",
     "page_navigation_api",
     "page_popstate",
-    "page_hashchange"
+    "page_hashchange",
+    "hydration_requested",
+    "hydration_status_2xx",
+    "hydration_status_3xx",
+    "hydration_status_4xx",
+    "hydration_status_5xx",
+    "hydration_status_other",
+    "hydration_publish_started",
+    "hydration_failed"
   ]);
   const emittedDiagnostics = new Set();
 
@@ -44,6 +60,20 @@
     if (!REPEATABLE_DIAGNOSTIC_EVENTS.has(event) && emittedDiagnostics.has(event)) return;
     if (!REPEATABLE_DIAGNOSTIC_EVENTS.has(event)) emittedDiagnostics.add(event);
     window.postMessage({ source: SOURCE, kind: "diagnostic", event }, "*");
+  }
+
+  function emitHydrationStatus(status) {
+    if (status >= 200 && status < 300) {
+      emitDiagnostic("hydration_status_2xx");
+    } else if (status >= 300 && status < 400) {
+      emitDiagnostic("hydration_status_3xx");
+    } else if (status >= 400 && status < 500) {
+      emitDiagnostic("hydration_status_4xx");
+    } else if (status >= 500 && status < 600) {
+      emitDiagnostic("hydration_status_5xx");
+    } else {
+      emitDiagnostic("hydration_status_other");
+    }
   }
 
   function waitForAck(captureId, phase, sequence = null) {
@@ -111,15 +141,19 @@
         url: new URL(relativeUrl, window.location.href).href,
         method: "GET"
       };
+      emitDiagnostic("hydration_requested");
       try {
         const response = await originalFetch(relativeUrl, {
           method: "GET",
           credentials: "include",
           cache: "no-store"
         });
+        emitHydrationStatus(response.status);
         if (!response.ok) return;
+        emitDiagnostic("hydration_publish_started");
         await publishCapture(response, request);
       } catch (error) {
+        emitDiagnostic("hydration_failed");
         console.debug("[BKE DNA] canonical conversation hydration skipped", error);
       } finally {
         hydrationInFlight.delete(conversationId);
