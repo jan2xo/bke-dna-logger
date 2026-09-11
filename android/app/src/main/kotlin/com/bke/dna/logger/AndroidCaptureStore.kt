@@ -32,6 +32,7 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
             "capture_start" -> start(json)
             "capture_chunk" -> append(json)
             "capture_end" -> end(json)
+            "capture_abort" -> abort(json)
             "dom_witness" -> "dom_witness"
             else -> error("Unsupported DNA wire type")
         }
@@ -96,9 +97,6 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
                 "DNA capture complete: source_${result.sha256.take(SOURCE_PREFIX_LENGTH)} $route bytes_${result.byteLength}",
             )
 
-            // Completion is represented by a SHA-addressed staging file. It remains
-            // durable across process death until RAW_INGEST has verified exact bytes
-            // from SQLite. No compression happens on this Gecko ACK path.
             val stagingName = "${result.sha256}.raw"
             val stagedRaw = File(staging, stagingName)
             if (stagedRaw.exists()) {
@@ -137,9 +135,6 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
                 ),
             )
 
-            // Staging + immutable observation + live capture index are durable now.
-            // Queue RAW_INGEST first; the breathing scheduler owns compression,
-            // round-trip verification, staging cleanup and later semantic stages.
             AndroidDerivationScheduler.enqueue(
                 context = appContext,
                 bodyFile = stagedRaw,
@@ -149,9 +144,18 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
             )
             "capture_end"
         } finally {
-            // Keep capture priority active through every durable capture_end write
-            // and queue enqueue. Derivation may resume only after completion has
-            // either fully succeeded or failed and released capture accounting.
+            AndroidDerivationScheduler.captureFinished()
+        }
+    }
+
+    private fun abort(json: JSONObject): String {
+        val captureId = requireCaptureId(json)
+        val session = sessions.remove(captureId) ?: return "capture_abort"
+        try {
+            session.close()
+            Log.d(CAPTURE_DIAGNOSTIC_TAG, "DNA capture aborted")
+            return "capture_abort"
+        } finally {
             AndroidDerivationScheduler.captureFinished()
         }
     }
