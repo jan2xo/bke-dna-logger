@@ -14,7 +14,7 @@ host = (kotlin / "GeckoViewHost.kt").read_text(encoding="utf-8")
 bridge = (repo / "android" / "app" / "src" / "main" / "assets" / "dna-extension" / "bridge.js").read_text(encoding="utf-8")
 interceptor = (repo / "extension" / "main-interceptor.js").read_text(encoding="utf-8")
 
-for token in ("capture_start", "capture_chunk", "capture_end", "MAX_MESSAGE_BYTES"):
+for token in ("capture_start", "capture_chunk", "capture_end", "capture_abort", "MAX_MESSAGE_BYTES"):
     assert token in contract, token
 
 for forbidden in ("authorization", "cookie", "requestHeaders", "responseHeaders", "headers"):
@@ -37,9 +37,6 @@ for token in (
 ):
     assert token in runtime, token
 
-# Native ingress still fsyncs exact bytes before ACK, but completed sources now
-# promote only to durable staging. Permanent RAW ownership moves to SQLite in
-# the background-priority derivation queue, not on the Gecko capture path.
 for token in (
     'MessageDigest.getInstance("SHA-256")',
     "output.fd.sync()",
@@ -60,9 +57,18 @@ assert 'File(root, "bodies")' not in store
 assert "DERIVATION_EXECUTOR" not in store
 assert store.index("index.record(") < store.index("AndroidDerivationScheduler.enqueue(")
 
-# Capture remains the hard priority gate, while foreground browsing only throttles
-# derivation. The old browser-quiet gate is forbidden because continuous user
-# interaction could otherwise starve CLASSIFYING/NORMALIZING indefinitely.
+# A stream that started natively but failed before capture_end must explicitly abort.
+# Abort closes/deletes its partial session and releases the capture-priority counter.
+for token in (
+    '"capture_abort" -> abort(json)',
+    "private fun abort(json: JSONObject): String",
+    "sessions.remove(captureId)",
+    "session.close()",
+    "AndroidDerivationScheduler.captureFinished()",
+):
+    assert token in store, token
+
+# Capture remains the hard priority gate, while foreground browsing only throttles derivation.
 for token in (
     "CREATE TABLE IF NOT EXISTS derivation_queue",
     "recoverInterrupted()",
@@ -80,10 +86,7 @@ for token in (
     "FAST(25L, 300L)",
 ):
     assert token in queue, token
-for forbidden in (
-    "waitForBrowserQuiet()",
-    "BROWSER_QUIET_MS",
-):
+for forbidden in ("waitForBrowserQuiet()", "BROWSER_QUIET_MS"):
     assert forbidden not in queue, forbidden
 assert queue.index("rawStore.importVerified(") < queue.index("stagedRaw.delete()")
 
@@ -115,6 +118,8 @@ for token in (
     'kind: "capture_start"',
     'kind: "capture_chunk"',
     'kind: "capture_end"',
+    'kind: "capture_abort"',
+    'postWithAck({ source: SOURCE, kind: "capture_abort", captureId }, [], "abort")',
     "waitForAck",
 ):
     assert token in interceptor, token
@@ -124,10 +129,12 @@ for token in (
     "forwardStreamStart",
     "forwardStreamChunk",
     "forwardStreamEnd",
+    "forwardStreamAbort",
     'kind: "capture_ack"',
     'type: "capture_start"',
     'type: "capture_chunk"',
     'type: "capture_end"',
+    'type: "capture_abort"',
     "byteLength: packet.byteLength",
 ):
     assert token in bridge, token
@@ -135,4 +142,4 @@ for token in (
 for forbidden in ("Authorization", "Cookie", "requestHeaders", "responseHeaders"):
     assert forbidden not in bridge, forbidden
 
-print("android streamed native ingress/browser-first SQLite RAW nonstarving queue smoke PASS")
+print("android streamed native ingress/browser-first SQLite RAW nonstarving + abort-release smoke PASS")
