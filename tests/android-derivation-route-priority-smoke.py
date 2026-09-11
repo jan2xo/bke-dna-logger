@@ -28,6 +28,22 @@ for token in (
 assert capture.index('AndroidDerivationScheduler.enqueue(') < capture.index('AndroidDerivationQueuePriority.promote(')
 assert capture.index('AndroidDerivationQueuePriority.promote(') < capture.index('"capture_end"')
 
+# A canonical conversation route is exactly one valid conversation-id segment.
+# Nested helpers under /backend-api/conversation/ (for example autocomplete)
+# remain ordinary backend API traffic and must never receive conversation priority.
+for token in (
+    'CONVERSATION_PATH_PREFIX = "/backend-api/conversation/"',
+    'CONVERSATION_ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{7,127}")',
+    'isCanonicalConversationPath(path) -> ROUTE_CONVERSATION',
+    "return '/' !in conversationId && CONVERSATION_ID.matches(conversationId)",
+    'path.startsWith("/backend-api/") -> ROUTE_BACKEND_API',
+):
+    assert token in capture, token
+
+assert 'path.startsWith("/backend-api/conversation/") -> ROUTE_CONVERSATION' not in capture
+assert 'path == "/backend-api/conversation" ||' not in capture
+assert 'experimental/generate_autocompletions' not in capture
+
 # Promotion is monotonic: a later generic observation of the same source may not
 # downgrade already-known conversation evidence.
 for token in (
