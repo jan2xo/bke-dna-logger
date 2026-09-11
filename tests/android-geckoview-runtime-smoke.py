@@ -170,9 +170,12 @@ route_tokens = (
     'ROUTE_BACKEND_API = "capture_route_backend_api"',
     'ROUTE_PUBLIC_API = "capture_route_public_api"',
     'ROUTE_OTHER = "capture_route_other"',
+    'CONVERSATION_PATH_PREFIX = "/backend-api/conversation/"',
+    'CONVERSATION_ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{7,127}")',
     "private fun classifyCaptureRoute(requestUrl: String?): String",
     'path == "/backend-api/conversations"',
-    'path.startsWith("/backend-api/conversation/")',
+    'isCanonicalConversationPath(path) -> ROUTE_CONVERSATION',
+    "return '/' !in conversationId && CONVERSATION_ID.matches(conversationId)",
     'path.startsWith("/backend-api/")',
     'path.startsWith("/public-api/")',
     'if (type == "capture_start")',
@@ -180,6 +183,7 @@ route_tokens = (
 )
 for token in route_tokens:
     assert token in host, token
+assert 'path.startsWith("/backend-api/conversation/") -> ROUTE_CONVERSATION' not in host
 
 for forbidden in (
     'Log.d(TAG, requestUrl',
