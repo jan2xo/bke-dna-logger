@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = ROOT / "android/app/src/main/kotlin/com/bke/dna/logger"
 
 capture = (BASE / "AndroidCaptureStore.kt").read_text(encoding="utf-8")
+host = (BASE / "GeckoViewHost.kt").read_text(encoding="utf-8")
 priority = (BASE / "AndroidDerivationQueuePriority.kt").read_text(encoding="utf-8")
 queue = (BASE / "AndroidDerivationQueue.kt").read_text(encoding="utf-8")
 
@@ -29,20 +30,39 @@ assert capture.index('AndroidDerivationScheduler.enqueue(') < capture.index('And
 assert capture.index('AndroidDerivationQueuePriority.promote(') < capture.index('"capture_end"')
 
 # A canonical conversation route is exactly one valid conversation-id segment.
-# Nested helpers under /backend-api/conversation/ (for example autocomplete)
-# remain ordinary backend API traffic and must never receive conversation priority.
-for token in (
+# Nested helpers under /backend-api/conversation/ (for example autocomplete,
+# stream_status, and textdocs) remain ordinary backend API traffic and must never
+# receive conversation priority or misleading Gecko diagnostics.
+route_tokens = (
     'CONVERSATION_PATH_PREFIX = "/backend-api/conversation/"',
     'CONVERSATION_ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{7,127}")',
     'isCanonicalConversationPath(path) -> ROUTE_CONVERSATION',
     "return '/' !in conversationId && CONVERSATION_ID.matches(conversationId)",
     'path.startsWith("/backend-api/") -> ROUTE_BACKEND_API',
-):
+)
+for token in route_tokens:
     assert token in capture, token
+    assert token in host, token
 
-assert 'path.startsWith("/backend-api/conversation/") -> ROUTE_CONVERSATION' not in capture
-assert 'path == "/backend-api/conversation" ||' not in capture
-assert 'experimental/generate_autocompletions' not in capture
+for source in (capture, host):
+    assert 'path.startsWith("/backend-api/conversation/") -> ROUTE_CONVERSATION' not in source
+    assert 'path == "/backend-api/conversation" ||' not in source
+    assert 'experimental/generate_autocompletions' not in source
+
+# Hydration diagnostics emitted by the injected interceptor must survive the
+# native Gecko diagnostic whitelist so physical runs can distinguish no-attempt,
+# HTTP rejection, successful publish, and runtime failure without changing behavior.
+for event in (
+    'hydration_requested',
+    'hydration_status_2xx',
+    'hydration_status_3xx',
+    'hydration_status_4xx',
+    'hydration_status_5xx',
+    'hydration_status_other',
+    'hydration_publish_started',
+    'hydration_failed',
+):
+    assert f'"{event}"' in host, event
 
 # Promotion is monotonic: a later generic observation of the same source may not
 # downgrade already-known conversation evidence.
