@@ -174,6 +174,11 @@
       });
     }
 
+    function scheduleCurrentConversationHydration(force = false) {
+      const currentId = currentConversationId();
+      if (currentId) scheduleConversationHydrationSeries(currentId, force);
+    }
+
     function hydrateCurrentConversationOnce() {
       const conversationId = currentConversationId();
       if (conversationId) hydrateConversation(conversationId);
@@ -215,18 +220,17 @@
 
     if (window.navigation && typeof window.navigation.addEventListener === "function") {
       window.navigation.addEventListener("navigate", () => emitDiagnostic("page_navigation_api"));
+      window.navigation.addEventListener("navigatesuccess", () => {
+        scheduleCurrentConversationHydration(true);
+      });
     }
     window.addEventListener("popstate", () => {
       emitDiagnostic("page_popstate");
-      setTimeout(() => {
-        const currentId = currentConversationId();
-        if (currentId) scheduleConversationHydrationSeries(currentId);
-      }, 0);
+      setTimeout(() => scheduleCurrentConversationHydration(), 0);
     });
     window.addEventListener("hashchange", () => emitDiagnostic("page_hashchange"));
     document.addEventListener("submit", () => {
-      const currentId = currentConversationId();
-      if (currentId) scheduleConversationHydrationSeries(currentId, true);
+      scheduleCurrentConversationHydration(true);
     }, true);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") hydrateCurrentConversationOnce();
