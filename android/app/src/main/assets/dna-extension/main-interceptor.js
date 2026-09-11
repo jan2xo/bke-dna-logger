@@ -5,6 +5,8 @@
   const EXTENSION_SOURCE = "bke-dna-logger-extension";
   const STREAM_CHUNK_BYTES = 128 * 1024;
   const ACK_TIMEOUT_MS = 60 * 1000;
+  const HYDRATION_DELAYS_MS = [1_500, 5_000, 15_000];
+  const CONVERSATION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/;
   const DIAGNOSTIC_EVENTS = new Set([
     "interceptor_ready",
     "fetch_seen",
@@ -15,13 +17,32 @@
     "capture_posted",
     "interceptor_load_error",
     "page_runtime_error",
-    "page_unhandled_rejection"
+    "page_unhandled_rejection",
+    "page_window_open",
+    "page_history_push_state",
+    "page_history_replace_state",
+    "page_navigation_api",
+    "page_popstate",
+    "page_hashchange"
+  ]);
+  const REPEATABLE_DIAGNOSTIC_EVENTS = new Set([
+    "page_window_open",
+    "page_history_push_state",
+    "page_history_replace_state",
+    "page_navigation_api",
+    "page_popstate",
+    "page_hashchange"
   ]);
   const emittedDiagnostics = new Set();
 
+  let hydrationGeneration = 0;
+  let lastHydrationSeriesId = null;
+  const hydrationInFlight = new Set();
+
   function emitDiagnostic(event) {
-    if (!DIAGNOSTIC_EVENTS.has(event) || emittedDiagnostics.has(event)) return;
-    emittedDiagnostics.add(event);
+    if (!DIAGNOSTIC_EVENTS.has(event)) return;
+    if (!REPEATABLE_DIAGNOSTIC_EVENTS.has(event) && emittedDiagnostics.has(event)) return;
+    if (!REPEATABLE_DIAGNOSTIC_EVENTS.has(event)) emittedDiagnostics.add(event);
     window.postMessage({ source: SOURCE, kind: "diagnostic", event }, "*");
   }
 
@@ -54,6 +75,7 @@
   try {
     window.addEventListener("error", () => emitDiagnostic("page_runtime_error"), true);
     window.addEventListener("unhandledrejection", () => emitDiagnostic("page_unhandled_rejection"));
+
     const originalFetch = window.fetch.bind(window);
     const allowedContentTypes = ["application/json", "application/x-ndjson", "text/event-stream", "text/plain"];
 
@@ -71,10 +93,117 @@
       return { url: new URL(String(input), window.location.href).href, method: String(init.method || "GET").toUpperCase() };
     }
 
+    function currentConversationId() {
+      const segments = window.location.pathname.split("/").filter(Boolean);
+      for (let index = 0; index < segments.length - 1; index += 1) {
+        if (segments[index] !== "c") continue;
+        const candidate = segments[index + 1];
+        if (CONVERSATION_ID.test(candidate)) return candidate;
+      }
+      return null;
+    }
+
+    async function hydrateConversation(conversationId) {
+      if (!conversationId || hydrationInFlight.has(conversationId)) return;
+      hydrationInFlight.add(conversationId);
+      const relativeUrl = `/backend-api/conversation/${encodeURIComponent(conversationId)}`;
+      const request = {
+        url: new URL(relativeUrl, window.location.href).href,
+        method: "GET"
+      };
+      try {
+        const response = await originalFetch(relativeUrl, {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store"
+        });
+        if (!response.ok) return;
+        await publishCapture(response, request);
+      } catch (error) {
+        console.debug("[BKE DNA] canonical conversation hydration skipped", error);
+      } finally {
+        hydrationInFlight.delete(conversationId);
+      }
+    }
+
+    function scheduleConversationHydrationSeries(conversationId, force = false) {
+      if (!conversationId) return;
+      if (!force && lastHydrationSeriesId === conversationId) return;
+      lastHydrationSeriesId = conversationId;
+      const generation = ++hydrationGeneration;
+      HYDRATION_DELAYS_MS.forEach(delay => {
+        setTimeout(() => {
+          if (generation !== hydrationGeneration) return;
+          if (currentConversationId() !== conversationId) return;
+          hydrateConversation(conversationId);
+        }, delay);
+      });
+    }
+
+    function hydrateCurrentConversationOnce() {
+      const conversationId = currentConversationId();
+      if (conversationId) hydrateConversation(conversationId);
+    }
+
+    function afterHistoryMutation(previousConversationId) {
+      const currentId = currentConversationId();
+      if (previousConversationId && previousConversationId !== currentId) {
+        hydrateConversation(previousConversationId);
+      }
+      if (!previousConversationId && currentId) {
+        scheduleConversationHydrationSeries(currentId, true);
+      }
+    }
+
+    const originalWindowOpen = window.open;
+    window.open = function bkeDnaWindowOpen(...args) {
+      emitDiagnostic("page_window_open");
+      return Reflect.apply(originalWindowOpen, this, args);
+    };
+
+    const originalPushState = history.pushState;
+    history.pushState = function bkeDnaPushState(...args) {
+      const previousConversationId = currentConversationId();
+      emitDiagnostic("page_history_push_state");
+      const result = Reflect.apply(originalPushState, this, args);
+      afterHistoryMutation(previousConversationId);
+      return result;
+    };
+
+    const originalReplaceState = history.replaceState;
+    history.replaceState = function bkeDnaReplaceState(...args) {
+      const previousConversationId = currentConversationId();
+      emitDiagnostic("page_history_replace_state");
+      const result = Reflect.apply(originalReplaceState, this, args);
+      afterHistoryMutation(previousConversationId);
+      return result;
+    };
+
+    if (window.navigation && typeof window.navigation.addEventListener === "function") {
+      window.navigation.addEventListener("navigate", () => emitDiagnostic("page_navigation_api"));
+    }
+    window.addEventListener("popstate", () => {
+      emitDiagnostic("page_popstate");
+      setTimeout(() => {
+        const currentId = currentConversationId();
+        if (currentId) scheduleConversationHydrationSeries(currentId);
+      }, 0);
+    });
+    window.addEventListener("hashchange", () => emitDiagnostic("page_hashchange"));
+    document.addEventListener("submit", () => {
+      const currentId = currentConversationId();
+      if (currentId) scheduleConversationHydrationSeries(currentId, true);
+    }, true);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") hydrateCurrentConversationOnce();
+    });
+    window.addEventListener("pagehide", hydrateCurrentConversationOnce);
+
     async function publishCapture(response, request) {
       if (!shouldCapture(response)) return;
       emitDiagnostic("capture_candidate");
       emitDiagnostic("body_read_started");
+
       const captureId = crypto.randomUUID();
       const clone = response.clone();
       const reader = clone.body?.getReader();
