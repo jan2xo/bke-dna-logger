@@ -16,6 +16,7 @@ base = (
 )
 host = (base / "GeckoViewHost.kt").read_text(encoding="utf-8")
 main = (base / "MainActivity.kt").read_text(encoding="utf-8")
+interceptor = (repo / "extension" / "main-interceptor.js").read_text(encoding="utf-8")
 
 # Single-tab browser behavior: same-origin requests for a new window are folded
 # into the current GeckoSession. We track the current top-level origin ourselves
@@ -94,6 +95,38 @@ new_session_block = host[
 assert "session.loadUri" not in new_session_block
 assert "return super.onNewSession(session, uri)" in new_session_block
 
+# New-chat capture cannot depend on ChatGPT continuing to expose its live response
+# through window.fetch. Once SPA navigation yields a real /c/<id>, request a small
+# bounded set of canonical conversation snapshots in the logged-in page context.
+# Submitting another turn re-arms the bounded series; leaving/hiding a chat takes
+# one final snapshot. All snapshots still flow through publishCapture and the
+# normal classifier/normalizer; no DOM message scraping or synthetic content.
+for token in (
+    "HYDRATION_DELAYS_MS = [1_500, 5_000, 15_000]",
+    "function currentConversationId()",
+    'segments[index] !== "c"',
+    "async function hydrateConversation(conversationId)",
+    '`/backend-api/conversation/${encodeURIComponent(conversationId)}`',
+    'credentials: "include"',
+    'cache: "no-store"',
+    "await publishCapture(response, request)",
+    "function scheduleConversationHydrationSeries(conversationId, force = false)",
+    "if (!previousConversationId && currentId)",
+    "scheduleConversationHydrationSeries(currentId, true)",
+    "hydrateConversation(previousConversationId)",
+    'document.addEventListener("submit"',
+    'document.addEventListener("visibilitychange"',
+    'window.addEventListener("pagehide", hydrateCurrentConversationOnce)',
+):
+    assert token in interceptor, token
+for forbidden in (
+    "querySelector(",
+    "querySelectorAll(",
+    "innerText",
+    "textContent",
+):
+    assert forbidden not in interceptor, forbidden
+
 # Camera capture uses the same proven staging shape as generic documents: the
 # provider content URI is copied into the Gecko upload cache and returned as a
 # file URI before the prompt is resolved.
@@ -115,4 +148,4 @@ for forbidden in (
 ):
     assert forbidden not in host, forbidden
 
-print("android generic navigation + predictive browser back + camera file-URI contract smoke PASS")
+print("android generic navigation + predictive browser back + canonical new-chat hydration + camera file-URI contract smoke PASS")
