@@ -105,10 +105,17 @@ for token in [
     assert token in derivative_access, token
 
 # Management never destroys/reloads ChatGPT. Storage mutations pause capture and
-# derivation without killing GeckoSession.
+# derivation without killing GeckoSession. Browser lifecycle only reports whether
+# the ChatGPT surface is foreground so derivation can throttle rather than starve.
 assert 'startActivity(Intent(this@MainActivity, AndroidExportsBackupsActivity::class.java))' in main
 assert 'capturePausedForWorkingData' not in main
-assert 'override fun onResume()' not in main
+for token in [
+    'override fun onResume()',
+    'AndroidDerivationScheduler.setBrowserForeground(true)',
+    'override fun onPause()',
+    'AndroidDerivationScheduler.setBrowserForeground(false)',
+]:
+    assert token in main, token
 button_start = main.index('text = "Working Data & Exports"')
 button = main[button_start:main.index('geckoView = GeckoView(this)', button_start)]
 for token in ['textSize = 12f', 'minHeight = 0', 'ViewGroup.LayoutParams.WRAP_CONTENT']:
