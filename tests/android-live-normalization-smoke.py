@@ -231,10 +231,9 @@ assert 'DERIVATION_EXECUTOR' not in store
 assert 'AndroidLiveDerivationPipeline(appContext).processCompletedCapture(' not in store
 assert store.index('index.record(') < store.index('AndroidDerivationScheduler.enqueue(')
 
-# Durable queue remains RAW_INGEST -> semantic stages. It now runs as an Android
-# background-priority worker and requires browser quiet before heavy work;
-# staging deletion still follows verified SQLite RAW import. Queue initialization
-# was factored so the foreground service can restart the same worker safely.
+# Durable queue remains RAW_INGEST -> semantic stages. It runs on one Android
+# background-priority worker. Active capture is the only hard pause; foreground
+# browsing uses profile-controlled throttling and cannot starve queued work.
 for token in (
     'CREATE TABLE IF NOT EXISTS derivation_queue',
     'source_sha256 TEXT PRIMARY KEY',
@@ -242,10 +241,12 @@ for token in (
     'recoverInterrupted()', 'recoverStagedRaw(context)', 'requeueForRawIngest(',
     'Executors.newSingleThreadExecutor', 'bke-dna-breathing-derivation',
     'Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)',
-    'BROWSER_QUIET_MS = 3_000L', 'noteBrowserActivity()', 'yieldForBrowserActivity()',
-    'enum class AndroidProcessingProfile', 'SLOW(500L)', 'BALANCED(150L)', 'FAST(25L)',
-    'Thread.sleep(restMillis)', 'Thread.yield()',
-    'activeCaptures', 'waitForBrowserQuiet()',
+    'CAPTURE_ACTIVE_POLL_MS = 100L', 'noteBrowserActivity()', 'yieldForBrowserActivity()',
+    'browserForeground = AtomicBoolean(false)', 'setBrowserForeground(isForeground: Boolean)',
+    'enum class AndroidProcessingProfile',
+    'SLOW(500L, 1_500L)', 'BALANCED(150L, 750L)', 'FAST(25L, 300L)',
+    'profile.browserRestMillis', 'Thread.sleep(restMillis)', 'Thread.yield()',
+    'activeCaptures', 'waitForCaptureIdle()',
     'STAGE_RAW_INGEST = "RAW_INGEST"',
     'rawStore.importVerified(', 'rawStore.verifySource(job.sourceSha256, job.byteLength)',
     'stagedRaw.delete()',
@@ -257,6 +258,8 @@ for token in (
     'AndroidDnaProcessingService.endActiveWork()',
 ):
     assert token in queue, token
+for forbidden in ('BROWSER_QUIET_MS', 'BROWSER_QUIET_POLL_MS', 'waitForBrowserQuiet()', 'lastBrowserActivityAt'):
+    assert forbidden not in queue, forbidden
 assert 'newFixedThreadPool' not in queue
 assert 'newCachedThreadPool' not in queue
 assert queue.index('rawStore.importVerified(') < queue.index('stagedRaw.delete()')
