@@ -34,21 +34,10 @@
   const emittedDiagnostics = new Set();
 
   function emitDiagnostic(event) {
-    if (!DIAGNOSTIC_EVENTS.has(event)) {
-      return;
-    }
-    if (!REPEATABLE_DIAGNOSTIC_EVENTS.has(event) && emittedDiagnostics.has(event)) {
-      return;
-    }
-
-    if (!REPEATABLE_DIAGNOSTIC_EVENTS.has(event)) {
-      emittedDiagnostics.add(event);
-    }
-    window.postMessage({
-      source: SOURCE,
-      kind: "diagnostic",
-      event
-    }, "*");
+    if (!DIAGNOSTIC_EVENTS.has(event)) return;
+    if (!REPEATABLE_DIAGNOSTIC_EVENTS.has(event) && emittedDiagnostics.has(event)) return;
+    if (!REPEATABLE_DIAGNOSTIC_EVENTS.has(event)) emittedDiagnostics.add(event);
+    window.postMessage({ source: SOURCE, kind: "diagnostic", event }, "*");
   }
 
   function waitForAck(captureId, phase, sequence = null) {
@@ -57,27 +46,16 @@
         window.removeEventListener("message", onMessage);
         reject(new Error(`BKE DNA ${phase} ACK timed out`));
       }, ACK_TIMEOUT_MS);
-
       function onMessage(event) {
-        if (event.source !== window) {
-          return;
-        }
+        if (event.source !== window) return;
         const data = event.data;
-        if (!data || data.source !== EXTENSION_SOURCE || data.kind !== "capture_ack") {
-          return;
-        }
-        if (data.captureId !== captureId || data.phase !== phase) {
-          return;
-        }
-        if (phase === "chunk" && data.sequence !== sequence) {
-          return;
-        }
-
+        if (!data || data.source !== EXTENSION_SOURCE || data.kind !== "capture_ack") return;
+        if (data.captureId !== captureId || data.phase !== phase) return;
+        if (phase === "chunk" && data.sequence !== sequence) return;
         clearTimeout(timeout);
         window.removeEventListener("message", onMessage);
         resolve();
       }
-
       window.addEventListener("message", onMessage);
     });
   }
@@ -117,13 +95,7 @@
     window.addEventListener("hashchange", () => emitDiagnostic("page_hashchange"));
 
     const originalFetch = window.fetch.bind(window);
-
-    const allowedContentTypes = [
-      "application/json",
-      "application/x-ndjson",
-      "text/event-stream",
-      "text/plain"
-    ];
+    const allowedContentTypes = ["application/json", "application/x-ndjson", "text/event-stream", "text/plain"];
 
     function shouldCapture(response) {
       const type = (response.headers.get("content-type") || "").toLowerCase();
@@ -133,25 +105,14 @@
     function resolveRequest(args) {
       const input = args[0];
       const init = args[1] || {};
-
       if (input instanceof Request) {
-        return {
-          url: input.url,
-          method: String(init.method || input.method || "GET").toUpperCase()
-        };
+        return { url: input.url, method: String(init.method || input.method || "GET").toUpperCase() };
       }
-
-      return {
-        url: new URL(String(input), window.location.href).href,
-        method: String(init.method || "GET").toUpperCase()
-      };
+      return { url: new URL(String(input), window.location.href).href, method: String(init.method || "GET").toUpperCase() };
     }
 
     async function publishCapture(response, request) {
-      if (!shouldCapture(response)) {
-        return;
-      }
-
+      if (!shouldCapture(response)) return;
       emitDiagnostic("capture_candidate");
       emitDiagnostic("body_read_started");
 
@@ -177,53 +138,36 @@
 
       let sequence = 0;
       let byteLength = 0;
-
+      let captureStarted = false;
       try {
-        await postWithAck({
-          source: SOURCE,
-          kind: "capture_start",
-          metadata
-        }, [], "start");
-
+        await postWithAck({ source: SOURCE, kind: "capture_start", metadata }, [], "start");
+        captureStarted = true;
         while (true) {
           const { value, done } = await reader.read();
-          if (done) {
-            break;
-          }
-          if (!value || value.byteLength === 0) {
-            continue;
-          }
-
+          if (done) break;
+          if (!value || value.byteLength === 0) continue;
           for (let offset = 0; offset < value.byteLength; offset += STREAM_CHUNK_BYTES) {
             const sourceChunk = value.subarray(offset, Math.min(offset + STREAM_CHUNK_BYTES, value.byteLength));
             const chunk = new Uint8Array(sourceChunk.byteLength);
             chunk.set(sourceChunk);
             byteLength += chunk.byteLength;
-
-            await postWithAck({
-              source: SOURCE,
-              kind: "capture_chunk",
-              captureId,
-              sequence,
-              body: chunk.buffer
-            }, [chunk.buffer], "chunk", sequence);
+            await postWithAck({ source: SOURCE, kind: "capture_chunk", captureId, sequence, body: chunk.buffer }, [chunk.buffer], "chunk", sequence);
             sequence += 1;
           }
         }
-
-        await postWithAck({
-          source: SOURCE,
-          kind: "capture_end",
-          captureId,
-          byteLength
-        }, [], "end");
+        await postWithAck({ source: SOURCE, kind: "capture_end", captureId, byteLength }, [], "end");
+        captureStarted = false;
       } catch (error) {
         emitDiagnostic("body_read_failed");
-        try {
-          await reader.cancel(error);
-        } catch (_) {
-          // The cloned stream may already be closed after a forwarding failure.
+        if (captureStarted) {
+          try {
+            await postWithAck({ source: SOURCE, kind: "capture_abort", captureId }, [], "abort");
+            captureStarted = false;
+          } catch (_) {
+            // Native messaging may already be unavailable; Android store close is the fallback release path.
+          }
         }
+        try { await reader.cancel(error); } catch (_) {}
         throw error;
       }
 
@@ -233,14 +177,9 @@
 
     window.fetch = async function bkeDnaFetch(...args) {
       emitDiagnostic("fetch_seen");
-
       const request = resolveRequest(args);
       const response = await originalFetch(...args);
-
-      publishCapture(response, request).catch(error => {
-        console.debug("[BKE DNA] capture skipped", error);
-      });
-
+      publishCapture(response, request).catch(error => console.debug("[BKE DNA] capture skipped", error));
       return response;
     };
 
