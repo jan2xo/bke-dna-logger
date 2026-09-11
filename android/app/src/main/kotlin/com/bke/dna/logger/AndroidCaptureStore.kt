@@ -233,6 +233,8 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
         private const val PRIORITY_CONVERSATIONS_LIST = 50
         private const val PRIORITY_BACKEND_API = 10
         private const val PRIORITY_DEFAULT = 0
+        private const val CONVERSATION_PATH_PREFIX = "/backend-api/conversation/"
+        private val CONVERSATION_ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{7,127}")
 
         private fun classifyCaptureRoute(requestUrl: String?): String {
             if (requestUrl.isNullOrBlank()) return ROUTE_OTHER
@@ -247,12 +249,17 @@ class AndroidCaptureStore(context: Context) : AutoCloseable {
             return when {
                 path == "/backend-api/conversations" ||
                     path.startsWith("/backend-api/conversations/") -> ROUTE_CONVERSATIONS_LIST
-                path == "/backend-api/conversation" ||
-                    path.startsWith("/backend-api/conversation/") -> ROUTE_CONVERSATION
+                isCanonicalConversationPath(path) -> ROUTE_CONVERSATION
                 path.startsWith("/backend-api/") -> ROUTE_BACKEND_API
                 path.startsWith("/public-api/") -> ROUTE_PUBLIC_API
                 else -> ROUTE_OTHER
             }
+        }
+
+        private fun isCanonicalConversationPath(path: String): Boolean {
+            if (!path.startsWith(CONVERSATION_PATH_PREFIX)) return false
+            val conversationId = path.removePrefix(CONVERSATION_PATH_PREFIX)
+            return '/' !in conversationId && CONVERSATION_ID.matches(conversationId)
         }
 
         private fun priorityForCaptureRoute(route: String): Int = when (route) {
