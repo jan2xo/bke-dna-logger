@@ -39,7 +39,7 @@ for token in (
 
 # Native ingress still fsyncs exact bytes before ACK, but completed sources now
 # promote only to durable staging. Permanent RAW ownership moves to SQLite in
-# the background-priority browser-quiet queue, not on the Gecko capture path.
+# the background-priority derivation queue, not on the Gecko capture path.
 for token in (
     'MessageDigest.getInstance("SHA-256")',
     "output.fd.sync()",
@@ -60,6 +60,9 @@ assert 'File(root, "bodies")' not in store
 assert "DERIVATION_EXECUTOR" not in store
 assert store.index("index.record(") < store.index("AndroidDerivationScheduler.enqueue(")
 
+# Capture remains the hard priority gate, while foreground browsing only throttles
+# derivation. The old browser-quiet gate is forbidden because continuous user
+# interaction could otherwise starve CLASSIFYING/NORMALIZING indefinitely.
 for token in (
     "CREATE TABLE IF NOT EXISTS derivation_queue",
     "recoverInterrupted()",
@@ -68,13 +71,20 @@ for token in (
     "rawStore.importVerified(",
     "Executors.newSingleThreadExecutor",
     "Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)",
-    "waitForBrowserQuiet()",
-    "BROWSER_QUIET_MS = 3_000L",
-    "SLOW(500L)",
-    "BALANCED(150L)",
-    "FAST(25L)",
+    "waitForCaptureIdle()",
+    "browserForeground.get()",
+    "profile.browserRestMillis",
+    "profile.restMillis",
+    "SLOW(500L, 1_500L)",
+    "BALANCED(150L, 750L)",
+    "FAST(25L, 300L)",
 ):
     assert token in queue, token
+for forbidden in (
+    "waitForBrowserQuiet()",
+    "BROWSER_QUIET_MS",
+):
+    assert forbidden not in queue, forbidden
 assert queue.index("rawStore.importVerified(") < queue.index("stagedRaw.delete()")
 
 for token in (
@@ -125,4 +135,4 @@ for token in (
 for forbidden in ("Authorization", "Cookie", "requestHeaders", "responseHeaders"):
     assert forbidden not in bridge, forbidden
 
-print("android streamed native ingress/browser-first SQLite RAW queue smoke PASS")
+print("android streamed native ingress/browser-first SQLite RAW nonstarving queue smoke PASS")
