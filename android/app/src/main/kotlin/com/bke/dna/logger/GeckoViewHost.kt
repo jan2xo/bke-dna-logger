@@ -42,6 +42,8 @@ class GeckoViewHost(
         private const val ROUTE_BACKEND_API = "capture_route_backend_api"
         private const val ROUTE_PUBLIC_API = "capture_route_public_api"
         private const val ROUTE_OTHER = "capture_route_other"
+        private const val CONVERSATION_PATH_PREFIX = "/backend-api/conversation/"
+        private val CONVERSATION_ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{7,127}")
 
         private val DIAGNOSTIC_EVENTS = setOf(
             "interceptor_ready",
@@ -71,6 +73,14 @@ class GeckoViewHost(
             "page_navigation_api",
             "page_popstate",
             "page_hashchange",
+            "hydration_requested",
+            "hydration_status_2xx",
+            "hydration_status_3xx",
+            "hydration_status_4xx",
+            "hydration_status_5xx",
+            "hydration_status_other",
+            "hydration_publish_started",
+            "hydration_failed",
         )
         private val DIAGNOSTIC_KEYS = setOf("type", "event")
 
@@ -87,12 +97,17 @@ class GeckoViewHost(
             return when {
                 path == "/backend-api/conversations" ||
                     path.startsWith("/backend-api/conversations/") -> ROUTE_CONVERSATIONS_LIST
-                path == "/backend-api/conversation" ||
-                    path.startsWith("/backend-api/conversation/") -> ROUTE_CONVERSATION
+                isCanonicalConversationPath(path) -> ROUTE_CONVERSATION
                 path.startsWith("/backend-api/") -> ROUTE_BACKEND_API
                 path.startsWith("/public-api/") -> ROUTE_PUBLIC_API
                 else -> ROUTE_OTHER
             }
+        }
+
+        private fun isCanonicalConversationPath(path: String): Boolean {
+            if (!path.startsWith(CONVERSATION_PATH_PREFIX)) return false
+            val conversationId = path.removePrefix(CONVERSATION_PATH_PREFIX)
+            return '/' !in conversationId && CONVERSATION_ID.matches(conversationId)
         }
     }
 
