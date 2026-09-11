@@ -92,6 +92,17 @@ class MainActivity : Activity() {
         AndroidDerivationScheduler.noteBrowserActivity()
     }
 
+    override fun onResume() {
+        super.onResume()
+        AndroidDerivationScheduler.setBrowserForeground(true)
+        AndroidDerivationScheduler.noteBrowserActivity()
+    }
+
+    override fun onPause() {
+        AndroidDerivationScheduler.setBrowserForeground(false)
+        super.onPause()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) AndroidDerivationScheduler.noteBrowserActivity()
@@ -156,6 +167,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        AndroidDerivationScheduler.setBrowserForeground(false)
         updatePredictiveBackRegistration(false)
         if (::geckoHost.isInitialized) {
             geckoHost.stop()
