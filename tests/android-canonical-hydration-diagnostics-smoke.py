@@ -35,8 +35,30 @@ for token in (
 ):
     assert token in interceptor, token
 
+# Modern navigation may commit after history instrumentation has already checked
+# window.location. The committed Navigation API event therefore schedules the
+# same bounded canonical hydration series after the destination is active.
+for token in (
+    'function scheduleCurrentConversationHydration(force = false)',
+    'window.navigation.addEventListener("navigatesuccess", () => {',
+    'scheduleCurrentConversationHydration(true);',
+):
+    assert token in interceptor, token
+
+assert interceptor.index('window.navigation.addEventListener("navigate"') < interceptor.index('window.navigation.addEventListener("navigatesuccess"')
+assert interceptor.index('window.navigation.addEventListener("navigatesuccess"') < interceptor.index('scheduleCurrentConversationHydration(true);', interceptor.index('window.navigation.addEventListener("navigatesuccess"'))
+
+# Existing history/popstate/submit coverage remains in place.
+for token in (
+    'history.pushState = function bkeDnaPushState',
+    'history.replaceState = function bkeDnaReplaceState',
+    'window.addEventListener("popstate"',
+    'document.addEventListener("submit"',
+):
+    assert token in interceptor, token
+
 # Do not silently evolve this diagnostic into non-2xx RAW capture or a retry loop.
 assert interceptor.index('emitHydrationStatus(response.status)') < interceptor.index('if (!response.ok) return;')
 assert interceptor.index('if (!response.ok) return;') < interceptor.index('emitDiagnostic("hydration_publish_started")')
 
-print("android canonical hydration diagnostics smoke PASS")
+print("android canonical hydration diagnostics + committed-navigation trigger smoke PASS")
