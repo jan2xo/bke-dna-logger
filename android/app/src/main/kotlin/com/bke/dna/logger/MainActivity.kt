@@ -70,6 +70,46 @@ class MainActivity : Activity() {
             ),
         )
 
+        val startWorkerButton = Button(this).apply {
+            text = "Start Worker Probe"
+            textSize = 12f
+            minHeight = 0
+            minimumHeight = 0
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(18, 8, 18, 8)
+            setOnClickListener {
+                AndroidGeckoWorkerService.ensureRunning(this@MainActivity)
+            }
+        }
+        root.addView(
+            startWorkerButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+
+        val stopWorkerButton = Button(this).apply {
+            text = "Stop Worker Probe"
+            textSize = 12f
+            minHeight = 0
+            minimumHeight = 0
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(18, 8, 18, 8)
+            setOnClickListener {
+                AndroidGeckoWorkerService.stop(this@MainActivity)
+            }
+        }
+        root.addView(
+            stopWorkerButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+
         geckoView = GeckoView(this)
         root.addView(
             geckoView,
