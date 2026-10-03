@@ -26,6 +26,15 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Local processing of queued, durable conversation DNA while the screen is off" />
         </service>
+        <service
+            android:name=".AndroidGeckoWorkerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Experimental service-owned GeckoSession for a user-started BKE Worker browser probe" />
+        </service>
         <activity
             android:name=".AndroidConversationReaderActivity"
             android:exported="false" />
