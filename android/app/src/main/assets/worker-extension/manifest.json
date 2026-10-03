@@ -1,0 +1,26 @@
+{
+  "manifest_version": 2,
+  "name": "BKE Worker Android Probe",
+  "version": "0.0.1",
+  "description": "Probe-only ChatGPT browser state bridge for the BKE Android Gecko Worker experiment.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "bke-worker-android-probe@jl-bke.com"
+    }
+  },
+  "permissions": [
+    "nativeMessaging",
+    "nativeMessagingFromContent",
+    "geckoViewAddons"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["worker-probe.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
