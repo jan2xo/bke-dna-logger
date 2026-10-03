@@ -211,6 +211,11 @@ class AndroidGeckoWorkerService : Service() {
         manager.createNotificationChannel(channel)
     }
 
+    private fun updateNotification(state: String) {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(NOTIFICATION_ID, buildNotification(state))
+    }
+
     private fun buildNotification(state: String): Notification {
         val openApp = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
